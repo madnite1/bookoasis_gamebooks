@@ -1,0 +1,301 @@
+<div class="gba-app" id="gbaApp">
+  <!-- 상단 헤더 & 툴바 -->
+  <header class="gba-header">
+    <div class="gba-brand">
+      <div class="gba-logo-icon"><i class="fa-solid fa-gamepad"></i></div>
+      <div class="gba-brand-text">
+        <h1 class="gba-title">Game Books</h1>
+        <div class="gba-subtitle-wrap">
+          <span class="gba-subtitle" id="gbaGameCount">0개의 게임</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="gba-toolbar">
+      <!-- 검색창 -->
+      <div class="gba-search-box">
+        <i class="fa-solid fa-magnifying-glass gba-search-icon"></i>
+        <input type="text" id="gbaSearchInput" class="gba-input" placeholder="게임 이름, 코드 검색..." autocomplete="off">
+        <button id="gbaSearchClear" class="gba-btn-icon gba-clear-btn" title="검색어 지우기" style="display: none;">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <!-- 필터 탭 -->
+      <div class="gba-filter-tabs" id="gbaFilterTabs">
+        <button class="gba-tab-btn active" data-filter="all">전체</button>
+        <button class="gba-tab-btn" data-filter="snes">SFC</button>
+        <button class="gba-tab-btn" data-filter="gba">GBA</button>
+        <button class="gba-tab-btn" data-filter="nes">FC/NES</button>
+        <button class="gba-tab-btn" data-filter="gb">GB/GBC</button>
+        <button class="gba-tab-btn" data-filter="genesis">MD/세가</button>
+        <button class="gba-tab-btn" data-filter="nds">NDS</button>
+        <button class="gba-tab-btn" data-filter="psx">PS1</button>
+        <button class="gba-tab-btn" data-filter="favorite"><i class="fa-solid fa-star"></i> 즐겨찾기</button>
+        <button class="gba-tab-btn" data-filter="recent"><i class="fa-solid fa-clock-rotate-left"></i> 최근 플레이</button>
+      </div>
+
+      <!-- 액션 버튼들 -->
+      <div class="gba-actions">
+        <button id="gbaUploadBtn" class="gba-btn gba-btn-primary" title="새로운 레트로 ROM 파일 업로드">
+          <i class="fa-solid fa-cloud-arrow-up"></i> <span>ROM 업로드</span>
+        </button>
+        <button id="gbaScanBtn" class="gba-btn gba-btn-secondary" title="폴더 스캔 및 새로고침">
+          <i class="fa-solid fa-arrows-rotate"></i>
+        </button>
+        <button id="gbaControlsHelpBtn" class="gba-btn gba-btn-secondary" title="조작키 & 게임패드 컨트롤러 안내">
+          <i class="fa-solid fa-gamepad"></i> <span>조작키</span>
+        </button>
+        <button id="gbaSettingsBtn" class="gba-btn gba-btn-secondary" title="에뮬레이터 및 저장소 설정" style="display: none;">
+          <i class="fa-solid fa-gear"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 메인 컨텐츠 영역 -->
+  <main class="gba-main">
+    <!-- 로딩 스피너 -->
+    <div id="gbaLoading" class="gba-loading-view">
+      <div class="gba-spinner"></div>
+      <p>게임 라이브러리를 불러오는 중...</p>
+    </div>
+
+    <!-- 게임 그리드 뷰 -->
+    <div id="gbaGameGrid" class="gba-grid" style="display: none;"></div>
+
+    <!-- 비어있는 상태 (게임이 없을 때) -->
+    <div id="gbaEmptyState" class="gba-empty-state" style="display: none;">
+      <div class="gba-empty-icon"><i class="fa-solid fa-gamepad"></i></div>
+      <h2>등록된 게임이 없습니다</h2>
+      <p>지원하는 롬 파일(<code>.sfc</code>, <code>.gba</code>, <code>.nes</code>, <code>.zip</code> 등)을 이 화면에 직접 끌어다 놓거나 아래 버튼을 눌러 업로드하세요.</p>
+      <button class="gba-btn gba-btn-primary gba-btn-lg" id="gbaEmptyUploadBtn">
+        <i class="fa-solid fa-plus"></i> 첫 번째 ROM 업로드하기
+      </button>
+    </div>
+  </main>
+
+  <!-- 전체 화면 드래그 & 드롭 오버레이 -->
+  <div id="gbaDropZone" class="gba-dropzone-overlay">
+    <div class="gba-dropzone-content">
+      <i class="fa-solid fa-file-arrow-up gba-drop-icon"></i>
+      <h2>레트로 ROM 파일을 여기에 놓으세요</h2>
+      <p>SFC, GBA, NES, GB, MD, NDS, PS1, Zip 파일 자동 업로드 및 라이브러리 등록</p>
+    </div>
+  </div>
+
+  <!-- 숨겨진 파일 인풋 -->
+  <input type="file" id="gbaFileInput" accept=".gba,.gbc,.gb,.sfc,.smc,.snes,.nes,.nds,.n64,.z64,.md,.gen,.pce,.ws,.zip,.7z" multiple style="display: none;">
+  <input type="file" id="gbaCoverInput" accept=".png,.jpg,.jpeg,.webp" style="display: none;">
+
+  <!-- 업로드 진행률 모달 -->
+  <div id="gbaUploadModal" class="gba-modal" style="display: none;">
+    <div class="gba-modal-box">
+      <div class="gba-modal-header">
+        <h3><i class="fa-solid fa-cloud-arrow-up"></i> 파일 업로드</h3>
+        <button class="gba-modal-close" id="gbaUploadCloseBtn">&times;</button>
+      </div>
+      <div class="gba-modal-body">
+        <div class="gba-upload-status" id="gbaUploadStatus">파일을 업로드하는 중...</div>
+        <div class="gba-progress-bar-wrap">
+          <div class="gba-progress-bar" id="gbaProgressBar" style="width: 0%;"></div>
+        </div>
+        <div class="gba-upload-details" id="gbaUploadDetails">0 / 0 파일 완료</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 설정 모달 -->
+  <div id="gbaSettingsModal" class="gba-modal" style="display: none;">
+    <div class="gba-modal-box">
+      <div class="gba-modal-header">
+        <h3><i class="fa-solid fa-gear"></i> Game Books 설정</h3>
+        <button class="gba-modal-close" id="gbaSettingsCloseBtn">&times;</button>
+      </div>
+      <div class="gba-modal-body">
+        <div class="gba-form-group">
+          <label class="gba-label">클라우드 세이브 자동 동기화</label>
+          <label class="gba-toggle-switch">
+            <input type="checkbox" id="gbaSettingCloudSave" checked>
+            <span class="gba-slider"></span>
+          </label>
+          <small class="gba-help-text">게임 플레이 중 세이브(.sav / .state)를 서버(plugins/data/bookoasis_gamebooks/saves/user_{id}/)에 유저별로 실시간 보관합니다.</small>
+        </div>
+
+        <div class="gba-form-group">
+          <label class="gba-label">세이브 자동 동기화 주기 (초)</label>
+          <input type="number" id="gbaSettingInterval" class="gba-input" min="10" max="600" value="60">
+          <small class="gba-help-text">플레이 중 브라우저 세이브를 서버로 전송하는 간격입니다.</small>
+        </div>
+
+        <div class="gba-form-group">
+          <label class="gba-label">추가 ROM 스캔 경로 (선택)</label>
+          <input type="text" id="gbaSettingExtraPath" class="gba-input" placeholder="/mnt/gds2/DATA/ROMS">
+          <small class="gba-help-text">기본 <code>plugins/data/bookoasis_gamebooks/roms</code> 외에 추가로 읽어올 외부 폴더 경로입니다.</small>
+        </div>
+
+        <div class="gba-storage-info">
+          <h4><i class="fa-solid fa-folder-tree"></i> 영속 저장소 경로 안내 (유저별 격리)</h4>
+          <ul>
+            <li><strong>설정 및 DB:</strong> <code>plugins/data/bookoasis_gamebooks/gba.db</code></li>
+            <li><strong>공유 롬 파일:</strong> <code>plugins/data/bookoasis_gamebooks/roms/</code></li>
+            <li><strong>유저 세이브 파일:</strong> <code>plugins/data/bookoasis_gamebooks/saves/user_{user_id}/</code></li>
+          </ul>
+        </div>
+      </div>
+      <div class="gba-modal-footer">
+        <button class="gba-btn gba-btn-secondary" id="gbaSettingsCancelBtn">취소</button>
+        <button class="gba-btn gba-btn-primary" id="gbaSettingsSaveBtn">설정 저장</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 조작키 및 컨트롤러 안내 모달 -->
+  <div id="gbaControlsModal" class="gba-modal" style="display: none;">
+    <div class="gba-modal-box" style="max-width: 680px;">
+      <div class="gba-modal-header">
+        <h3><i class="fa-solid fa-gamepad"></i> 기종별 조작키 & 컨트롤러 안내</h3>
+        <button class="gba-modal-close" id="gbaControlsCloseBtn">&times;</button>
+      </div>
+      <div class="gba-modal-body">
+        <div class="gba-gamepad-status-card" id="gbaGamepadStatus">
+          <i class="fa-solid fa-gamepad"></i> <span>컨트롤러 연결 대기 중 (패드의 아무 버튼이나 누르세요)</span>
+        </div>
+
+        <!-- 플랫폼별 조작키 탭 -->
+        <div class="gba-controls-sys-tabs" id="gbaControlsSysTabs">
+          <button class="gba-sys-tab active" data-sys="snes">SFC (슈퍼패미컴)</button>
+          <button class="gba-sys-tab" data-sys="gba">GBA</button>
+          <button class="gba-sys-tab" data-sys="nes">FC / NES</button>
+          <button class="gba-sys-tab" data-sys="genesis">MD (메가드라이브)</button>
+          <button class="gba-sys-tab" data-sys="psx">PS1</button>
+          <button class="gba-sys-tab" data-sys="nds">NDS</button>
+        </div>
+
+        <div class="gba-controls-table-wrap" id="gbaControlsTableWrap"></div>
+
+        <!-- 공통 특수 단축키 안내 -->
+        <div class="gba-controls-special-wrap">
+          <h4><i class="fa-solid fa-bolt"></i> 공통 기능 & 자동 세이브 안내</h4>
+          <div class="gba-special-grid">
+            <div><kbd>ESC</kbd> <span>모달 닫기 / 게임 나가기</span></div>
+            <div><kbd>우클릭</kbd> <span>커버 캡처 메뉴</span></div>
+            <div><i class="fa-solid fa-cloud-arrow-up" style="color:var(--gba-success);"></i> <span>플레이 중 및 종료 시 자동 저장 & 즉시 이어하기</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="gba-modal-footer">
+        <button class="gba-btn gba-btn-primary" id="gbaControlsOkBtn">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 에뮬레이터 플레이어 모달 (풀페이지 커스텀 오버레이) -->
+  <div id="gbaPlayerModal" class="gba-player-modal" style="display: none;">
+    <!-- 커스텀 플레이어 탑바 -->
+    <div class="gba-player-bar">
+      <div class="gba-player-info">
+        <div class="gba-player-badge" id="gbaPlayerBadge">GBA</div>
+        <span class="gba-player-title" id="gbaCurrentGameTitle">Game Title</span>
+      </div>
+
+      <!-- 세이브 상태 및 패드 감지 알림 -->
+      <div class="gba-player-center">
+        <div class="gba-save-status" id="gbaSaveStatus">
+          <i class="fa-solid fa-cloud-check"></i> <span>세이브 동기화 준비</span>
+        </div>
+        <div class="gba-gamepad-indicator" id="gbaPlayerPadIndicator" style="display: none;">
+          <i class="fa-solid fa-gamepad"></i> <span>패드 연결됨</span>
+        </div>
+      </div>
+
+      <!-- 커스텀 플레이어 액션 툴바 (EmulatorJS 기본 툴바 대체) -->
+      <div class="gba-player-controls">
+        <button class="gba-player-btn" id="gbaBtnPausePlay" title="일시정지 / 계속하기">
+          <i class="fa-solid fa-pause" id="gbaPausePlayIcon"></i>
+        </button>
+        <button class="gba-player-btn" id="gbaBtnSpeed" title="게임 배속 전환 (1x / 2x / 3x / 4x)">
+          <i class="fa-solid fa-forward"></i> <span id="gbaSpeedText">1x</span>
+        </button>
+        <button class="gba-player-btn" id="gbaBtnMute" title="음소거 토글">
+          <i class="fa-solid fa-volume-high" id="gbaVolumeIcon"></i>
+        </button>
+        <button class="gba-player-btn" id="gbaBtnRestart" title="게임 처음부터 재시작">
+          <i class="fa-solid fa-arrow-rotate-right"></i>
+        </button>
+        <button class="gba-player-btn" id="gbaBtnGraphics" title="화면 셰이더 및 그래픽 설정">
+          <i class="fa-solid fa-palette"></i>
+        </button>
+        <button class="gba-player-btn" id="gbaBtnPlayerControls" title="조작키 안내">
+          <i class="fa-solid fa-gamepad"></i>
+        </button>
+        <button class="gba-player-btn" id="gbaBtnFullscreen" title="전체화면 전환">
+          <i class="fa-solid fa-expand"></i>
+        </button>
+        <button class="gba-player-btn gba-btn-danger" id="gbaBtnExit" title="게임 종료 (ESC)">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- 에뮬레이터 화면 뷰포트 -->
+    <div class="gba-emulator-viewport" id="gbaEmulatorViewport">
+      <div id="gbaEmulatorContainer" class="gba-emulator-container"></div>
+    </div>
+  </div>
+
+  <!-- 그래픽 설정 모달 -->
+  <div id="gbaGraphicsModal" class="gba-modal" style="display: none;">
+    <div class="gba-modal-box">
+      <div class="gba-modal-header">
+        <h3><i class="fa-solid fa-palette"></i> 그래픽 & 화면 설정</h3>
+        <button class="gba-modal-close" id="gbaGraphicsCloseBtn">&times;</button>
+      </div>
+      <div class="gba-modal-body">
+        <div class="gba-form-group">
+          <label class="gba-label">화면 필터 / 셰이더 (Shader)</label>
+          <select id="gbaSettingShader" class="gba-input" style="width: 100%;">
+            <option value="disabled">원본 픽셀 (필터 없음)</option>
+            <option value="2xScaleHQ.glslp">2x HQ 스무딩 (부드러운 업스케일)</option>
+            <option value="4xScaleHQ.glslp">4x HQ 고화질 스무딩</option>
+            <option value="crt-easymode.glslp">CRT 브라운관 (레트로 스캔라인)</option>
+            <option value="crt-geom.glslp">CRT 곡면 모니터 효과</option>
+            <option value="crt-aperture.glslp">아케이드 CRT (아퍼처 그릴)</option>
+            <option value="sabr">SABR 스무딩 필터</option>
+            <option value="bicubic">바이큐빅 (Bicubic) 스무딩</option>
+          </select>
+          <small class="gba-help-text">선택 즉시 게임 화면에 실시간으로 반영됩니다.</small>
+        </div>
+
+        <div class="gba-form-group">
+          <label class="gba-label">픽셀 렌더링 모드</label>
+          <select id="gbaSettingPixelMode" class="gba-input" style="width: 100%;">
+            <option value="pixelated">선명한 도트 (Sharp Pixelated)</option>
+            <option value="auto">부드러운 블러 (Smooth Bilinear)</option>
+          </select>
+        </div>
+
+        <div class="gba-form-group">
+          <label class="gba-label">화면 비율 (Aspect Ratio)</label>
+          <select id="gbaSettingAspectRatio" class="gba-input" style="width: 100%;">
+            <option value="3/2">3:2 (GBA 오리지널 픽셀 비율)</option>
+            <option value="4/3">4:3 (클래식 TV 비율)</option>
+            <option value="16/9">16:9 (와이드스크린)</option>
+            <option value="stretch">전체화면 꽉 채우기 (Stretch)</option>
+          </select>
+        </div>
+      </div>
+      <div class="gba-modal-footer">
+        <button class="gba-btn gba-btn-primary" id="gbaGraphicsOkBtn">완료</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 커스텀 캔버스 우클릭 콘텍스트 메뉴 -->
+  <div id="gbaContextMenu" class="gba-context-menu" style="display: none;">
+    <button class="gba-context-item" id="gbaCtxSetCover">
+      <i class="fa-solid fa-camera"></i>
+      <span>현재 화면을 커버 이미지로 설정 (레터박스 자동 제거)</span>
+    </button>
+  </div>
+</div>

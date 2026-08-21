@@ -1,0 +1,79 @@
+name: Auto Release on VERSION bump
+
+# VERSION 파일이 main에 push될 때 자동으로 GitHub Release 생성
+# (태그 = VERSION의 "plugin version" 값, 중복 태그면 스킵)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 이전 릴리즈 태그 조회용 전체 히스토리
+
+      - name: Extract version from VERSION
+        id: version
+        run: |
+          VER="$(jq -r '."plugin version" // .' VERSION 2>/dev/null || cat VERSION | tr -d '\r\n ')"
+          echo "version=${VER}" >> "${GITHUB_OUTPUT}"
+          echo "Detected version: ${VER}"
+
+      - name: Check duplicate tag
+        id: tagcheck
+        run: |
+          TAG="${{ steps.version.outputs.version }}"
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+            echo "Tag ${TAG} already exists — skip release"
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Build release body (이전 버전 대비 변경사항)
+        if: steps.tagcheck.outputs.exists == 'false'
+        run: |
+          NEW_TAG="${{ steps.version.outputs.version }}"
+          PREV_TAG="$(git tag --sort=-version:refname | grep -v "^${NEW_TAG}$" | head -1 || true)"
+          {
+            echo "자동 릴리즈 — VERSION 파일 bump 시 생성됩니다."
+            echo ""
+            echo "버전: \`${NEW_TAG}\`"
+            echo ""
+            if [ -n "${PREV_TAG}" ]; then
+              echo "## 변경사항 (${PREV_TAG} → ${NEW_TAG})"
+              echo ""
+              git log "${PREV_TAG}..HEAD" --oneline --no-merges || true
+            else
+              echo "## 변경사항 (최초 릴리즈)"
+              echo ""
+              git log --oneline --no-merges || true
+            fi
+          } > release_body.md
+
+      - name: Create Release
+        if: steps.tagcheck.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          body_path: release_body.md
+          files: |
+            bookoasis_gamebooks.py
+            __init__.py
+            VERSION
+            LICENSE
+            index.html
+            style.css
+            script.js
+            README.md
+          fail_on_unmatched_files: false
