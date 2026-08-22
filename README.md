@@ -41,10 +41,10 @@
 * **⏸ 일시정지 / ▶ 재생, 🔊 음소거 토글, ⛶ 전체화면** 지원.
 * **❌ 스마트 종료 (`ESC`)**: 열려있는 최상위 서브 모달부터 1개씩 순차 종료되며, 최종 종료 시 WebAudio 및 WASM 사운드를 완벽 차단합니다.
 
-### 2. 📸 스마트 스크린샷 캡처 & 블랙바(레터박스) 자동 크롭
+### 2. 📸 스마트 스크린샷 캡처, 블랙바 크롭 & Libretro 온라인 아트워크 검색
 * **게임 화면 우클릭 메뉴**: 에뮬레이터 플레이 화면 어디서든 마우스 우클릭 시 `📸 현재 화면을 커버 이미지로 설정` 메뉴가 팝업됩니다.
-* **3D 코어 타임아웃 레이싱**: N64/WebGL 등 무거운 3D 코어에서도 500ms 타임아웃 레이싱 및 다중 캔버스 폴백으로 먹통 없이 즉시 캡처됩니다.
 * **지능형 블랙바 크롭 (`cropLetterboxFromBlob`)**: 캡처된 스크린샷의 상하좌우 검은 여백(레터박스/필러박스)을 픽셀 단위로 자동 감지 및 잘라내어 **완벽한 순수 인게임 비율의 고화질 커버**를 자동 생성합니다.
+* **🌐 Libretro 온라인 아트워크 실시간 검색**: 게임 목록의 `[커버 변경]` 버튼을 통해 Libretro 오픈소스 데이터베이스에서 고화질 정품 패키지 박스아트를 1클릭으로 검색 및 즉시 다운로드하여 커버로 적용할 수 있습니다.
 
 ### 3. 👥 유저별 완벽한 데이터 격리 (`plugins/data/bookoasis_gamebooks/`)
 * **공유 롬(ROMs) & 바이오스(BIOS)**: 서버의 `roms/` 및 `bios/` 폴더에 단 한 번만 업로드하면 모든 유저가 함께 플레이할 수 있습니다.
@@ -63,25 +63,26 @@
 
 ---
 
-## 🎮 기본 조작키 및 컨트롤러 가이드
+## 🎮 기종별 조작키 및 컨트롤러 가이드 (12개 기종 지원)
 
-웹 표준 Gamepad API를 완벽 지원하여 **Xbox 컨트롤러, DualSense/DualShock(PlayStation), 닌텐도 스위치 프로콘, 8BitDo 등** 모든 게임패드를 PC/모바일/태블릿에 연결하여 즉시 플레이할 수 있습니다.
+웹 표준 Gamepad API를 완벽 지원하여 **Xbox 컨트롤러, DualSense/DualShock(PlayStation), 닌텐도 스위치 프로콘, 8BitDo 등** 모든 게임패드를 PC/모바일/태블릿에 연결하여 즉시 플레이할 수 있습니다. 게임 실행 시 해당 기종의 조작키 탭이 자동으로 열립니다.
 
-### 대표 기종별 기본 키 매핑
+### 🕹️ 기종별 대표 키 매핑 안내
 
-| 패드 버튼 / 콘솔 기능 | 키보드 키 | 게임패드 (Xbox / PS / Switch) |
-| :--- | :--- | :--- |
-| **방향키 (D-Pad)** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | 십자키 / 왼쪽 아날로그 스틱 |
-| **A / 동그라미 버튼** | <kbd>X</kbd> | <kbd>A</kbd> (Xbox) / <kbd>✕</kbd> (PS) / <kbd>B</kbd> (Switch) |
-| **B / 엑스 버튼** | <kbd>Z</kbd> | <kbd>B</kbd> (Xbox) / <kbd>○</kbd> (PS) / <kbd>A</kbd> (Switch) |
-| **X / 세모 버튼** | <kbd>S</kbd> | <kbd>X</kbd> (Xbox) / <kbd>□</kbd> (PS) / <kbd>Y</kbd> (Switch) |
-| **Y / 네모 버튼** | <kbd>A</kbd> | <kbd>Y</kbd> (Xbox) / <kbd>△</kbd> (PS) / <kbd>X</kbd> (Switch) |
-| **L 트리거 / 범퍼** | <kbd>Q</kbd> | <kbd>LB</kbd> / <kbd>L1</kbd> / <kbd>L</kbd> |
-| **R 트리거 / 범퍼** | <kbd>W</kbd> | <kbd>RB</kbd> / <kbd>R1</kbd> / <kbd>R</kbd> |
-| **START** | <kbd>Enter</kbd> | <kbd>Start</kbd> / <kbd>Options</kbd> / <kbd>+</kbd> |
-| **SELECT** | <kbd>Shift</kbd> | <kbd>Back</kbd> / <kbd>Share</kbd> / <kbd>-</kbd> |
-| **커버 이미지 캡처** | **마우스 우클릭** | 화면 우클릭 ➔ `📸 현재 화면을 커버 이미지로 설정` |
-| **모달 닫기 / 게임 종료** | <kbd>ESC</kbd> | 상위 모달 순차 닫기 / 화면 상단 [나가기] 버튼 |
+| 기종 / 시스템 | 방향키 / 이동 | 주요 액션 버튼 (A / B / X / Y 등) | 트리거 / 범퍼 (L / R) | START / SELECT / COIN |
+| :--- | :--- | :--- | :--- | :--- |
+| **SFC / SNES** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | A:<kbd>X</kbd>, B:<kbd>Z</kbd>, X:<kbd>S</kbd>, Y:<kbd>A</kbd> | L:<kbd>Q</kbd>, R:<kbd>W</kbd> | Start:<kbd>Enter</kbd>, Select:<kbd>Shift</kbd> |
+| **GBA** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | A:<kbd>X</kbd>, B:<kbd>Z</kbd> | L:<kbd>Q</kbd>, R:<kbd>W</kbd> | Start:<kbd>Enter</kbd>, Select:<kbd>Shift</kbd> |
+| **FC / NES / GB** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | A:<kbd>X</kbd>, B:<kbd>Z</kbd> (터보:<kbd>S</kbd>/<kbd>A</kbd>) | - | Start:<kbd>Enter</kbd>, Select:<kbd>Shift</kbd> |
+| **N64** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | A:<kbd>X</kbd>, B:<kbd>Z</kbd>, C버튼:<kbd>I</kbd><kbd>K</kbd><kbd>J</kbd><kbd>L</kbd> | Z트리거:<kbd>Q</kbd>, L:<kbd>A</kbd>, R:<kbd>S</kbd> | Start:<kbd>Enter</kbd> |
+| **MD / Genesis** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | A:<kbd>A</kbd>, B:<kbd>Z</kbd>, C:<kbd>X</kbd>, X/Y/Z:<kbd>Q</kbd><kbd>S</kbd><kbd>W</kbd> | - | Start:<kbd>Enter</kbd> |
+| **Arcade / MAME** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | 1~4버튼:<kbd>Z</kbd><kbd>X</kbd><kbd>A</kbd><kbd>S</kbd>, 5/6버튼:<kbd>Q</kbd><kbd>W</kbd> | 서비스메뉴:<kbd>F2</kbd>/<kbd>Tab</kbd> | COIN:<kbd>Shift</kbd>/<kbd>5</kbd>, 1P:<kbd>Enter</kbd>/<kbd>1</kbd> |
+| **Neo-Geo** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | A:<kbd>Z</kbd>, B:<kbd>X</kbd>, C:<kbd>A</kbd>, D:<kbd>S</kbd> | - | COIN:<kbd>Shift</kbd>, START:<kbd>Enter</kbd> |
+| **PS1** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | ○:<kbd>X</kbd>, ✕:<kbd>Z</kbd>, △:<kbd>S</kbd>, □:<kbd>A</kbd> | L1/R1:<kbd>Q</kbd>/<kbd>W</kbd>, L2/R2:<kbd>E</kbd>/<kbd>R</kbd> | Start:<kbd>Enter</kbd>, Select:<kbd>Shift</kbd> |
+| **PSP** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | ○:<kbd>X</kbd>, ✕:<kbd>Z</kbd>, △:<kbd>S</kbd>, □:<kbd>A</kbd> | L:<kbd>Q</kbd>, R:<kbd>W</kbd> | Start:<kbd>Enter</kbd>, Select:<kbd>Shift</kbd> |
+| **NDS** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | A/B/X/Y:<kbd>X</kbd><kbd>Z</kbd><kbd>S</kbd><kbd>A</kbd> (터치: 마우스) | L:<kbd>Q</kbd>, R:<kbd>W</kbd> | Start:<kbd>Enter</kbd>, Select:<kbd>Shift</kbd> |
+| **Sega Saturn** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | A/B/C:<kbd>A</kbd><kbd>Z</kbd><kbd>X</kbd>, X/Y/Z:<kbd>Q</kbd><kbd>S</kbd><kbd>W</kbd> | L:<kbd>E</kbd>, R:<kbd>R</kbd> | Start:<kbd>Enter</kbd> |
+| **PC Engine** | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | I버튼:<kbd>X</kbd>, II버튼:<kbd>Z</kbd>, III~VI:<kbd>A</kbd><kbd>S</kbd><kbd>Q</kbd><kbd>W</kbd> | - | RUN:<kbd>Enter</kbd>, Select:<kbd>Shift</kbd> |
 
 ---
 
@@ -112,7 +113,7 @@
 │   └── bookoasis_gamebooks/               # [플러그인 소스 코드]
 │       ├── __init__.py                    # 모듈 패키지 진입점
 │       ├── bookoasis_gamebooks.py         # 플러그인 백엔드 (Flask 라우트 & 멀티 코어 감지)
-│       ├── VERSION                        # 버전 정보 (v1.3.0)
+│       ├── VERSION                        # 버전 정보 (v1.3.2)
 │       ├── LICENSE                        # 오픈소스 라이선스 (GNU AGPL-3.0)
 │       ├── index.html                     # UI 레이아웃, 조작키, 설정 & 바이오스 모달
 │       ├── style.css                      # 모던 레트로 다크 테마 & 반응형 스타일
