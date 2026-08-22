@@ -1066,7 +1066,10 @@ def _detect_rom_info(file_path):
                 else:
                     # KNOWN_ARCADE_TITLES에 등록된 게임만 아케이드/네오지오로 인정
                     # 등록되지 않은 zip은 MAME 디바이스/펌웨어/바이오스로 간주하여 무시
-                    stem = os.path.splitext(os.path.basename(file_path))[0].lower()
+                    fname_base = os.path.basename(file_path)
+                    # .temp_upload_ 접두사 및 임시 파일 접두사 정규화
+                    clean_fname = re.sub(r"^\.+(temp_upload_)?", "", fname_base)
+                    stem = os.path.splitext(clean_fname)[0].lower()
                     if stem in KNOWN_ARCADE_TITLES:
                         info["core"] = "arcade"
                         info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
