@@ -1012,7 +1012,24 @@ def _resolve_korean_game_title(filename, raw_title=""):
         if len(eng_key) >= 4 and re.search(r"\b" + re.escape(eng_key) + r"\b", norm_key):
             return kor_title
 
-    return clean or name
+def _is_valid_header_title(text):
+    """내부 바이너리 헤더에서 추출된 텍스트가 유효한 영문/숫자 게임명인지 검증 (깨진 바이너리/특수문자 찌꺼기 폐기)"""
+    if not text or not isinstance(text, str):
+        return False
+    t = text.strip()
+    if len(t) < 3 or t.startswith("???"):
+        return False
+    # 깨진 문자 패턴 (@, %, \, /, <, >, ^, $, [, ], {, } 등이 2개 이상 포함되거나 영숫자 비율이 낮은 경우)
+    bad_chars = sum(1 for c in t if c in "@%\\/<>^$[]{}~`|=#*")
+    if bad_chars >= 2:
+        return False
+    valid_chars = sum(1 for c in t if c.isalnum() or c in " -_':.!,&()")
+    if len(t) > 0 and (valid_chars / len(t)) < 0.8:
+        return False
+    # 연속된 동일 특수문자 (예: @@@@@)
+    if re.search(r"([^a-zA-Z0-9\s])\1{2,}", t):
+        return False
+    return True
 
 
 def _is_bios_file(filename):
@@ -1298,7 +1315,7 @@ def _detect_rom_info(file_path):
                 if len(raw_data) >= offset + 21:
                     candidate = raw_data[offset:offset+21]
                     clean = "".join(chr(b) for b in candidate if 32 <= b <= 126).strip()
-                    if len(clean) >= 4 and not clean.startswith("???"):
+                    if _is_valid_header_title(clean):
                         info["title"] = clean
                         break
     elif info["core"] == "gba":
@@ -1309,7 +1326,7 @@ def _detect_rom_info(file_path):
             game_code = "".join(chr(b) for b in raw_code if 32 <= b <= 126).strip()
             raw_maker = raw_data[0xB0:0xB2]
             maker_code = "".join(chr(b) for b in raw_maker if 32 <= b <= 126).strip()
-            if title: info["title"] = title
+            if _is_valid_header_title(title): info["title"] = title
             if game_code: info["game_code"] = game_code
             if maker_code: info["maker_code"] = maker_code
     elif info["core"] == "n64":
@@ -1330,15 +1347,19 @@ def _detect_rom_info(file_path):
                 n64_title = "".join(chr(c) for c in b if 32 <= c <= 126).strip()
             else:  # .z64 big endian
                 n64_title = "".join(chr(c) for c in raw_title if 32 <= c <= 126).strip()
-            if n64_title:
+            if _is_valid_header_title(n64_title):
                 info["title"] = n64_title
     elif info["core"] == "segaMD":
         if raw_data and len(raw_data) >= 0x150:
             # 0x120:0x150 위치의 일본/해외 공식 게임명
             raw_title = raw_data[0x120:0x150]
             md_title = "".join(chr(b) for b in raw_title if 32 <= b <= 126).strip()
-            if md_title and len(md_title) >= 3:
+            if _is_valid_header_title(md_title):
                 info["title"] = md_title
+
+    # 최종 타이틀이 깨진 문자열이면 제거 (파일명 기반 폴백 보장)
+    if not _is_valid_header_title(info.get("title", "")):
+        info["title"] = ""
 
     return info
 
