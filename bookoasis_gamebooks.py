@@ -997,13 +997,18 @@ def _resolve_korean_game_title(filename, raw_title=""):
     if re.search(r"[가-힣]", clean):
         return clean
 
-    # 4. 내장 한글 매핑 사전(KNOWN_KOREAN_TITLES) 검색
+    # 4. 내장 한글 매핑 사전(KNOWN_KOREAN_TITLES) 검색 (2-Pass 고정밀 매칭)
     norm_key = re.sub(r"[^a-zA-Z0-9\s]", " ", clean).lower()
     norm_key = re.sub(r"\s+", " ", norm_key).strip()
 
-    # (1) 완전/부분 일치 탐색
-    for eng_key, kor_title in KNOWN_KOREAN_TITLES.items():
-        if eng_key == norm_key or eng_key in norm_key:
+    # Pass 1: 완전 일치 (100% 우선순위)
+    if norm_key in KNOWN_KOREAN_TITLES:
+        return KNOWN_KOREAN_TITLES[norm_key]
+
+    # Pass 2: 단어 경계(Word Boundary) 기준 부분 일치 (키 길이 긴 순서로 우선 매칭)
+    sorted_dict = sorted(KNOWN_KOREAN_TITLES.items(), key=lambda x: len(x[0]), reverse=True)
+    for eng_key, kor_title in sorted_dict:
+        if len(eng_key) >= 4 and re.search(r"\b" + re.escape(eng_key) + r"\b", norm_key):
             return kor_title
 
     return clean or name
@@ -1494,11 +1499,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         core TEXT DEFAULT 'gba',
                         platform TEXT DEFAULT 'GBA',
                         size_bytes INTEGER DEFAULT 0,
+                        mtime REAL DEFAULT 0,
                         added_at TEXT,
                         cover_path TEXT
                     )"""
                 )
-                for col, ctype in (("core", "TEXT DEFAULT 'gba'"), ("platform", "TEXT DEFAULT 'GBA'")):
+                for col, ctype in (("core", "TEXT DEFAULT 'gba'"), ("platform", "TEXT DEFAULT 'GBA'"), ("mtime", "REAL DEFAULT 0")):
                     try:
                         conn.execute(f"ALTER TABLE games ADD COLUMN {col} {ctype}")
                     except Exception:
@@ -1685,7 +1691,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         if ext in allowed_exts:
                             full_p = os.path.join(root, f)
                             try:
-                                sz = os.path.getsize(full_p)
+                                stat = os.stat(full_p)
+                                sz = stat.st_size
+                                mt = stat.st_mtime
                                 rel = os.path.relpath(full_p, sdir)
                                 gid = _sanitize_id(f"{os.path.basename(sdir)}_{rel}")
                                 found_files[gid] = {
@@ -1693,6 +1701,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                     "filename": f,
                                     "file_path": full_p,
                                     "size_bytes": sz,
+                                    "mtime": mt,
                                 }
                             except Exception:
                                 pass
@@ -1702,60 +1711,125 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         existing_games = {g["id"]: g for g in self._db_query("SELECT * FROM games")}
         now_str = _get_kst_now_str()
 
+        # 병렬 분석이 필요한 파일 목록 선별
+        files_to_process = []
+        covers_to_fetch = []
+
         for gid, info in found_files.items():
-            if new_only and gid in existing_games:
-                # new_only 모드일 때 이미 존재하는 게임은 커버 재탐색 없이 파일 경로/크기만 업데이트
-                self._db_execute(
-                    "UPDATE games SET file_path = ?, size_bytes = ? WHERE id = ?",
-                    (info["file_path"], info["size_bytes"], gid),
-                )
-                continue
+            existing = existing_games.get(gid)
+            if existing:
+                # 파일 크기나 수정 시간이 동일한 경우 불필요한 바이너리 재분석 0ms 스킵
+                if abs((existing.get("mtime") or 0) - info["mtime"]) < 1.0 and existing.get("size_bytes") == info["size_bytes"]:
+                    # 커버만 누락된 경우 백그라운드 다운로드 큐에 추가
+                    c_path = existing.get("cover_path")
+                    if not new_only and (not c_path or not os.path.exists(c_path)):
+                        covers_to_fetch.append((
+                            gid,
+                            existing.get("core") or existing.get("platform") or "gba",
+                            info["filename"],
+                            info["file_path"],
+                            existing.get("title") or info["filename"]
+                        ))
+                    continue
 
-            rom_info = _detect_rom_info(info["file_path"])
-            # MAME 디바이스/펌웨어/바이오스 zip은 게임으로 등록하지 않음
-            if rom_info.get("platform") == "_skip_":
-                continue
+            files_to_process.append(info)
 
-            raw_name = _strip_romm_name_prefix(os.path.splitext(info["filename"])[0])
-            header_title = rom_info.get("title") or ""
-            mapped_header = KNOWN_N64_NAMES.get(header_title.upper().replace("_", " ").replace("-", " ").strip()) or KNOWN_N64_NAMES.get(header_title.upper()) or header_title
+        def _process_single_rom(info):
+            try:
+                gid = info["id"]
+                rom_info = _detect_rom_info(info["file_path"])
+                if rom_info.get("platform") == "_skip_":
+                    return None
 
-            # 1단계 한글 타이틀 자동 변환 및 복원 적용
-            clean_title = _resolve_korean_game_title(info["filename"], raw_name)
+                raw_name = _strip_romm_name_prefix(os.path.splitext(info["filename"])[0])
+                header_title = rom_info.get("title") or ""
+                mapped_header = KNOWN_N64_NAMES.get(header_title.upper().replace("_", " ").replace("-", " ").strip()) or KNOWN_N64_NAMES.get(header_title.upper()) or header_title
+                clean_title = _resolve_korean_game_title(info["filename"], raw_name)
 
-            if gid not in existing_games:
-                self._db_execute(
-                    """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, added_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
+                return {
+                    "gid": gid,
+                    "info": info,
+                    "rom_info": rom_info,
+                    "clean_title": clean_title,
+                    "mapped_header": mapped_header,
+                }
+            except Exception as ex:
+                logger.debug(f"[{SELF_ID}] Process single rom error ({info.get('filename')}): {ex}")
+                return None
+
+        # ThreadPoolExecutor를 이용한 멀티스레드 병렬 바이너리 분석
+        if files_to_process:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(_process_single_rom, files_to_process))
+
+            for res in results:
+                if not res:
+                    continue
+                gid = res["gid"]
+                info = res["info"]
+                rom_info = res["rom_info"]
+                clean_title = res["clean_title"]
+                mapped_header = res["mapped_header"]
+
+                if gid not in existing_games:
+                    self._db_execute(
+                        """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            gid,
+                            info["filename"],
+                            info["file_path"],
+                            clean_title,
+                            rom_info["game_code"],
+                            rom_info["maker_code"],
+                            rom_info["core"],
+                            rom_info["platform"],
+                            info["size_bytes"],
+                            info["mtime"],
+                            now_str,
+                        ),
+                    )
+                    covers_to_fetch.append((
                         gid,
+                        rom_info.get("core") or rom_info.get("platform"),
                         info["filename"],
                         info["file_path"],
-                        clean_title,
-                        rom_info["game_code"],
-                        rom_info["maker_code"],
-                        rom_info["core"],
-                        rom_info["platform"],
-                        info["size_bytes"],
-                        now_str,
-                    ),
-                )
-                # 신규 등록 게임에 대해 커버 아트 자동 탐색 (Libretro -> ScreenScraper -> IGDB)
-                self._auto_fetch_and_save_cover(gid, rom_info.get("core") or rom_info.get("platform"), info["filename"], file_path=info["file_path"], raw_title=mapped_header or clean_title)
-            else:
-                self._db_execute(
-                    "UPDATE games SET file_path = ?, size_bytes = ?, core = ?, platform = ?, title = ? WHERE id = ?",
-                    (info["file_path"], info["size_bytes"], rom_info["core"], rom_info["platform"], clean_title, gid),
-                )
-                # 기존 게임 중 커버가 없는 경우 자동 탐색
-                existing_entry = existing_games.get(gid)
-                if not existing_entry or not existing_entry.get("cover_path") or not os.path.exists(existing_entry["cover_path"]):
-                    self._auto_fetch_and_save_cover(gid, rom_info.get("core") or rom_info.get("platform"), info["filename"], file_path=info["file_path"], raw_title=mapped_header or clean_title)
+                        mapped_header or clean_title
+                    ))
+                else:
+                    self._db_execute(
+                        "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ? WHERE id = ?",
+                        (info["file_path"], info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, gid),
+                    )
+                    existing_entry = existing_games.get(gid)
+                    if not new_only and (not existing_entry or not existing_entry.get("cover_path") or not os.path.exists(existing_entry["cover_path"])):
+                        covers_to_fetch.append((
+                            gid,
+                            rom_info.get("core") or rom_info.get("platform"),
+                            info["filename"],
+                            info["file_path"],
+                            mapped_header or clean_title
+                        ))
 
+        # 삭제된 게임 정리
         for gid in existing_games:
             if gid not in found_files:
                 self._db_execute("DELETE FROM games WHERE id = ?", (gid,))
                 self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (gid,))
+
+        # 누락된 커버 이미지를 비동기 백그라운드 스레드에서 다운로드
+        if covers_to_fetch:
+            def _async_cover_worker(fetch_list):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as cover_exec:
+                    def _fetch_one(item):
+                        g_id, core_p, fname, fpath, raw_t = item
+                        try:
+                            self._auto_fetch_and_save_cover(g_id, core_p, fname, file_path=fpath, raw_title=raw_t)
+                        except Exception:
+                            pass
+                    list(cover_exec.map(_fetch_one, fetch_list))
+
+            threading.Thread(target=_async_cover_worker, args=(covers_to_fetch,), daemon=True).start()
 
         return True
 
