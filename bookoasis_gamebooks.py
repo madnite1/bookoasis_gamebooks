@@ -795,6 +795,219 @@ KNOWN_N64_NAMES = {
     "64": "Super Robot Taisen 64",
 }
 
+# ----------------------------------------------------------------------
+# 콘솔/레트로 게임 대표 한글명 내장 오프라인 매핑 사전 (1단계)
+# ----------------------------------------------------------------------
+KNOWN_KOREAN_TITLES = {
+    # 젤다의 전설 시리즈
+    "kamigami no triforce": "젤다의 전설: 신들의 트라이포스",
+    "link to the past": "젤다의 전설: 신들의 트라이포스",
+    "ocarina of time": "젤다의 전설: 시간의 오카리나",
+    "majora": "젤다의 전설: 무쥬라의 가면",
+    "minish cap": "젤다의 전설: 이상한 모자",
+    "link's awakening": "젤다의 전설: 꿈꾸는 섬",
+    "links awakening": "젤다의 전설: 꿈꾸는 섬",
+    "oracle of ages": "젤다의 전설: 시공의 장",
+    "oracle of seasons": "젤다의 전설: 대지의 장",
+    "legend of zelda": "젤다의 전설",
+    "zelda 2": "젤다 2: 링크의 모험",
+    "zelda": "젤다의 전설",
+
+    # 마리오 & 동키콩 시리즈
+    "super mario world 2": "슈퍼 마리오 월드 2: 요시 아일랜드",
+    "yoshi's island": "슈퍼 마리오: 요시 아일랜드",
+    "yoshis island": "슈퍼 마리오: 요시 아일랜드",
+    "yoshi island": "슈퍼 마리오: 요시 아일랜드",
+    "super mario world": "슈퍼 마리오 월드",
+    "super mario kart": "슈퍼 마리오 카트",
+    "mario kart 64": "마리오 카트 64",
+    "super mario 64": "슈퍼 마리오 64",
+    "super mario all stars": "슈퍼 마리오 올스타즈",
+    "super mario rpg": "슈퍼 마리오 RPG",
+    "mario rpg": "슈퍼 마리오 RPG",
+    "super mario bros 3": "슈퍼 마리오 브라더스 3",
+    "super mario bros 2": "슈퍼 마리오 브라더스 2",
+    "super mario bros": "슈퍼 마리오 브라더스",
+    "mario bros": "마리오 브라더스",
+    "dr mario": "닥터 마리오",
+    "paper mario": "페이퍼 마리오",
+    "super donkey kong 3": "동키콩 컨트리 3 (슈퍼 동키콩 3)",
+    "super donkey kong 2": "동키콩 컨트리 2 (슈퍼 동키콩 2)",
+    "super donkey kong": "동키콩 컨트리 (슈퍼 동키콩)",
+    "donkey kong country": "동키콩 컨트리",
+    "donkey kong": "동키콩",
+
+    # 소닉 / 베어너클 / 세가 메가드라이브
+    "sonic3&k": "소닉 3 & 너클즈",
+    "sonic & knuckles": "소닉 & 너클즈",
+    "sonic 3": "소닉 더 헤지혹 3",
+    "sonic the hedgehog 3": "소닉 더 헤지혹 3",
+    "sonic the hedgehog 2": "소닉 더 헤지혹 2",
+    "sonic the hedgehog": "소닉 더 헤지혹",
+    "bare knuckle 3": "베어 너클 3",
+    "bare knuckle 2": "베어 너클 2",
+    "bare knuckle": "베어 너클",
+    "streets of rage 3": "베어 너클 3 (Streets of Rage 3)",
+    "streets of rage 2": "베어 너클 2 (Streets of Rage 2)",
+    "streets of rage": "베어 너클 (Streets of Rage)",
+    "shining force ii": "샤이닝 포스 2",
+    "shining force": "샤이닝 포스",
+    "shining and the darkness": "샤이닝 앤 더 다크니스",
+    "golden axe 3": "골든 액스 3",
+    "golden axe 2": "골든 액스 2",
+    "golden axe": "골든 액스 (Golden Axe)",
+    "super fantasy zone": "슈퍼 판타지 존",
+    "twinkle tale": "트윙클 테일",
+    "valis iii": "바리스 3 (Valis III)",
+    "valis sd": "SD 바리스 (Valis SD)",
+    "vixen 357": "빅센 357 (Vixen 357)",
+    "rent a hero": "렌트 어 히어로 (Rent A Hero)",
+    "gunstar heroes": "건스타 히어로즈",
+    "yuu yuu hakusho": "유유백서 마계통일편",
+    "yu yu hakusho": "유유백서 마계통일편",
+
+    # 록맨 / 메가맨 시리즈
+    "rockman x3": "록맨 X3",
+    "rockman x2": "록맨 X2",
+    "rockman x": "록맨 X",
+    "rockman 7": "록맨 7: 숙명의 대결!",
+    "rockman 6": "록맨 6",
+    "rockman 5": "록맨 5",
+    "rockman 4": "록맨 4",
+    "rockman 3": "록맨 3",
+    "rockman 2": "록맨 2",
+    "rockman": "록맨 (Mega Man)",
+    "mega man x3": "록맨 X3 (Mega Man X3)",
+    "mega man x2": "록맨 X2 (Mega Man X2)",
+    "mega man x": "록맨 X (Mega Man X)",
+    "mega man": "록맨 (Mega Man)",
+
+    # 악마성 드라큘라 / 캐슬바니아 시리즈
+    "akumajou dracula xx": "악마성 드라큘라 XX",
+    "akumajou dracula": "악마성 드라큘라",
+    "castlevania symphony of the night": "악마성 드라큘라 X: 월하의 야상곡",
+    "symphony of the night": "악마성 드라큘라 X: 월하의 야상곡",
+    "aria of sorrow": "악마성 드라큘라: 효월의 원무곡",
+    "circle of the moon": "악마성 드라큘라: 서클 오브 더 문",
+    "harmony of dissonance": "악마성 드라큘라: 백야의 협주곡",
+    "rondo of blood": "악마성 드라큘라 X: 피의 윤회",
+    "castlevania": "악마성 드라큘라 (Castlevania)",
+
+    # 파이널 판타지 / 드래곤 퀘스트 / 스퀘어 & 에닉스 RPG
+    "final fantasy 7": "파이널 판타지 7",
+    "final fantasy 6": "파이널 판타지 6",
+    "final fantasy 5": "파이널 판타지 5",
+    "final fantasy 4": "파이널 판타지 4",
+    "final fantasy 3": "파이널 판타지 3",
+    "final fantasy 2": "파이널 판타지 2",
+    "final fantasy 1": "파이널 판타지 1",
+    "final fantasy": "파이널 판타지",
+    "chrono trigger": "크로노 트리거",
+    "chrono cross": "크로노 크로스",
+    "seiken densetsu 3": "성검전설 3",
+    "seiken densetsu 2": "성검전설 2",
+    "seiken densetsu": "성검전설",
+    "secret of mana": "성검전설 2",
+    "trials of mana": "성검전설 3",
+    "bahamut lagoon": "바하무트 라군",
+    "live a live": "라이브 어 라이브",
+    "front mission": "프론트 미션",
+    "tactics ogre": "택틱스 오우거",
+    "ogre battle 64": "오우거 배틀 64",
+    "ogre battle": "전설의 오우거 배틀",
+    "dragon quest 6": "드래곤 퀘스트 6",
+    "dragon quest 5": "드래곤 퀘스트 5",
+    "dragon quest 4": "드래곤 퀘스트 4",
+    "dragon quest 3": "드래곤 퀘스트 3",
+    "dragon quest 2": "드래곤 퀘스트 2",
+    "dragon quest 1": "드래곤 퀘스트 1",
+    "dragon quest": "드래곤 퀘스트",
+    "tales of phantasia": "테일즈 오브 판타지아",
+    "star ocean": "스타 오션",
+    "valkyrie profile": "발키리 프로파일",
+    "xenogears": "제노기어스",
+    "alcahest": "알카헤스트 (Alcahest)",
+    "assault suits valken": "중장기병 발켄 (Assault Suits Valken)",
+    "harvest moon": "목장이야기 (Harvest Moon)",
+    "breath of fire 2": "브레스 오브 파이어 2",
+    "breath of fire": "브레스 오브 파이어",
+    "ys 3": "이스 3: 원더러스 프롬 이스",
+    "ys 4": "이스 4: 태양의 가면",
+    "ys 5": "이스 5: 잃어버린 모래도시 케핀",
+    "ys": "이스 (Ys)",
+
+    # 바이오하자드 / 캡콤 / 액션
+    "resident evil 3": "바이오하자드 3: 라스트 이스케이프",
+    "resident evil 2": "바이오하자드 2",
+    "resident evil": "바이오하자드 1 (Resident Evil)",
+    "biohazard 3": "바이오하자드 3",
+    "biohazard 2": "바이오하자드 2",
+    "biohazard": "바이오하자드",
+    "dino crisis 2": "디노 크라이시스 2",
+    "dino crisis": "디노 크라이시스",
+    "vagrant story": "베이그런트 스토리",
+    "parasite eve 2": "패러사이트 이브 2",
+    "parasite eve": "패러사이트 이브",
+    "metal gear solid": "메탈 기어 솔리드",
+    "silent hill": "사일런트 힐",
+    "tekken 3": "철권 3",
+    "tekken 2": "철권 2",
+    "tekken": "철권",
+    "final fight 3": "파이널 파이트 터프 (Final Fight 3)",
+    "final fight 2": "파이널 파이트 2",
+    "final fight": "파이널 파이트",
+    "contra 3": "콘트라 스피리츠 (Contra III)",
+    "contra": "콘트라 (Contra)",
+    "super contra": "슈퍼 콘트라",
+    "metalslugadvance": "메탈슬러그 어드밴스드",
+    "gyakuten": "역전재판",
+    "starfox64": "스타폭스 64",
+    "starcraft64": "스타크래프트 64",
+    "evangelion": "신세기 에반게리온",
+    "shiren2": "풍래의 시렌 2",
+    "tsumitobatsu": "죄와 벌: 지구의 계승자",
+    "conker": "컨커의 최악의 날 (Conker's Bad Fur Day)",
+}
+
+def _resolve_korean_game_title(filename, raw_title=""):
+    """깨진 EUC-KR 인코딩 자동 복원 및 내장 한글 사전 기반의 정확한 한글 타이틀 매핑"""
+    name = str(raw_title or filename or "").strip()
+
+    # 1. 파일명/타이틀 내 깨진 EUC-KR(CP949) 문자열 자동 복원
+    try:
+        if re.search(r"[°±²³´µ¶·¸¹º»¼½¾¿À-ÿ]", name):
+            decoded = name.encode("latin1", errors="ignore").decode("euc-kr", errors="ignore")
+            if re.search(r"[가-힣]", decoded):
+                name = decoded
+    except Exception:
+        pass
+
+    # 2. 아케이드 롬셋 고유 약칭 매핑
+    stem_lower = os.path.splitext(os.path.basename(filename))[0].lower()
+    if stem_lower in KNOWN_ARCADE_TITLES:
+        return KNOWN_ARCADE_TITLES[stem_lower]
+
+    # 3. 불용 태그([!], (K), (J), v1.0 등) 및 확장자 제거
+    clean = re.sub(r"[\(\[\{].*?[\)\]\}]", "", name).strip()
+    clean = re.sub(r"\.[a-zA-Z0-9]+$", "", clean).strip()
+    clean = clean.replace("_", " ").replace("-", " ")
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    # 이미 정상 한글이 포함된 경우 정리된 한글명 반환
+    if re.search(r"[가-힣]", clean):
+        return clean
+
+    # 4. 내장 한글 매핑 사전(KNOWN_KOREAN_TITLES) 검색
+    norm_key = re.sub(r"[^a-zA-Z0-9\s]", " ", clean).lower()
+    norm_key = re.sub(r"\s+", " ", norm_key).strip()
+
+    # (1) 완전/부분 일치 탐색
+    for eng_key, kor_title in KNOWN_KOREAN_TITLES.items():
+        if eng_key == norm_key or eng_key in norm_key:
+            return kor_title
+
+    return clean or name
+
 
 def _is_bios_file(filename):
     """주요 에뮬레이터 및 아케이드(MAME/FBNeo) 기판 바이오스 파일 여부 확인"""
@@ -1382,16 +1595,20 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (game_id,))
             return {"exists": False, "deleted": True, "cover_updated": False}
 
-        # 2. 커버 상태 검사 및 누락 시 자동 검색/세팅
+        # 2. 커버 상태 검사 및 누락 시 자동 검색/세팅 + 타이틀 한글화 자동 보정
+        core = game.get("core") or game.get("platform") or ""
+        filename = game.get("filename") or ""
+        raw_title = game.get("title") or ""
+        clean_title = _resolve_korean_game_title(filename, raw_title)
+        if clean_title and clean_title != raw_title:
+            self._db_execute("UPDATE games SET title = ? WHERE id = ?", (clean_title, game_id))
+
         cover_path = game.get("cover_path") or ""
         cover_ok = bool(cover_path and os.path.exists(cover_path))
         cover_updated = False
 
         if not cover_ok:
-            core = game.get("core") or game.get("platform") or ""
-            filename = game.get("filename") or ""
-            raw_title = game.get("title") or ""
-            new_cover = self._auto_fetch_and_save_cover(game_id, core, filename, file_path=file_path, raw_title=raw_title)
+            new_cover = self._auto_fetch_and_save_cover(game_id, core, filename, file_path=file_path, raw_title=clean_title or raw_title)
             if new_cover:
                 cover_updated = True
                 cover_path = new_cover
@@ -1458,57 +1675,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             # MAME 디바이스/펌웨어/바이오스 zip은 게임으로 등록하지 않음
             if rom_info.get("platform") == "_skip_":
                 continue
+
             raw_name = _strip_romm_name_prefix(os.path.splitext(info["filename"])[0])
-            stem = raw_name.lower()
-
-            if stem in KNOWN_ARCADE_TITLES:
-                clean_title = KNOWN_ARCADE_TITLES[stem]
-            else:
-                norm_key = re.sub(r"[^a-zA-Z0-9가-힣]", "", raw_name).lower()
-                if "gyakuten" in norm_key or "역전재판" in norm_key:
-                    clean_title = "역전재판 1"
-                elif "metalslugadvance" in norm_key or "메탈슬러그어드밴스" in norm_key:
-                    clean_title = "메탈슬러그 어드밴스드"
-                elif "chronotrigger" in norm_key or "크로노트리거" in norm_key:
-                    clean_title = "크로노 트리거 (Chrono Trigger)"
-                elif "goldenaxe" in norm_key or "골든액스" in norm_key:
-                    clean_title = "골든 액스 (Golden Axe)"
-                elif "minishcap" in norm_key or "이상한모자" in norm_key:
-                    clean_title = "젤다의 전설: 이상한 모자"
-                elif "mariokart64" in norm_key or "마리오카트64" in norm_key:
-                    clean_title = "마리오 카트 64"
-                elif "supermario64" in norm_key or "슈퍼마리오64" in norm_key:
-                    clean_title = "슈퍼 마리오 64"
-                elif "starfox64" in norm_key or "스타폭스64" in norm_key:
-                    clean_title = "스타폭스 64"
-                elif "papermario" in norm_key or "페이퍼마리오" in norm_key:
-                    clean_title = "페이퍼 마리오"
-                elif "starcraft64" in norm_key or "스타크래프트64" in norm_key:
-                    clean_title = "스타크래프트 64"
-                elif "evangelion" in norm_key or "에반게리온" in norm_key:
-                    clean_title = "신세기 에반게리온"
-                elif "ogrebattle64" in norm_key or "오우거배틀64" in norm_key:
-                    clean_title = "오우거 배틀 64"
-                elif "puyopuyosun64" in norm_key or "뿌요뿌요선64" in norm_key:
-                    clean_title = "뿌요뿌요 선 64"
-                elif "superrobot" in norm_key or "슈퍼로봇대전64" in norm_key:
-                    clean_title = "슈퍼로봇대전 64"
-                elif "shiren2" in norm_key or "풍래의시렌2" in norm_key or "시렌2" in norm_key:
-                    clean_title = "풍래의 시렌 2"
-                elif "mujuramask" in norm_key or "무쥬라의가면" in norm_key:
-                    clean_title = "젤다의 전설: 무쥬라의 가면"
-                elif "ocarinaoftime" in norm_key or "시간의오카리나" in norm_key:
-                    clean_title = "젤다의 전설: 시간의 오카리나"
-                elif "tsumitobatsu" in norm_key or "죄와벌" in norm_key:
-                    clean_title = "죄와 벌: 지구의 계승자"
-                elif "conker" in norm_key or "컨커" in norm_key:
-                    clean_title = "컨커의 최악의 날 (Conker's Bad Fur Day)"
-                else:
-                    no_brackets = re.sub(r"[\(\[\{].*?[\)\]\}]", "", raw_name).strip().replace("_", " ").replace("-", " ")
-                    clean_title = re.sub(r"\s+", " ", no_brackets).strip() or raw_name
-
             header_title = rom_info.get("title") or ""
             mapped_header = KNOWN_N64_NAMES.get(header_title.upper().replace("_", " ").replace("-", " ").strip()) or KNOWN_N64_NAMES.get(header_title.upper()) or header_title
+
+            # 1단계 한글 타이틀 자동 변환 및 복원 적용
+            clean_title = _resolve_korean_game_title(info["filename"], raw_name)
 
             if gid not in existing_games:
                 self._db_execute(
