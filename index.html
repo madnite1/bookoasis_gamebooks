@@ -438,6 +438,30 @@
     </div>
   </div>
 
+  <!-- 아트워크 / 커버 검색 모달 -->
+  <div id="gbaArtworkModal" class="gba-modal" style="display: none;">
+    <div class="gba-modal-box" style="max-width: 720px; width: 95vw;">
+      <div class="gba-modal-header">
+        <h3><i class="fa-solid fa-image"></i> 게임 커버 아트워크 검색 & 변경</h3>
+        <button class="gba-modal-close" id="gbaArtworkCloseBtn">&times;</button>
+      </div>
+      <div class="gba-modal-body">
+        <div style="display: flex; gap: 8px; margin-bottom: 14px;">
+          <input type="text" id="gbaArtworkQuery" class="gba-input" placeholder="게임 제목 검색어 (예: Pokemon FireRed)...">
+          <button type="button" class="gba-btn gba-btn-primary" id="gbaArtworkSearchBtn">검색</button>
+        </div>
+        <div id="gbaArtworkStatus" class="gba-homebrew-status" style="margin-bottom: 12px;">선택할 이미지를 클릭하면 해당 게임의 커버로 즉시 적용됩니다.</div>
+        <div id="gbaArtworkGrid" class="gba-artwork-grid"></div>
+        <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--gba-border); display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-size: 0.8rem; color: var(--gba-text-muted);">원하는 이미지가 없나요?</span>
+          <button type="button" class="gba-btn gba-btn-secondary" id="gbaArtworkDirectUploadBtn">
+            <i class="fa-solid fa-upload"></i> 내 PC에서 직접 이미지 업로드
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- 커스텀 캔버스 우클릭 콘텍스트 메뉴 -->
   <div id="gbaContextMenu" class="gba-context-menu" style="display: none;">
     <button class="gba-context-item" id="gbaCtxSetCover">

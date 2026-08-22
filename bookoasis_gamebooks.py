@@ -122,6 +122,394 @@ def _hh_entry_allowed(entry):
     return _hh_playable_file(entry) is not None
 
 
+# Libretro Thumbnails CDN (https://github.com/libretro-thumbnails/libretro-thumbnails)
+LIBRETRO_CDN_BASE = "https://raw.githubusercontent.com/libretro-thumbnails"
+
+LIBRETRO_SYSTEM_MAP = {
+    "gba": "Nintendo_-_Game_Boy_Advance",
+    "gb": "Nintendo_-_Game_Boy",
+    "gbc": "Nintendo_-_Game_Boy_Color",
+    "snes": "Nintendo_-_Super_Nintendo_Entertainment_System",
+    "nes": "Nintendo_-_Nintendo_Entertainment_System",
+    "fds": "Nintendo_-_Family_Computer_Disk_System",
+    "nds": "Nintendo_-_Nintendo_DS",
+    "n64": "Nintendo_-_Nintendo_64",
+    "vb": "Nintendo_-_Virtual_Boy",
+    "virtualboy": "Nintendo_-_Virtual_Boy",
+    "segamd": "Sega_-_Mega_Drive_-_Genesis",
+    "genesis": "Sega_-_Mega_Drive_-_Genesis",
+    "segams": "Sega_-_Master_System_-_Mark_III",
+    "mastersystem": "Sega_-_Master_System_-_Mark_III",
+    "segagg": "Sega_-_Game_Gear",
+    "gamegear": "Sega_-_Game_Gear",
+    "sega32x": "Sega_-_32X",
+    "segacd": "Sega_-_Mega-CD_-_Sega_CD",
+    "saturn": "Sega_-_Saturn",
+    "segasaturn": "Sega_-_Saturn",
+    "psx": "Sony_-_PlayStation",
+    "ps1": "Sony_-_PlayStation",
+    "psp": "Sony_-_PlayStation_Portable",
+    "pce": "NEC_-_PC_Engine_-_TurboGrafx_16",
+    "pcfx": "NEC_-_PC-FX",
+    "supergrafx": "NEC_-_PC_Engine_SuperGrafx",
+    "ngp": "SNK_-_Neo_Geo_Pocket",
+    "ngpc": "SNK_-_Neo_Geo_Pocket_Color",
+    "neogeo": "SNK_-_Neo_Geo",
+    "neo-geo": "SNK_-_Neo_Geo",
+    "wonderswan": "Bandai_-_WonderSwan",
+    "wsc": "Bandai_-_WonderSwan_Color",
+    "wonderswancolor": "Bandai_-_WonderSwan_Color",
+    "atari2600": "Atari_-_2600",
+    "atari5200": "Atari_-_5200",
+    "atari7800": "Atari_-_7800",
+    "lynx": "Atari_-_Lynx",
+    "jaguar": "Atari_-_Jaguar",
+    "coleco": "Coleco_-_ColecoVision",
+    "amiga": "Commodore_-_Amiga",
+    "c64": "Commodore_-_64",
+    "arcade": "MAME",
+}
+
+
+_LIBRETRO_REPO_TITLES_CACHE = {}
+_LIBRETRO_REPO_CACHE_TIME = {}
+
+
+def _get_libretro_repo_titles(repo):
+    """Libretro 레포의 Named_Boxarts 목록을 캐싱하여 가져옵니다."""
+    now = time.time()
+    if repo in _LIBRETRO_REPO_TITLES_CACHE and (now - _LIBRETRO_REPO_CACHE_TIME.get(repo, 0) < 86400):
+        return _LIBRETRO_REPO_TITLES_CACHE[repo]
+
+    url = f"https://api.github.com/repos/libretro-thumbnails/{repo}/git/trees/master?recursive=1"
+    req = urllib.request.Request(url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            tree = data.get("tree", [])
+            titles = []
+            for it in tree:
+                p = it.get("path", "")
+                if p.startswith("Named_Boxarts/") and p.endswith(".png"):
+                    fname = os.path.basename(p)
+                    titles.append(os.path.splitext(fname)[0])
+            if titles:
+                _LIBRETRO_REPO_TITLES_CACHE[repo] = titles
+                _LIBRETRO_REPO_CACHE_TIME[repo] = now
+                return titles
+    except Exception as e:
+        logger.debug(f"[{SELF_ID}] Libretro tree fetch error ({repo}): {e}")
+
+    return _LIBRETRO_REPO_TITLES_CACHE.get(repo, [])
+
+
+def _clean_libretro_name(name):
+    """Libretro Thumbnails 규칙에 맞는 게임명 정리 (특수문자 매핑)"""
+    # Libretro 특수문자 규칙: & -> _, ` -> ', 등
+    # 원본 파일명에서 확장자 및 접두사 정리
+    base = os.path.splitext(os.path.basename(name.replace("\\", "/")))[0]
+    base = _ROMM_NAME_PREFIX_RE.sub("", base, count=1).strip(" ._")
+    # Libretro naming convention: replace & with _
+    base_escaped = base.replace("&", "_")
+    return base, base_escaped
+
+
+def _fetch_libretro_artwork(platform_or_core, filename, raw_title=""):
+    """Libretro Thumbnails CDN에서 박스아트 탐색 후 바이트 데이터 반환"""
+    key = str(platform_or_core or "").lower().strip()
+    system_repo = LIBRETRO_SYSTEM_MAP.get(key)
+    if not system_repo:
+        # Fallback direct lookup
+        for k, v in LIBRETRO_SYSTEM_MAP.items():
+            if k in key:
+                system_repo = v
+                break
+    if not system_repo:
+        return None
+
+    candidates = []
+    base_orig, base_esc = _clean_libretro_name(filename)
+    candidates.append(base_orig)
+    if base_esc != base_orig:
+        candidates.append(base_esc)
+
+    if raw_title and raw_title != base_orig:
+        t_orig, t_esc = _clean_libretro_name(raw_title)
+        candidates.append(t_orig)
+        if t_esc != t_orig:
+            candidates.append(t_esc)
+
+    # 괄호 태그 제거 버전도 시도
+    no_tag = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_orig).strip()
+    if no_tag and no_tag not in candidates:
+        candidates.append(no_tag)
+
+    # 지역 태그((USA), (Japan), (Europe)) 조합 자동 시도 (Libretro 파일명 규칙)
+    expanded = []
+    for c in list(candidates):
+        expanded.append(c)
+        if not re.search(r"\((USA|Japan|Europe|World|Korea)\)", c, re.I):
+            expanded.append(f"{c} (USA)")
+            expanded.append(f"{c} (Japan)")
+            expanded.append(f"{c} (Europe)")
+            expanded.append(f"{c} (World)")
+    candidates = expanded
+
+    seen = set()
+    for name_cand in candidates:
+        if not name_cand or name_cand in seen:
+            continue
+        seen.add(name_cand)
+
+        # Named_Boxarts 탐색
+        encoded_name = urllib.parse.quote(f"{name_cand}.png", safe="")
+        url = f"{LIBRETRO_CDN_BASE}/{system_repo}/master/Named_Boxarts/{encoded_name}"
+        try:
+            curr_url = url
+            for _ in range(3):
+                req = urllib.request.Request(curr_url, headers={"User-Agent": HH_USER_AGENT})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    if resp.status == 200:
+                        data = resp.read()
+                        if len(data) < 256 and b".png" in data:
+                            target_filename = data.decode("utf-8", errors="ignore").strip()
+                            base_url_dir = curr_url.rsplit("/", 1)[0]
+                            curr_url = f"{base_url_dir}/{urllib.parse.quote(target_filename)}"
+                            continue
+                        if data and len(data) > 512:
+                            return data
+                break
+        except Exception:
+            pass
+
+    return None
+
+
+# ScreenScraper 플랫폼 ID 매핑
+SS_SYSTEM_MAP = {
+    "gba": "12",
+    "gb": "9",
+    "gbc": "10",
+    "snes": "4",
+    "nes": "3",
+    "fds": "106",
+    "nds": "15",
+    "n64": "14",
+    "vb": "11",
+    "virtualboy": "11",
+    "segamd": "1",
+    "genesis": "1",
+    "segams": "2",
+    "mastersystem": "2",
+    "segagg": "21",
+    "gamegear": "21",
+    "sega32x": "19",
+    "segacd": "20",
+    "saturn": "22",
+    "segasaturn": "22",
+    "psx": "57",
+    "ps1": "57",
+    "psp": "61",
+    "pce": "31",
+    "pcfx": "32",
+    "supergrafx": "105",
+    "ngp": "25",
+    "ngpc": "82",
+    "neogeo": "142",
+    "neo-geo": "142",
+    "wonderswan": "45",
+    "wsc": "46",
+    "wonderswancolor": "46",
+    "atari2600": "40",
+    "atari5200": "41",
+    "atari7800": "42",
+    "lynx": "28",
+    "jaguar": "27",
+    "coleco": "48",
+    "amiga": "64",
+    "c64": "66",
+    "arcade": "75",
+}
+
+
+def _calc_crc32(file_path):
+    """파일 CRC32 계산"""
+    try:
+        import binascii
+        crc = 0
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                crc = binascii.crc32(chunk, crc)
+        return f"{crc & 0xFFFFFFFF:08x}".upper()
+    except Exception:
+        return None
+
+
+def _calc_md5(file_path):
+    """파일 MD5 계산"""
+    try:
+        m = hashlib.md5()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                m.update(chunk)
+        return m.hexdigest().lower()
+    except Exception:
+        return None
+
+
+def _fetch_screenscraper_artwork(file_path, platform_or_core, filename, sc_config):
+    """ScreenScraper API를 질의하여 롬 아트워크 다운로드 (Key 설정 시에만 동작)"""
+    devid = sc_config.get("ss_devid")
+    devpassword = sc_config.get("ss_devpassword")
+    if not devid or not devpassword:
+        return None
+
+    if not file_path or not os.path.exists(file_path):
+        return None
+
+    crc = _calc_crc32(file_path)
+    md5_val = _calc_md5(file_path)
+    file_size = os.path.getsize(file_path)
+    plat_key = str(platform_or_core or "").lower().strip()
+    system_id = SS_SYSTEM_MAP.get(plat_key, "")
+
+    base_url = "https://www.screenscraper.fr/api2/jeuInfos.php"
+    params = {
+        "devid": devid,
+        "devpassword": devpassword,
+        "softname": "BookOasis",
+        "output": "json",
+        "romnom": filename,
+        "romtaille": str(file_size),
+    }
+    if crc:
+        params["crc"] = crc
+    if md5_val:
+        params["md5"] = md5_val
+    if system_id:
+        params["systemeid"] = system_id
+
+    user = sc_config.get("ss_user")
+    pwd = sc_config.get("ss_password")
+    if user and pwd:
+        params["ssid"] = user
+        params["sspassword"] = pwd
+
+    try:
+        query_str = urllib.parse.urlencode(params)
+        req_url = f"{base_url}?{query_str}"
+        req = urllib.request.Request(req_url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                medias = data.get("response", {}).get("jeu", {}).get("medias", [])
+                for m in medias:
+                    # 2d boxart 또는 3d boxart 또는 screenshot 탐색
+                    mtype = str(m.get("type") or "").lower()
+                    if mtype in ("box-2d", "box-3d", "wheel", "screenshot"):
+                        img_url = m.get("url")
+                        if img_url:
+                            img_req = urllib.request.Request(img_url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
+                            with urllib.request.urlopen(img_req, timeout=15) as img_resp:
+                                if img_resp.status == 200:
+                                    img_data = img_resp.read()
+                                    if img_data and len(img_data) > 512:
+                                        return img_data
+    except Exception as e:
+        logger.debug(f"[{SELF_ID}] ScreenScraper query error: {e}")
+
+    return None
+
+
+_IGDB_ACCESS_TOKEN = None
+_IGDB_TOKEN_EXPIRY = 0
+
+
+def _get_igdb_token(client_id, client_secret):
+    """Twitch OAuth 토큰 발급/캐싱"""
+    global _IGDB_ACCESS_TOKEN, _IGDB_TOKEN_EXPIRY
+    now = time.time()
+    if _IGDB_ACCESS_TOKEN and now < _IGDB_TOKEN_EXPIRY - 60:
+        return _IGDB_ACCESS_TOKEN
+
+    token_url = "https://id.twitch.tv/oauth2/token"
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "client_credentials",
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(token_url, data=params, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                _IGDB_ACCESS_TOKEN = data.get("access_token")
+                expires_in = data.get("expires_in", 3600)
+                _IGDB_TOKEN_EXPIRY = now + expires_in
+                return _IGDB_ACCESS_TOKEN
+    except Exception as e:
+        logger.debug(f"[{SELF_ID}] IGDB token error: {e}")
+
+    return None
+
+
+def _fetch_igdb_artwork(raw_title, igdb_config):
+    """IGDB API를 질의하여 고화질 커버 아트 다운로드 (Key 설정 시에만 동작)"""
+    client_id = igdb_config.get("igdb_client_id")
+    client_secret = igdb_config.get("igdb_client_secret")
+    if not client_id or not client_secret or not raw_title:
+        return None
+
+    token = _get_igdb_token(client_id, client_secret)
+    if not token:
+        return None
+
+    clean_t = re.sub(r"[\(\[\{].*?[\)\]\}]", "", raw_title).strip()
+    if not clean_t:
+        clean_t = raw_title
+
+    # IGDB Apicalypse 쿼리
+    escaped_title = clean_t.replace('"', '\\"')
+    query_body = f'search "{escaped_title}"; fields name, cover.image_id, cover.url; limit 1;'
+
+    try:
+        req = urllib.request.Request(
+            "https://api.igdb.com/v4/games",
+            data=query_body.encode("utf-8"),
+            headers={
+                "Client-ID": client_id,
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                results = json.loads(resp.read().decode("utf-8"))
+                if results and isinstance(results, list):
+                    cover = results[0].get("cover")
+                    if cover:
+                        img_id = cover.get("image_id")
+                        if img_id:
+                            img_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{img_id}.jpg"
+                        else:
+                            raw_url = cover.get("url", "")
+                            img_url = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
+
+                        if img_url:
+                            img_req = urllib.request.Request(img_url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
+                            with urllib.request.urlopen(img_req, timeout=12) as img_resp:
+                                if img_resp.status == 200:
+                                    img_data = img_resp.read()
+                                    if img_data and len(img_data) > 512:
+                                        return img_data
+    except Exception as e:
+        logger.debug(f"[{SELF_ID}] IGDB query error: {e}")
+
+    return None
+
+
 def _sanitize_id(text):
     """안전한 고유 ID 생성 (특수문자 제거 및 소문자 해시 결합)."""
     clean = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", text)
@@ -332,6 +720,26 @@ KNOWN_NEOGEO_STEMS = {
     "twinkle", "breakers", "breakrev", "matrim", "rotd", "kizuna", "savagere",
 }
 
+KNOWN_N64_NAMES = {
+    "MARIOKART64": "Mario Kart 64",
+    "PUYO PUYO SUN 64": "Puyo Puyo Sun 64",
+    "SUPERMARIO64": "Super Mario 64",
+    "SUPER MARIO 64": "Super Mario 64",
+    "STARCRAFT 64": "StarCraft 64",
+    "STARFOX64": "Star Fox 64",
+    "EVANGELION": "Neon Genesis Evangelion",
+    "HLZELDA MASTER QUEST": "Legend of Zelda, The - Ocarina of Time - Master Quest",
+    "OGREBATTLE64": "Ogre Battle 64 - Person of Lordly Caliber",
+    "SHIREN 2": "Fushigi no Dungeon - Fuurai no Shiren 2 - Oni Shuurai! Shiren Jou!",
+    "THE MASK OF MUJURA": "Legend of Zelda, The - Majora's Mask",
+    "THE LEGEND OF ZELDA": "Legend of Zelda, The - Ocarina of Time",
+    "TSUMI TO BATSU": "Sin and Punishment",
+    "CONKER BFD": "Conker's Bad Fur Day",
+    "PAPER MARIO KR": "Paper Mario",
+    "PAPER MARIO": "Paper Mario",
+    "64": "Super Robot Taisen 64",
+}
+
 
 def _is_bios_file(filename):
     """주요 에뮬레이터 및 아케이드(MAME/FBNeo) 기판 바이오스 파일 여부 확인"""
@@ -421,6 +829,26 @@ def _detect_rom_info(file_path):
             if title: info["title"] = title
             if game_code: info["game_code"] = game_code
             if maker_code: info["maker_code"] = maker_code
+    elif info["core"] == "n64":
+        if raw_data and len(raw_data) >= 0x40:
+            magic = raw_data[:4]
+            raw_title = raw_data[0x20:0x34]
+            if magic == b"\x37\x80\x40\x12":  # .v64 byte swapped
+                b = bytearray(raw_title)
+                for i in range(0, len(b), 2):
+                    if i + 1 < len(b):
+                        b[i], b[i+1] = b[i+1], b[i]
+                n64_title = "".join(chr(c) for c in b if 32 <= c <= 126).strip()
+            elif magic == b"\x40\x12\x37\x80":  # .n64 little endian
+                b = bytearray(raw_title)
+                for i in range(0, len(b), 4):
+                    if i + 3 < len(b):
+                        b[i], b[i+1], b[i+2], b[i+3] = b[i+3], b[i+2], b[i+1], b[i]
+                n64_title = "".join(chr(c) for c in b if 32 <= c <= 126).strip()
+            else:  # .z64 big endian
+                n64_title = "".join(chr(c) for c in raw_title if 32 <= c <= 126).strip()
+            if n64_title:
+                info["title"] = n64_title
 
     return info
 
@@ -437,7 +865,29 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         "sessions": ["general"],
     }
 
-    config_schema = []
+    config_schema = [
+        {
+            "key": "cloud_save_enabled",
+            "label": "클라우드 세이브 자동 동기화",
+            "type": "boolean",
+            "default": True,
+            "description": "게임 플레이 세이브를 서버에 유저별로 실시간 보관합니다.",
+        },
+        {
+            "key": "auto_save_interval_sec",
+            "label": "세이브 동기화 주기 (초)",
+            "type": "number",
+            "default": 60,
+            "description": "브라우저 세이브를 서버로 전송하는 주기입니다.",
+        },
+        {
+            "key": "extra_roms_path",
+            "label": "추가 ROM 스캔 경로",
+            "type": "text",
+            "required": False,
+            "description": "기본 폴더 외에 추가로 읽어올 외부 폴더 경로입니다.",
+        },
+    ]
 
     update_manifest = {
         "enabled": True,
@@ -504,7 +954,46 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
     def __init__(self):
         super().__init__()
         self._migrate_old_plugin_data()
+        self._migrate_bios_files()
         self._init_db()
+
+    def _migrate_bios_files(self):
+        """roms/ 폴더에 혼재된 바이오스 및 MAME 기판/디바이스 파일을 bios/ 폴더로 자동 분류 이동"""
+        roms_dir = self._get_roms_dir()
+        bios_dir = self._get_bios_dir()
+        if not os.path.exists(roms_dir):
+            return
+
+        moved_count = 0
+        try:
+            for root, _, files in os.walk(roms_dir):
+                for f in files:
+                    if f.startswith("."):
+                        continue
+                    full_p = os.path.join(root, f)
+                    if not os.path.isfile(full_p):
+                        continue
+
+                    is_bios = _is_bios_file(f)
+                    if not is_bios and f.lower().endswith(".zip"):
+                        rom_info = _detect_rom_info(full_p)
+                        if rom_info.get("platform") == "_skip_":
+                            is_bios = True
+
+                    if is_bios:
+                        target_p = os.path.join(bios_dir, f)
+                        try:
+                            if not os.path.exists(target_p):
+                                shutil.move(full_p, target_p)
+                            else:
+                                os.remove(full_p)
+                            moved_count += 1
+                        except Exception as ex:
+                            logger.debug(f"[{SELF_ID}] Bios migration move error ({f}): {ex}")
+            if moved_count > 0:
+                logger.info(f"[{SELF_ID}] Successfully migrated {moved_count} bios/device files from roms/ to bios/")
+        except Exception as e:
+            logger.error(f"[{SELF_ID}] Bios migration failed: {e}")
 
     def _migrate_old_plugin_data(self):
         """이전 bookoasis_gba 또는 bookoasis_emulatorjs 데이터 디렉터리가 있을 경우 bookoasis_gamebooks로 마이그레이션"""
@@ -604,11 +1093,79 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             finally:
                 conn.close()
 
+    def _auto_fetch_and_save_cover(self, game_id, platform_or_core, filename, file_path=None, raw_title=""):
+        """Libretro CDN(1차) -> ScreenScraper(2차, Key필요) -> IGDB(3차, Key필요) 순으로 커버 아트를 자동 다운로드/등록합니다."""
+        try:
+            # 이미 커버가 등록되어 있거나 로컬 파일이 존재하는지 검사
+            rows = self._db_query("SELECT cover_path FROM games WHERE id = ?", (game_id,))
+            if rows and rows[0]["cover_path"] and os.path.exists(rows[0]["cover_path"]):
+                return rows[0]["cover_path"]
+
+            covers_dir = self._get_covers_dir()
+            for ext in (".png", ".jpg", ".jpeg", ".webp"):
+                existing_cover = os.path.join(covers_dir, f"{game_id}{ext}")
+                if os.path.exists(existing_cover):
+                    self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (existing_cover, game_id))
+                    return existing_cover
+
+            # 1차: Libretro Thumbnails CDN (무료/API Key 불필요)
+            art_bytes = _fetch_libretro_artwork(platform_or_core, filename, raw_title=raw_title)
+            if art_bytes:
+                save_cover_path = os.path.join(covers_dir, f"{game_id}.png")
+                with open(save_cover_path, "wb") as f:
+                    f.write(art_bytes)
+                self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (save_cover_path, game_id))
+                logger.info(f"[{SELF_ID}] Auto-fetched Libretro cover for {filename} -> {save_cover_path}")
+                return save_cover_path
+
+            # 2차: ScreenScraper API (설정에 Key가 등록된 경우에만 실행)
+            ss_devid = self._get_setting("SS_DEVID", "").strip()
+            ss_devpwd = self._get_setting("SS_DEVPASSWORD", "").strip()
+            if ss_devid and ss_devpwd:
+                sc_conf = {
+                    "ss_devid": ss_devid,
+                    "ss_devpassword": ss_devpwd,
+                    "ss_user": self._get_setting("SS_USER", "").strip(),
+                    "ss_password": self._get_setting("SS_PASSWORD", "").strip(),
+                }
+                art_bytes = _fetch_screenscraper_artwork(file_path, platform_or_core, filename, sc_conf)
+                if art_bytes:
+                    save_cover_path = os.path.join(covers_dir, f"{game_id}.png")
+                    with open(save_cover_path, "wb") as f:
+                        f.write(art_bytes)
+                    self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (save_cover_path, game_id))
+                    logger.info(f"[{SELF_ID}] Auto-fetched ScreenScraper cover for {filename} -> {save_cover_path}")
+                    return save_cover_path
+
+            # 3차: IGDB API (설정에 Key가 등록된 경우에만 실행)
+            igdb_id = self._get_setting("IGDB_CLIENT_ID", "").strip()
+            igdb_sec = self._get_setting("IGDB_CLIENT_SECRET", "").strip()
+            if igdb_id and igdb_sec:
+                igdb_conf = {
+                    "igdb_client_id": igdb_id,
+                    "igdb_client_secret": igdb_sec,
+                }
+                search_title = raw_title or os.path.splitext(filename)[0]
+                art_bytes = _fetch_igdb_artwork(search_title, igdb_conf)
+                if art_bytes:
+                    save_cover_path = os.path.join(covers_dir, f"{game_id}.jpg")
+                    with open(save_cover_path, "wb") as f:
+                        f.write(art_bytes)
+                    self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (save_cover_path, game_id))
+                    logger.info(f"[{SELF_ID}] Auto-fetched IGDB cover for {filename} -> {save_cover_path}")
+                    return save_cover_path
+
+        except Exception as e:
+            logger.debug(f"[{SELF_ID}] Auto cover cascade match error ({filename}): {e}")
+        return None
+
     # ------------------------------------------------------------------
     # ROM 스캔 및 등록 로직
     # ------------------------------------------------------------------
     def _scan_roms(self):
         """기본 roms 폴더 및 설정된 추가 경로의 ROM을 스캔하여 DB에 동기화합니다."""
+        self._migrate_bios_files()
+
         scan_dirs = [self._get_roms_dir()]
 
         extra_path = self._get_setting("EXTRA_ROMS_PATH", "").strip()
@@ -667,9 +1224,40 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     clean_title = "골든 액스 (Golden Axe)"
                 elif "minishcap" in norm_key or "이상한모자" in norm_key:
                     clean_title = "젤다의 전설: 이상한 모자"
+                elif "mariokart64" in norm_key or "마리오카트64" in norm_key:
+                    clean_title = "마리오 카트 64"
+                elif "supermario64" in norm_key or "슈퍼마리오64" in norm_key:
+                    clean_title = "슈퍼 마리오 64"
+                elif "starfox64" in norm_key or "스타폭스64" in norm_key:
+                    clean_title = "스타폭스 64"
+                elif "papermario" in norm_key or "페이퍼마리오" in norm_key:
+                    clean_title = "페이퍼 마리오"
+                elif "starcraft64" in norm_key or "스타크래프트64" in norm_key:
+                    clean_title = "스타크래프트 64"
+                elif "evangelion" in norm_key or "에반게리온" in norm_key:
+                    clean_title = "신세기 에반게리온"
+                elif "ogrebattle64" in norm_key or "오우거배틀64" in norm_key:
+                    clean_title = "오우거 배틀 64"
+                elif "puyopuyosun64" in norm_key or "뿌요뿌요선64" in norm_key:
+                    clean_title = "뿌요뿌요 선 64"
+                elif "superrobot" in norm_key or "슈퍼로봇대전64" in norm_key:
+                    clean_title = "슈퍼로봇대전 64"
+                elif "shiren2" in norm_key or "풍래의시렌2" in norm_key or "시렌2" in norm_key:
+                    clean_title = "풍래의 시렌 2"
+                elif "mujuramask" in norm_key or "무쥬라의가면" in norm_key:
+                    clean_title = "젤다의 전설: 무쥬라의 가면"
+                elif "ocarinaoftime" in norm_key or "시간의오카리나" in norm_key:
+                    clean_title = "젤다의 전설: 시간의 오카리나"
+                elif "tsumitobatsu" in norm_key or "죄와벌" in norm_key:
+                    clean_title = "죄와 벌: 지구의 계승자"
+                elif "conker" in norm_key or "컨커" in norm_key:
+                    clean_title = "컨커의 최악의 날 (Conker's Bad Fur Day)"
                 else:
                     no_brackets = re.sub(r"[\(\[\{].*?[\)\]\}]", "", raw_name).strip().replace("_", " ").replace("-", " ")
                     clean_title = re.sub(r"\s+", " ", no_brackets).strip() or raw_name
+
+            header_title = rom_info.get("title") or ""
+            mapped_header = KNOWN_N64_NAMES.get(header_title.upper().replace("_", " ").replace("-", " ").strip()) or KNOWN_N64_NAMES.get(header_title.upper()) or header_title
 
             if gid not in existing_games:
                 self._db_execute(
@@ -688,11 +1276,17 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         now_str,
                     ),
                 )
+                # 신규 등록 게임에 대해 커버 아트 자동 탐색 (Libretro -> ScreenScraper -> IGDB)
+                self._auto_fetch_and_save_cover(gid, rom_info.get("core") or rom_info.get("platform"), info["filename"], file_path=info["file_path"], raw_title=mapped_header or clean_title)
             else:
                 self._db_execute(
                     "UPDATE games SET file_path = ?, size_bytes = ?, core = ?, platform = ?, title = ? WHERE id = ?",
                     (info["file_path"], info["size_bytes"], rom_info["core"], rom_info["platform"], clean_title, gid),
                 )
+                # 기존 게임 중 커버가 없는 경우 자동 탐색
+                existing_entry = existing_games.get(gid)
+                if not existing_entry or not existing_entry.get("cover_path") or not os.path.exists(existing_entry["cover_path"]):
+                    self._auto_fetch_and_save_cover(gid, rom_info.get("core") or rom_info.get("platform"), info["filename"], file_path=info["file_path"], raw_title=mapped_header or clean_title)
 
         for gid in existing_games:
             if gid not in found_files:
@@ -1297,7 +1891,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         try:
             if action == "list_games":
-                self._scan_roms()
+                # DB에 게임 데이터가 한 건도 없을 때만 최초 1회 자동 초기 스캔
+                game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
+                if not game_count_row or game_count_row[0]["cnt"] == 0:
+                    self._scan_roms()
+
                 games = self._db_query(
                     """SELECT g.id, g.filename, g.file_path, g.title, g.game_code, g.maker_code,
                               g.size_bytes, g.added_at, g.cover_path, g.core, g.platform,
@@ -1328,35 +1926,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     g["cover_url"] = f"{ROUTE_BASE}/cover/{g['id']}"
 
                 available_bios = []
-                game_filenames = {g["filename"].lower() for g in games}
-
-                # 1. bios/ 폴더 내 모든 파일
                 bios_dir = self._get_bios_dir()
                 if os.path.exists(bios_dir):
                     try:
-                        for root, _, files in os.walk(bios_dir):
-                            for f in files:
-                                if not f.startswith("."):
-                                    available_bios.append(f.lower())
+                        for f in os.listdir(bios_dir):
+                            if not f.startswith("."):
+                                available_bios.append(f.lower())
                     except Exception:
                         pass
-
-                # 2. roms/ 및 추가 경로 내의 바이오스/MAME 디바이스 파일 (게임 목록에 없는 800+ 펌웨어 롬 포함)
-                scan_dirs = [self._get_roms_dir()]
-                extra_p = self._get_setting("EXTRA_ROMS_PATH", "").strip()
-                if extra_p and os.path.isdir(extra_p):
-                    scan_dirs.append(extra_p)
-                for sdir in scan_dirs:
-                    if os.path.exists(sdir):
-                        try:
-                            for root, _, files in os.walk(sdir):
-                                for f in files:
-                                    if not f.startswith("."):
-                                        lower_f = f.lower()
-                                        if lower_f not in game_filenames or _is_bios_file(f):
-                                            available_bios.append(lower_f)
-                        except Exception:
-                            pass
 
                 return {
                     "success": True,
@@ -1369,12 +1946,18 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "cloud_save_enabled": str(self._get_setting("CLOUD_SAVE_ENABLED", "1")).lower() in ("1", "true", "yes", "on"),
                         "auto_save_interval_sec": int(self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")),
                         "extra_roms_path": str(self._get_setting("EXTRA_ROMS_PATH", "") or "").strip(),
+                        "ss_devid": str(self._get_setting("SS_DEVID", "") or "").strip(),
+                        "ss_devpassword": str(self._get_setting("SS_DEVPASSWORD", "") or "").strip(),
+                        "ss_user": str(self._get_setting("SS_USER", "") or "").strip(),
+                        "ss_password": str(self._get_setting("SS_PASSWORD", "") or "").strip(),
+                        "igdb_client_id": str(self._get_setting("IGDB_CLIENT_ID", "") or "").strip(),
+                        "igdb_client_secret": str(self._get_setting("IGDB_CLIENT_SECRET", "") or "").strip(),
                     },
                 }
 
             elif action == "scan_roms":
                 self._scan_roms()
-                return {"success": True, "message": "ROM 폴더 스캔이 완료되었습니다."}
+                return {"success": True, "message": "ROM 디스크 스캔 및 DB 동기화가 완료되었습니다."}
 
             elif action == "homebrew_search":
                 title = request.args.get("q", "")
@@ -1480,6 +2063,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 cloud_save_raw = request.args.get("cloud_save_enabled", "1")
                 interval_raw = request.args.get("auto_save_interval_sec", "60")
 
+                ss_devid = request.args.get("ss_devid", "").strip()
+                ss_devpassword = request.args.get("ss_devpassword", "").strip()
+                ss_user = request.args.get("ss_user", "").strip()
+                ss_password = request.args.get("ss_password", "").strip()
+                igdb_client_id = request.args.get("igdb_client_id", "").strip()
+                igdb_client_secret = request.args.get("igdb_client_secret", "").strip()
+
                 cloud_save = True if str(cloud_save_raw).lower() in ("1", "true", "yes", "on") else False
                 try:
                     interval = int(interval_raw)
@@ -1489,9 +2079,179 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 self._set_setting("EXTRA_ROMS_PATH", extra_path)
                 self._set_setting("CLOUD_SAVE_ENABLED", cloud_save)
                 self._set_setting("AUTO_SAVE_INTERVAL_SEC", interval)
+                self._set_setting("SS_DEVID", ss_devid)
+                self._set_setting("SS_DEVPASSWORD", ss_devpassword)
+                self._set_setting("SS_USER", ss_user)
+                self._set_setting("SS_PASSWORD", ss_password)
+                self._set_setting("IGDB_CLIENT_ID", igdb_client_id)
+                self._set_setting("IGDB_CLIENT_SECRET", igdb_client_secret)
 
                 self._scan_roms()
                 return {"success": True, "message": "설정이 성공적으로 저장되었습니다."}
+
+            elif action == "search_artwork":
+                game_id = request.args.get("game_id", "").strip()
+                query = request.args.get("q", "").strip()
+                rows = self._db_query("SELECT * FROM games WHERE id = ?", (game_id,)) if game_id else []
+                game = rows[0] if rows else {}
+
+                plat = (game.get("core") or game.get("platform") or "gba").lower()
+                filename = game.get("filename") or ""
+                file_path = game.get("file_path") or ""
+                title = query or game.get("title") or filename
+
+                # ROM 파일 헤더에서 영문 고유명 추출
+                rom_header_title = ""
+                mapped_header_title = ""
+                if file_path and os.path.exists(file_path):
+                    rom_info = _detect_rom_info(file_path)
+                    rom_header_title = rom_info.get("title") or ""
+                    if rom_header_title:
+                        mapped_header_title = KNOWN_N64_NAMES.get(rom_header_title.upper().replace("_", " ").replace("-", " ").strip()) or KNOWN_N64_NAMES.get(rom_header_title.upper()) or rom_header_title
+
+                results = []
+
+                # 1. Libretro CDN 실시간 검색 (ROM 헤더 & 스마트 매핑)
+                key = plat
+                system_repo = LIBRETRO_SYSTEM_MAP.get(key)
+                if not system_repo:
+                    for k, v in LIBRETRO_SYSTEM_MAP.items():
+                        if k in key:
+                            system_repo = v
+                            break
+                if system_repo:
+                    repo_titles = _get_libretro_repo_titles(system_repo)
+
+                    # 후보 검색어 우선순위 큐
+                    search_queries = []
+
+                    # 1순위: ROM 헤더에서 감지된 공식 영문명 (가장 정확)
+                    if mapped_header_title and mapped_header_title != "64":
+                        search_queries.append(mapped_header_title)
+                    if rom_header_title and rom_header_title not in ("64", mapped_header_title):
+                        search_queries.append(rom_header_title)
+
+                    # 2순위: 한글 게임명에 대한 대표 영문 매핑
+                    norm_t = re.sub(r"[^a-zA-Z0-9가-힣]", "", title).lower()
+                    if "역전재판" in norm_t or "gyakuten" in norm_t: search_queries.extend(["Gyakuten Saiban", "Phoenix Wright"])
+                    elif "메탈슬러그" in norm_t or "metalslug" in norm_t: search_queries.append("Metal Slug")
+                    elif "크로노" in norm_t or "chrono" in norm_t: search_queries.append("Chrono Trigger")
+                    elif "골든액스" in norm_t or "goldenaxe" in norm_t: search_queries.append("Golden Axe")
+                    elif "이상한모자" in norm_t or "minish" in norm_t: search_queries.append("The Minish Cap")
+                    elif "마리오카트" in norm_t or "mariokart" in norm_t: search_queries.append("Mario Kart 64" if plat == "n64" else "Mario Kart")
+                    elif "슈퍼마리오" in norm_t or "supermario" in norm_t: search_queries.append("Super Mario 64" if plat == "n64" else "Super Mario")
+                    elif "스타크래프트" in norm_t or "starcraft" in norm_t: search_queries.append("StarCraft 64" if plat == "n64" else "StarCraft")
+                    elif "스타폭스" in norm_t or "starfox" in norm_t: search_queries.append("Star Fox 64" if plat == "n64" else "Star Fox")
+                    elif "에반게리온" in norm_t or "evangelion" in norm_t: search_queries.append("Neon Genesis Evangelion")
+                    elif "오우거" in norm_t or "ogre" in norm_t: search_queries.append("Ogre Battle 64" if plat == "n64" else "Ogre Battle")
+                    elif "시렌" in norm_t or "shiren" in norm_t: search_queries.append("Shiren 2" if plat == "n64" else "Shiren")
+                    elif "죄와벌" in norm_t: search_queries.append("Sin and Punishment")
+                    elif "페이퍼마리오" in norm_t or "papermario" in norm_t: search_queries.append("Paper Mario")
+                    elif "뿌요뿌요" in norm_t or "puyo" in norm_t: search_queries.append("Puyo Puyo Sun 64" if plat == "n64" else "Puyo Puyo")
+                    elif "슈퍼로봇" in norm_t: search_queries.append("Super Robot Taisen 64" if plat == "n64" else "Super Robot")
+                    elif "컨커" in norm_t: search_queries.append("Conker's Bad Fur Day")
+                    elif "무쥬라" in norm_t or "mujura" in norm_t or "majora" in norm_t: search_queries.append("Majora's Mask")
+                    elif "오카리나" in norm_t or "ocarina" in norm_t: search_queries.append("Ocarina of Time")
+                    elif "젤다" in norm_t or "zelda" in norm_t: search_queries.append("Legend of Zelda")
+                    elif "건버드" in norm_t or "gunbird" in norm_t: search_queries.append("Gunbird")
+
+                    # 3순위: 사용자 입력 검색어 (직접 타이핑한 경우)
+                    if query and query not in search_queries:
+                        search_queries.append(query)
+
+                    # 4순위: 파일명에서 불용어/태그 제거 후 영문 단어 추출
+                    if filename:
+                        b_orig = _clean_libretro_name(filename)[0]
+                        b_clean = re.sub(r"[\(\[\{].*?[\)\]\}]", "", b_orig).strip()
+                        if b_clean and b_clean not in search_queries:
+                            search_queries.append(b_clean)
+
+                    seen = set()
+                    matched_titles = []
+                    # 불용어 정의: 단독으로 사용되면 무의미한 단어들
+                    stopwords = {"64", "v64", "z64", "n64", "k", "j", "u", "e", "the", "of", "and"}
+
+                    matched_keyword = ""
+                    if repo_titles:
+                        for sq in search_queries:
+                            raw_kws = [w.lower() for w in re.sub(r"[^a-zA-Z0-9\s]", " ", sq).split() if len(w) >= 2]
+                            meaningful_kws = [kw for kw in raw_kws if kw not in stopwords]
+                            # 유의미한 단어가 없으면 이 쿼리는 검색하지 않음 (예: '마리오 카트 64'에서 64만 남는 경우 방지)
+                            if not meaningful_kws:
+                                continue
+
+                            step_matched = []
+                            for rt in repo_titles:
+                                if rt in seen:
+                                    continue
+                                rt_lower = rt.lower()
+                                if all(kw in rt_lower for kw in meaningful_kws):
+                                    seen.add(rt)
+                                    step_matched.append(rt)
+                                    if len(matched_titles) + len(step_matched) >= 16:
+                                        break
+                            if step_matched:
+                                if not matched_keyword:
+                                    matched_keyword = sq
+                                matched_titles.extend(step_matched)
+                            if len(matched_titles) >= 16:
+                                break
+
+                    for mt in matched_titles:
+                        enc = urllib.parse.quote(f"{mt}.png", safe="")
+                        cdn_url = f"{LIBRETRO_CDN_BASE}/{system_repo}/master/Named_Boxarts/{enc}"
+                        results.append({
+                            "source": "Libretro CDN",
+                            "title": mt,
+                            "thumb_url": cdn_url,
+                            "image_url": cdn_url,
+                        })
+
+                actual_query = matched_keyword or query or title
+                return {"success": True, "results": results, "query": actual_query}
+
+            elif action == "set_artwork":
+                if not _is_current_user_admin():
+                    return {"success": False, "error": "관리자만 커버를 변경할 수 있습니다."}
+
+                game_id = request.args.get("game_id", "").strip()
+                image_url = request.args.get("image_url", "").strip()
+                if not game_id or not image_url:
+                    return {"success": False, "error": "game_id 또는 image_url이 누락되었습니다."}
+
+                try:
+                    # GitHub Raw CDN의 Git Symlink 파일 자동 추적 처리 (최대 3회)
+                    curr_url = image_url
+                    img_bytes = None
+                    for _ in range(3):
+                        req = urllib.request.Request(curr_url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
+                        with urllib.request.urlopen(req, timeout=20) as resp:
+                            data = resp.read()
+
+                        # 256바이트 미만이고 .png 텍스트가 포함된 경우 Git Symlink 링크 파일임
+                        if len(data) < 256 and b".png" in data:
+                            target_filename = data.decode("utf-8", errors="ignore").strip()
+                            # URL 경로에서 마지막 파일명을 타깃 파일명으로 치환
+                            base_url_dir = curr_url.rsplit("/", 1)[0]
+                            curr_url = f"{base_url_dir}/{urllib.parse.quote(target_filename)}"
+                            continue
+
+                        img_bytes = data
+                        break
+
+                    if not img_bytes or len(img_bytes) < 256:
+                        return {"success": False, "error": "유효하지 않은 이미지 파일입니다."}
+
+                    ext = ".png" if (curr_url.lower().endswith(".png") or image_url.lower().endswith(".png")) else ".jpg"
+                    dest_path = os.path.join(self._get_covers_dir(), f"{game_id}{ext}")
+                    with open(dest_path, "wb") as f:
+                        f.write(img_bytes)
+
+                    self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (dest_path, game_id))
+                    return {"success": True, "message": "커버 이미지가 성공적으로 변경되었습니다.", "cover_path": dest_path}
+                except Exception as e:
+                    logger.error(f"[{SELF_ID}] Set artwork error: {e}")
+                    return {"success": False, "error": f"이미지 다운로드 실패: {e}"}
 
             return {"success": False, "error": f"알 수 없는 액션 요청입니다: '{action}'"}
 

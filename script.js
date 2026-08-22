@@ -1097,6 +1097,7 @@
     const canvas = document.querySelector('#ejs-game-frame canvas') || document.querySelector('canvas');
     if (canvas) {
       canvas.style.imageRendering = state.graphics.pixelMode || 'pixelated';
+      canvas.style.margin = '0 auto';
       if (state.graphics.aspectRatio === 'stretch') {
         canvas.style.aspectRatio = 'unset';
         canvas.style.width = '100%';
@@ -1570,8 +1571,101 @@
   }
 
   function promptCoverUpload(gameId) {
+    const game = state.games.find((g) => g.id === gameId);
+    openArtworkModal(gameId, game ? game.title : '');
+  }
+
+  // --------------------------------------------------------------------------
+  // 커버 아트워크 검색 및 선택 모달
+  // --------------------------------------------------------------------------
+  function openArtworkModal(gameId, defaultTitle = '') {
     state.targetGameForCover = gameId;
-    $('gbaCoverInput').click();
+    const modal = $('gbaArtworkModal');
+    if (!modal) return;
+    $('gbaArtworkQuery').value = defaultTitle || '';
+    modal.style.display = 'flex';
+    searchArtwork(gameId, defaultTitle);
+  }
+
+  function closeArtworkModal() {
+    const modal = $('gbaArtworkModal');
+    if (modal) modal.style.display = 'none';
+  }
+
+  async function searchArtwork(gameId, query = '') {
+    const statusEl = $('gbaArtworkStatus');
+    const gridEl = $('gbaArtworkGrid');
+    if (!statusEl || !gridEl) return;
+
+    statusEl.textContent = '아트워크를 검색하는 중...';
+    gridEl.innerHTML = '';
+
+    try {
+      const data = await apiCall('search_artwork', {
+        game_id: gameId || state.targetGameForCover,
+        q: query || ($('gbaArtworkQuery')?.value || '').trim(),
+      });
+
+      if (!data.success) {
+        statusEl.textContent = data.error || '아트워크 검색에 실패했습니다.';
+        return;
+      }
+
+      if (data.query && $('gbaArtworkQuery')) {
+        $('gbaArtworkQuery').value = data.query;
+      }
+
+      const results = data.results || [];
+      if (results.length === 0) {
+        statusEl.textContent = '검색된 아트워크가 없습니다. 직접 이미지 업로드를 이용해 보세요.';
+        return;
+      }
+
+      statusEl.textContent = `총 ${results.length}개의 아트워크 후보가 발견되었습니다. 적용할 이미지를 클릭하세요.`;
+      gridEl.innerHTML = '';
+
+      results.forEach((item) => {
+        const div = document.createElement('div');
+        div.className = 'gba-artwork-item';
+        div.innerHTML = `
+          <img class="gba-artwork-thumb" src="${escapeHtml(item.thumb_url)}" alt="${escapeHtml(item.title)}" loading="lazy">
+          <div class="gba-artwork-meta">
+            <div class="gba-artwork-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+            <div class="gba-artwork-source">${escapeHtml(item.source)}</div>
+          </div>
+        `;
+        div.addEventListener('click', () => {
+          applySelectedArtwork(gameId || state.targetGameForCover, item.image_url);
+        });
+        gridEl.appendChild(div);
+      });
+    } catch (e) {
+      statusEl.textContent = '아트워크 검색 중 오류가 발생했습니다.';
+    }
+  }
+
+  async function applySelectedArtwork(gameId, imageUrl) {
+    if (!gameId || !imageUrl) return;
+    const statusEl = $('gbaArtworkStatus');
+    if (statusEl) statusEl.textContent = '선택한 이미지를 다운로드하여 커버로 적용하는 중...';
+
+    try {
+      const res = await apiCall('set_artwork', {
+        game_id: gameId,
+        image_url: imageUrl,
+      });
+      if (res.success) {
+        showToast('커버 이미지가 성공적으로 변경되었습니다.');
+        closeArtworkModal();
+        loadLibrary();
+      } else {
+        showToast(res.error || '커버 적용 실패', true);
+        if (statusEl) statusEl.textContent = res.error || '커버 적용 실패';
+      }
+    } catch (e) {
+      showToast('커버 변경 중 오류가 발생했습니다.', true);
+      if (statusEl) statusEl.textContent = '커버 변경 중 오류가 발생했습니다.';
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -1965,13 +2059,38 @@
       searchHomebrew(state.homebrewPage + 1);
     });
 
+    // 아트워크 검색 모달 이벤트 바인딩
+    $('gbaArtworkCloseBtn')?.addEventListener('click', closeArtworkModal);
+    $('gbaArtworkSearchBtn')?.addEventListener('click', () => {
+      searchArtwork(state.targetGameForCover, $('gbaArtworkQuery')?.value);
+    });
+    $('gbaArtworkQuery')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        searchArtwork(state.targetGameForCover, $('gbaArtworkQuery')?.value);
+      }
+    });
+    $('gbaArtworkDirectUploadBtn')?.addEventListener('click', () => {
+      closeArtworkModal();
+      $('gbaCoverInput').click();
+    });
+
     // 상단 툴바 버튼
     $('gbaUploadBtn').addEventListener('click', () => $('gbaFileInput').click());
     $('gbaBiosUploadBtn')?.addEventListener('click', openBiosModal);
     $('gbaEmptyUploadBtn')?.addEventListener('click', () => $('gbaFileInput').click());
-    $('gbaScanBtn').addEventListener('click', () => {
-      showToast('ROM 폴더를 다시 스캔합니다...');
-      loadLibrary();
+    $('gbaScanBtn').addEventListener('click', async () => {
+      showToast('디스크에서 ROM 파일을 스캔하고 DB를 갱신합니다...');
+      showLoading(true);
+      try {
+        const res = await apiCall('scan_roms');
+        if (res.success) {
+          showToast(res.message || 'ROM 스캔 및 DB 동기화 완료!');
+        }
+      } catch (e) {
+        console.error('[GBA] Scan error:', e);
+      } finally {
+        loadLibrary();
+      }
     });
 
     // 바이오스 관리 모달 이벤트
@@ -2194,6 +2313,7 @@
 
           // 2. 에뮬레이터 화면 위에 떠 있는 서브 모달들 중 현재 보이는 1개만 닫기
           const overlayModalIds = [
+            'gbaArtworkModal',
             'gbaGraphicsModal',
             'gbaControlsModal',
             'gbaUploadModal',
