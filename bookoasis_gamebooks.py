@@ -1080,11 +1080,51 @@ def _detect_rom_info(file_path):
                         info["core"] = "arcade"
                         info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
                         info["title"] = KNOWN_ARCADE_TITLES[stem]
-                    # 3. 사전에 없는 일반 아케이드/MAME 롬셋 허용 (자동 아케이드 코어 지정 및 파일명 기반 타이틀 생성)
                     else:
-                        info["core"] = "arcade"
-                        info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
-                        # 파일명 기반 클린 타이틀 생성 (예: 1942 -> 1942, pacman -> Pacman)
+                        # 3. 상위 디렉터리명 기반 콘솔 롬셋 판별 (예: roms/snes/ -> SNES, roms/megadriv/ -> Genesis)
+                        fpath_lower = file_path.lower().replace("\\", "/")
+                        parts = fpath_lower.split("/")
+                        parent_dir = parts[-2] if len(parts) >= 2 else ""
+
+                        detected_console = False
+                        if parent_dir in ("snes", "sfc", "super_nintendo"):
+                            info["core"] = "snes"
+                            info["platform"] = "SNES"
+                            detected_console = True
+                        elif parent_dir in ("megadriv", "genesis", "sega", "md", "segamd"):
+                            info["core"] = "segaMD"
+                            info["platform"] = "Genesis"
+                            detected_console = True
+                        elif parent_dir in ("nes", "fc", "famicom"):
+                            info["core"] = "nes"
+                            info["platform"] = "NES"
+                            detected_console = True
+                        elif parent_dir in ("gba", "gameboy_advance"):
+                            info["core"] = "gba"
+                            info["platform"] = "GBA"
+                            detected_console = True
+                        elif parent_dir in ("gb", "gbc", "gameboy"):
+                            info["core"] = "gb"
+                            info["platform"] = "GB"
+                            detected_console = True
+                        elif parent_dir in ("n64", "nintendo64"):
+                            info["core"] = "n64"
+                            info["platform"] = "N64"
+                            detected_console = True
+                        elif parent_dir in ("psx", "ps1", "playstation", "isos"):
+                            info["core"] = "psx"
+                            info["platform"] = "PS1"
+                            detected_console = True
+                        elif parent_dir in ("nds", "nintendods"):
+                            info["core"] = "nds"
+                            info["platform"] = "NDS"
+                            detected_console = True
+
+                        if not detected_console:
+                            # 4. 상위 폴더가 콘솔이 아니면 아케이드/네오지오로 판별
+                            info["core"] = "arcade"
+                            info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
+
                         raw_title = clean_fname.split(".")[0].replace("_", " ").replace("-", " ")
                         info["title"] = raw_title.title() if not raw_title.isupper() else raw_title
         except Exception as e:
