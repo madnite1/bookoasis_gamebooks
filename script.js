@@ -992,7 +992,7 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
     #game { width: 100%; height: 100%; }
-    .ejs_menu_bar, [class*="ejs_menu"] { display: none !important; }
+    .ejs_menu_bar, [class*="ejs_menu"], [class*="context_menu"], .ejs_context, #context_menu { display: none !important; opacity: 0 !important; pointer-events: none !important; visibility: hidden !important; }
   </style>
 </head>
 <body>
@@ -1050,12 +1050,19 @@
         window.parent.__GBA_ON_GAME_START__();
       }
     };
+
+    // 캡처 단계(true)에서 contextmenu 이벤트를 가로채 EmulatorJS 자체 메뉴 호출 원천 차단
     window.addEventListener('contextmenu', function(e) {
       e.preventDefault();
+      e.stopPropagation();
+      if (typeof e.stopImmediatePropagation === 'function') {
+        e.stopImmediatePropagation();
+      }
       if (window.parent && window.parent.__GBA_ON_CONTEXT_MENU__) {
         window.parent.__GBA_ON_CONTEXT_MENU__(e.clientX, e.clientY, e.screenX, e.screenY);
       }
-    });
+      return false;
+    }, true);
   <\/script>
   <script src="https://cdn.emulatorjs.org/stable/data/loader.js"><\/script>
 </body>
