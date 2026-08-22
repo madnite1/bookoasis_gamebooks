@@ -1669,12 +1669,20 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         if extra_path and os.path.isdir(extra_path):
             scan_dirs.append(extra_path)
 
+        bios_dir = os.path.abspath(self._get_bios_dir())
+        covers_dir = os.path.abspath(self._get_covers_dir())
+
         allowed_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z"}
         found_files = {}
 
         for sdir in scan_dirs:
             try:
                 for root, _, files in os.walk(sdir):
+                    abs_root = os.path.abspath(root)
+                    # 바이오스 폴더 또는 커버 폴더 하위 경로는 롬 스캔 대상에서 원천 제외
+                    if abs_root.startswith(bios_dir) or abs_root.startswith(covers_dir):
+                        continue
+
                     for f in files:
                         if _is_bios_file(f):
                             continue
@@ -2259,7 +2267,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "type": "bios",
                 })
 
-            dest_dir = self._get_roms_dir()
+            # 사용자 설정 추가 ROM 경로(EXTRA_ROMS_PATH)가 있으면 해당 폴더에 우선 업로드
+            custom_roms_path = self._get_setting("EXTRA_ROMS_PATH", "").strip()
+            if custom_roms_path and os.path.isdir(custom_roms_path):
+                dest_dir = custom_roms_path
+            else:
+                dest_dir = self._get_roms_dir()
+
             temp_dest = os.path.join(dest_dir, f".temp_upload_{safe_filename}")
             file.save(temp_dest)
 
