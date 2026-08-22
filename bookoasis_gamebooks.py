@@ -1067,16 +1067,25 @@ def _detect_rom_info(file_path):
                     # KNOWN_ARCADE_TITLES에 등록된 게임만 아케이드/네오지오로 인정
                     # 등록되지 않은 zip은 MAME 디바이스/펌웨어/바이오스로 간주하여 무시
                     fname_base = os.path.basename(file_path)
-                    # .temp_upload_ 접두사 및 임시 파일 접두사 정규화
                     clean_fname = re.sub(r"^\.+(temp_upload_)?", "", fname_base)
                     stem = os.path.splitext(clean_fname)[0].lower()
-                    if stem in KNOWN_ARCADE_TITLES:
+
+                    # 1. 바이오스 / MAME 기판 칩셋 디바이스는 게임 목록 등록에서 제외 (bios/ 폴더로 분류 대상)
+                    if _is_bios_file(clean_fname) or stem in KNOWN_BIOS_STEMS:
+                        info["core"] = "_skip_"
+                        info["platform"] = "_skip_"
+                    # 2. 내장 아케이드 사전(KNOWN_ARCADE_TITLES)에 등록된 인기 타이틀
+                    elif stem in KNOWN_ARCADE_TITLES:
                         info["core"] = "arcade"
                         info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
                         info["title"] = KNOWN_ARCADE_TITLES[stem]
+                    # 3. 사전에 없는 일반 아케이드/MAME 롬셋 허용 (자동 아케이드 코어 지정 및 파일명 기반 타이틀 생성)
                     else:
-                        info["core"] = "_skip_"
-                        info["platform"] = "_skip_"
+                        info["core"] = "arcade"
+                        info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
+                        # 파일명 기반 클린 타이틀 생성 (예: 1942 -> 1942, pacman -> Pacman)
+                        raw_title = clean_fname.split(".")[0].replace("_", " ").replace("-", " ")
+                        info["title"] = raw_title.title() if not raw_title.isupper() else raw_title
         except Exception as e:
             logger.debug(f"[{SELF_ID}] Zip inspect error: {e}")
     elif ext == ".7z":
