@@ -1076,10 +1076,77 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return saves_dir
 
     def _get_covers_dir(self):
-        """커버 아트 이미지 디렉터리 (../../data/bookoasis_gamebooks/covers/)"""
-        covers_dir = os.path.join(self._get_data_dir(), "covers")
-        os.makedirs(covers_dir, exist_ok=True)
-        return covers_dir
+        """커버 아트 이미지 디렉터리 (설정된 COVERS_PATH 또는 기본 ../../data/bookoasis_gamebooks/covers/)"""
+        custom_path = self._get_setting("COVERS_PATH", "").strip()
+        if custom_path:
+            try:
+                os.makedirs(custom_path, exist_ok=True)
+                if os.path.exists(custom_path) and os.path.isdir(custom_path):
+                    return custom_path
+            except Exception as e:
+                logger.warning(f"[{SELF_ID}] Custom covers dir error ({custom_path}): {e}")
+        default_dir = os.path.join(self._get_data_dir(), "covers")
+        os.makedirs(default_dir, exist_ok=True)
+        return default_dir
+
+    def _migrate_covers_to_custom_dir(self, new_dir):
+        """기존 커버 아트 폴더의 파일들을 새로 설정된 폴더로 이동 및 DB cover_path 경로 갱신"""
+        if not new_dir:
+            return 0
+        new_dir = os.path.abspath(new_dir.strip())
+        os.makedirs(new_dir, exist_ok=True)
+
+        old_default_dir = os.path.abspath(os.path.join(self._get_data_dir(), "covers"))
+        moved_count = 0
+
+        # 1. 기본 covers/ 폴더 내 파일 이동
+        if os.path.exists(old_default_dir) and old_default_dir != new_dir:
+            try:
+                for f in os.listdir(old_default_dir):
+                    if f.startswith("."):
+                        continue
+                    src_f = os.path.join(old_default_dir, f)
+                    if os.path.isfile(src_f):
+                        dst_f = os.path.join(new_dir, f)
+                        try:
+                            if not os.path.exists(dst_f):
+                                shutil.move(src_f, dst_f)
+                            else:
+                                os.remove(src_f)
+                            moved_count += 1
+                        except Exception as e:
+                            logger.error(f"[{SELF_ID}] Move cover file error ({f}): {e}")
+            except Exception as e:
+                logger.error(f"[{SELF_ID}] Covers migration error: {e}")
+
+        # 2. DB에 기록된 cover_path 일괄 갱신
+        try:
+            rows = self._db_query("SELECT id, cover_path FROM games WHERE cover_path IS NOT NULL AND cover_path != ''")
+            for r in rows:
+                c_path = r["cover_path"]
+                if c_path and os.path.exists(c_path):
+                    fname = os.path.basename(c_path)
+                    new_c_path = os.path.join(new_dir, fname)
+                    if c_path != new_c_path:
+                        if not os.path.exists(new_c_path):
+                            try:
+                                shutil.move(c_path, new_c_path)
+                            except Exception:
+                                pass
+                        self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (new_c_path, r["id"]))
+                else:
+                    # 파일은 new_dir에 이미 이동되었을 수 있으므로 확인 후 DB 갱신
+                    game_id = r["id"]
+                    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+                        check_p = os.path.join(new_dir, f"{game_id}{ext}")
+                        if os.path.exists(check_p):
+                            self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (check_p, game_id))
+                            break
+        except Exception as e:
+            logger.error(f"[{SELF_ID}] DB cover path update error: {e}")
+
+        logger.info(f"[{SELF_ID}] Migrated {moved_count} covers to {new_dir}")
+        return moved_count
 
     def _get_bios_dir(self):
         """시스템 바이오스 파일 디렉터리 (../../data/bookoasis_gamebooks/bios/)"""
@@ -2169,6 +2236,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "cloud_save_enabled": str(self._get_setting("CLOUD_SAVE_ENABLED", "1")).lower() in ("1", "true", "yes", "on"),
                         "auto_save_interval_sec": int(self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")),
                         "extra_roms_path": str(self._get_setting("EXTRA_ROMS_PATH", "") or "").strip(),
+                        "covers_path": str(self._get_setting("COVERS_PATH", "") or "").strip(),
                         "ss_devid": str(self._get_setting("SS_DEVID", "") or "").strip(),
                         "ss_devpassword": str(self._get_setting("SS_DEVPASSWORD", "") or "").strip(),
                         "ss_user": str(self._get_setting("SS_USER", "") or "").strip(),
@@ -2184,6 +2252,88 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     return {"success": False, "error": "game_id 파라미터가 필요합니다."}
                 res = self._check_and_update_game(game_id)
                 return {"success": True, "result": res}
+
+            elif action == "get_cover_migration_candidates":
+                if not _is_current_user_admin():
+                    return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
+                target_dir = request.args.get("target_dir", "").strip()
+                if not target_dir:
+                    return {"success": False, "error": "target_dir 파라미터가 필요합니다."}
+                target_dir = os.path.abspath(target_dir)
+
+                old_default_dir = os.path.abspath(os.path.join(self._get_data_dir(), "covers"))
+                files_to_migrate = []
+
+                # 1. covers/ 디렉터리 내 물리 파일
+                if os.path.exists(old_default_dir) and old_default_dir != target_dir:
+                    try:
+                        for f in os.listdir(old_default_dir):
+                            if f.startswith("."):
+                                continue
+                            full_p = os.path.join(old_default_dir, f)
+                            if os.path.isfile(full_p):
+                                files_to_migrate.append({"type": "file", "path": full_p, "name": f})
+                    except Exception as e:
+                        logger.error(f"[{SELF_ID}] List covers error: {e}")
+
+                # 2. DB cover_path 중 아직 새 폴더가 아닌 항목들
+                db_rows = self._db_query("SELECT id, cover_path FROM games WHERE cover_path IS NOT NULL AND cover_path != ''")
+                for r in db_rows:
+                    c_path = r["cover_path"]
+                    if c_path:
+                        c_dir = os.path.abspath(os.path.dirname(c_path))
+                        if c_dir != target_dir:
+                            files_to_migrate.append({"type": "db_row", "game_id": r["id"], "path": c_path, "name": os.path.basename(c_path)})
+
+                # 중복 제거 (path 기준)
+                seen_paths = set()
+                unique_list = []
+                for item in files_to_migrate:
+                    if item.get("path") and item["path"] not in seen_paths:
+                        seen_paths.add(item["path"])
+                        unique_list.append(item)
+
+                return {"success": True, "total": len(unique_list), "items": unique_list, "target_dir": target_dir}
+
+            elif action == "migrate_cover_batch":
+                if not _is_current_user_admin():
+                    return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
+                json_data = request.get_json(silent=True) or {}
+                target_dir = json_data.get("target_dir") or request.form.get("target_dir") or request.args.get("target_dir") or ""
+                target_dir = os.path.abspath(target_dir.strip()) if target_dir else ""
+                if not target_dir:
+                    return {"success": False, "error": "target_dir 파라미터가 필요합니다."}
+
+                os.makedirs(target_dir, exist_ok=True)
+                items = json_data.get("items", [])
+                moved_count = 0
+
+                for it in items:
+                    src_p = it.get("path")
+                    fname = it.get("name") or (os.path.basename(src_p) if src_p else "")
+                    game_id = it.get("game_id")
+
+                    if src_p and os.path.exists(src_p):
+                        dst_p = os.path.join(target_dir, fname)
+                        if src_p != dst_p:
+                            try:
+                                if not os.path.exists(dst_p):
+                                    shutil.move(src_p, dst_p)
+                                else:
+                                    os.remove(src_p)
+                                moved_count += 1
+                            except Exception as e:
+                                logger.error(f"[{SELF_ID}] Move cover batch error ({fname}): {e}")
+
+                        # DB 갱신
+                        if game_id:
+                            self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (dst_p, game_id))
+                        else:
+                            # filename에서 game_id 역추적
+                            stem = os.path.splitext(fname)[0]
+                            self._db_execute("UPDATE games SET cover_path = ? WHERE id = ? OR cover_path = ?", (dst_p, stem, src_p))
+
+                return {"success": True, "moved_count": moved_count}
 
             elif action == "scan_new_roms":
                 self._scan_roms(new_only=True)
@@ -2299,6 +2449,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     return request.args.get(key) or request.form.get(key) or json_data.get(key) or default
 
                 extra_path = str(_get_val("extra_roms_path", "")).strip()
+                covers_path = str(_get_val("covers_path", "")).strip()
                 cloud_save_raw = _get_val("cloud_save_enabled", "1")
                 interval_raw = _get_val("auto_save_interval_sec", "60")
 
@@ -2315,7 +2466,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 except Exception:
                     interval = 60
 
+                prev_covers_path = str(self._get_setting("COVERS_PATH", "")).strip()
+
                 self._set_setting("EXTRA_ROMS_PATH", extra_path)
+                self._set_setting("COVERS_PATH", covers_path)
                 self._set_setting("CLOUD_SAVE_ENABLED", cloud_save)
                 self._set_setting("AUTO_SAVE_INTERVAL_SEC", interval)
                 self._set_setting("SS_DEVID", ss_devid)
@@ -2324,6 +2478,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 self._set_setting("SS_PASSWORD", ss_password)
                 self._set_setting("IGDB_CLIENT_ID", igdb_client_id)
                 self._set_setting("IGDB_CLIENT_SECRET", igdb_client_secret)
+
+                # 커버 이미지 폴더가 새로 지정되었거나 변경되었을 경우 기존 커버 파일들을 새 위치로 마이그레이션
+                if covers_path and covers_path != prev_covers_path:
+                    try:
+                        self._migrate_covers_to_custom_dir(covers_path)
+                    except Exception as e:
+                        logger.error(f"[{SELF_ID}] Cover migration during save_settings error: {e}")
 
                 # ROM 디렉토리 스캔을 백그라운드로 실행하여 저장 응답 타임아웃 방지
                 threading.Thread(target=self._scan_roms, daemon=True).start()

@@ -1011,13 +1011,40 @@
     window.EJS_gamepad = true;
     window.EJS_mouse = true;
     window.EJS_pointerLock = false;
-    window.EJS_hideSettings = true;
-    window.EJS_Buttons = {
-      playPause: false, restart: false, mute: false, settings: false, fullscreen: false,
-      saveState: false, loadState: false, screenRecord: false, gamepad: false, cheat: false,
-      volume: false, saveSavFiles: false, loadSavFiles: false, quickSave: false, quickLoad: false,
-      screenshot: false, cacheManager: false, contextMenu: false, disks: false, netplay: false
-    };
+
+    // WakeLock API의 "The requesting document is hidden" 예외 안전 처리
+    try {
+      if (navigator.wakeLock && typeof navigator.wakeLock.request === 'function') {
+        const origRequest = navigator.wakeLock.request.bind(navigator.wakeLock);
+        navigator.wakeLock.request = function(type) {
+          try {
+            return origRequest(type).catch(() => ({ release: () => Promise.resolve() }));
+          } catch(e) {
+            return Promise.resolve({ release: () => Promise.resolve() });
+          }
+        };
+      }
+    } catch(e) {}
+
+    // EmulatorJS 내부의 allSettings.disk 접근 에러 방지 방어 코드
+    try {
+      Object.defineProperty(Object.prototype, 'allSettings', {
+        get() {
+          return this.__allSettings__ || {
+            disk: { currentDisk: 0, disks: [] },
+            shaders: 'disabled',
+            volume: 1,
+            muted: false
+          };
+        },
+        set(v) {
+          this.__allSettings__ = v;
+        },
+        configurable: true,
+        enumerable: false
+      });
+    } catch(e) {}
+
     window.EJS_onGameStart = function() {
       if (window.parent && window.parent.__GBA_ON_GAME_START__) {
         window.parent.__GBA_ON_GAME_START__();
@@ -2364,6 +2391,7 @@
       $('gbaSettingCloudSave').checked = state.config.cloud_save_enabled;
       $('gbaSettingInterval').value = state.config.auto_save_interval_sec;
       $('gbaSettingExtraPath').value = state.config.extra_roms_path || '';
+      $('gbaSettingCoversPath').value = state.config.covers_path || '';
       $('gbaSettingsModal').style.display = 'flex';
     });
 
@@ -2376,26 +2404,79 @@
 
     $('gbaSettingsSaveBtn').addEventListener('click', async () => {
       const extraPath = $('gbaSettingExtraPath').value.trim();
+      const coversPath = $('gbaSettingCoversPath').value.trim();
       const cloudSave = $('gbaSettingCloudSave').checked ? '1' : '0';
       const interval = $('gbaSettingInterval').value.trim();
       const saveBtn = $('gbaSettingsSaveBtn');
 
+      const prevCoversPath = (state.config.covers_path || '').trim();
+      const needMigration = coversPath && coversPath !== prevCoversPath;
+
       saveBtn.disabled = true;
       saveBtn.textContent = '저장 중...';
 
+      const scanModal = $('gbaScanModal');
+      const scanStatus = $('gbaScanStatus');
+      const scanProgressBar = $('gbaScanProgressBar');
+      const scanDetails = $('gbaScanDetails');
+
       try {
+        if (needMigration) {
+          $('gbaSettingsModal').style.display = 'none';
+          if (scanModal) {
+            scanModal.style.display = 'flex';
+            if (scanStatus) scanStatus.textContent = '기존 커버 이미지 마이그레이션 대상을 분석하는 중...';
+            if (scanProgressBar) scanProgressBar.style.width = '0%';
+            if (scanDetails) scanDetails.textContent = '분석 준비 중...';
+          }
+
+          // 1. 마이그레이션 대상 파일 목록 조회
+          const candRes = await apiCall('get_cover_migration_candidates', { target_dir: coversPath });
+          const items = (candRes && candRes.success && candRes.items) ? candRes.items : [];
+          const total = items.length;
+
+          if (total > 0) {
+            if (scanStatus) scanStatus.textContent = `기존 커버 이미지를 새 폴더로 이동하는 중... (${total}개)`;
+            const BATCH_SIZE = 10;
+            let movedTotal = 0;
+
+            for (let i = 0; i < total; i += BATCH_SIZE) {
+              const batch = items.slice(i, i + BATCH_SIZE);
+              await apiCall('migrate_cover_batch', {
+                target_dir: coversPath,
+                items: batch,
+              });
+
+              movedTotal += batch.length;
+              const percent = Math.min(Math.round((movedTotal / total) * 90), 90);
+              if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
+              if (scanDetails) scanDetails.textContent = `${movedTotal} / ${total} 커버 파일 이동 완료 (${percent}%)`;
+            }
+          }
+
+          if (scanStatus) scanStatus.textContent = '설정 저장 및 마무리 중...';
+          if (scanProgressBar) scanProgressBar.style.width = '95%';
+        }
+
         const res = await apiCall('save_settings', {
           extra_roms_path: extraPath,
+          covers_path: coversPath,
           cloud_save_enabled: cloudSave,
           auto_save_interval_sec: interval,
         });
+
         if (res && res.success) {
           state.config.extra_roms_path = extraPath;
+          state.config.covers_path = coversPath;
           state.config.cloud_save_enabled = cloudSave === '1';
           state.config.auto_save_interval_sec = parseInt(interval, 10) || 60;
           $('gbaSettingsModal').style.display = 'none';
-          showToast('설정이 저장되었습니다.');
-          loadLibrary();
+
+          if (scanProgressBar) scanProgressBar.style.width = '100%';
+          if (scanDetails) scanDetails.textContent = '설정 및 마이그레이션 완료!';
+
+          showToast('설정 및 커버 마이그레이션이 성공적으로 완료되었습니다! 📁');
+          loadLibrary(true);
         } else {
           showToast(res && res.error ? res.error : '설정 저장에 실패했습니다.', true);
         }
@@ -2404,6 +2485,11 @@
       } finally {
         saveBtn.disabled = false;
         saveBtn.textContent = '설정 저장';
+        if (scanModal) {
+          setTimeout(() => {
+            scanModal.style.display = 'none';
+          }, 300);
+        }
       }
     });
 

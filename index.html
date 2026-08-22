@@ -204,8 +204,14 @@
 
         <div class="gba-form-group">
           <label class="gba-label">추가 ROM 스캔 경로 (선택)</label>
-          <input type="text" id="gbaSettingExtraPath" class="gba-input" placeholder="/mnt/gds2/DATA/ROMS">
+          <input type="text" id="gbaSettingExtraPath" class="gba-input" placeholder="/mnt/nas/roms">
           <small class="gba-help-text">기본 <code>plugins/data/bookoasis_gamebooks/roms</code> 외에 추가로 읽어올 외부 폴더 경로입니다.</small>
+        </div>
+
+        <div class="gba-form-group">
+          <label class="gba-label">커버 이미지 저장 폴더 경로 (선택)</label>
+          <input type="text" id="gbaSettingCoversPath" class="gba-input" placeholder="/mnt/nas/covers">
+          <small class="gba-help-text">비워두면 기본 경로(<code>plugins/data/bookoasis_gamebooks/covers/</code>)를 유지합니다. 경로를 지정하여 저장하면 현재 등록된 기존 커버 이미지 파일들도 해당 폴더로 자동 이동됩니다.</small>
         </div>
 
         <div class="gba-storage-info">
@@ -213,6 +219,7 @@
           <ul>
             <li><strong>설정 및 DB:</strong> <code>plugins/data/bookoasis_gamebooks/gba.db</code></li>
             <li><strong>공유 롬 및 바이오스:</strong> <code>plugins/data/bookoasis_gamebooks/roms/</code>, <code>bios/</code></li>
+            <li><strong>커버 이미지:</strong> <code>plugins/data/bookoasis_gamebooks/covers/</code> (또는 사용자 지정 경로)</li>
             <li><strong>유저 세이브 파일:</strong> <code>plugins/data/bookoasis_gamebooks/saves/user_{user_id}/</code></li>
           </ul>
         </div>
