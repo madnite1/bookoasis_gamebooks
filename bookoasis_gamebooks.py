@@ -2165,14 +2165,20 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "error": f"지원되지 않거나 유효하지 않은 롬 파일({safe_filename})입니다. 지원 기종(SFC, GBA, NES, GB, MD, NDS, N64, PS1, PSP, Arcade 등)을 확인해 주세요.",
                 }), 400
 
+            # 코어/시스템 이름별 하위 폴더 결정 (예: snes, gba, nes, segaMD, psx, arcade 등)
+            core_name = rom_info.get("core") or rom_info.get("platform") or "other"
+            core_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(core_name).strip()).lower() or "other"
+            target_sub_dir = os.path.join(dest_dir, core_name)
+            os.makedirs(target_sub_dir, exist_ok=True)
+
             base_n, ext_n = os.path.splitext(safe_filename)
-            dest_path = os.path.join(dest_dir, safe_filename)
+            dest_path = os.path.join(target_sub_dir, safe_filename)
             counter = 1
             while os.path.exists(dest_path):
-                dest_path = os.path.join(dest_dir, f"{base_n}_{counter}{ext_n}")
+                dest_path = os.path.join(target_sub_dir, f"{base_n}_{counter}{ext_n}")
                 counter += 1
 
-            os.rename(temp_dest, dest_path)
+            shutil.move(temp_dest, dest_path)
             self._scan_roms()
 
             # 아케이드 / 네오지오 롬 감지 시 바이오스 안내 생성
