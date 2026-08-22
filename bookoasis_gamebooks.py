@@ -1869,15 +1869,18 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "gba_homebrew_install": (f"{ROUTE_BASE}/homebrew-install", ["POST"]),
                 }
 
+                registered_endpoints = set(rule.endpoint for rule in app.url_map.iter_rules())
+
                 for endpoint, (path, methods) in routes.items():
-                    if endpoint not in app.view_functions:
-                        if endpoint == "gba_rom_named":
-                            handler_name = "_route_rom_stream"
-                        else:
-                            handler_name = "_route_" + endpoint.replace("gba_", "")
-                        view_func = getattr(self, handler_name, None)
-                        if view_func:
-                            app.view_functions[endpoint] = view_func
+                    if endpoint == "gba_rom_named":
+                        handler_name = "_route_rom_stream"
+                    else:
+                        handler_name = "_route_" + endpoint.replace("gba_", "")
+                    view_func = getattr(self, handler_name, None)
+                    if view_func:
+                        # 핫리로드 시 항상 최신 인스턴스의 핸들러로 view_functions 갱신
+                        app.view_functions[endpoint] = view_func
+                        if endpoint not in registered_endpoints:
                             app.url_map.add(Rule(path, endpoint=endpoint, methods=methods))
 
                 if not getattr(app, "_gba_wsgi_patched", False):
