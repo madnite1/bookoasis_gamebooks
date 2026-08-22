@@ -2220,39 +2220,49 @@
         let coverUpdatedCount = 0;
         let deletedCount = 0;
 
-        // 1단계: 기존 목록 게임 유효성 및 커버 검사 (3개씩 비동기 병렬 처리)
-        const CONCURRENCY = 3;
-        for (let i = 0; i < gamesToCheck.length; i += CONCURRENCY) {
-          const chunk = gamesToCheck.slice(i, i + CONCURRENCY);
-          await Promise.all(
-            chunk.map(async (game) => {
-              try {
-                const res = await apiCall('check_game', { game_id: game.id });
-                checkedCount++;
-                if (res && res.success && res.result) {
-                  if (res.result.deleted) {
-                    deletedCount++;
-                    state.games = state.games.filter((g) => g.id !== game.id);
-                  } else if (res.result.cover_updated) {
-                    coverUpdatedCount++;
-                    game.cover_path = true;
-                    if (res.result.cover_url) {
-                      game.cover_url = res.result.cover_url;
-                    }
-                  }
-                }
-              } catch (err) {
-                checkedCount++;
-                console.error('[GBA] Check game error:', game.id, err);
-              }
-            })
-          );
+        // 1단계: 동적 작업 풀(Sliding Window Worker Pool)을 이용한 개별 실시간 검증 (동시 4개 유지)
+        const CONCURRENCY = 4;
+        let cursor = 0;
 
-          // 프로그레스바 및 상태 업데이트 (화면 리스트는 전체 검증 완료 후 1회만 일괄 갱신)
+        const updateProgress = () => {
           const percent = total > 0 ? Math.min(Math.round((checkedCount / total) * 85), 85) : 85;
           if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
           if (scanDetails) scanDetails.textContent = `${Math.min(checkedCount, total)} / ${total} 게임 검증 완료 (${percent}%)`;
+        };
+
+        const checkWorker = async () => {
+          while (cursor < gamesToCheck.length) {
+            const game = gamesToCheck[cursor++];
+            if (!game) break;
+            try {
+              const res = await apiCall('check_game', { game_id: game.id });
+              checkedCount++;
+              if (res && res.success && res.result) {
+                if (res.result.deleted) {
+                  deletedCount++;
+                  state.games = state.games.filter((g) => g.id !== game.id);
+                } else if (res.result.cover_updated) {
+                  coverUpdatedCount++;
+                  game.cover_path = true;
+                  if (res.result.cover_url) {
+                    game.cover_url = res.result.cover_url;
+                  }
+                }
+              }
+            } catch (err) {
+              checkedCount++;
+              console.error('[GBA] Check game error:', game.id, err);
+            }
+            updateProgress();
+          }
+        };
+
+        const workerCount = Math.min(CONCURRENCY, total || 1);
+        const workers = [];
+        for (let w = 0; w < workerCount; w++) {
+          workers.push(checkWorker());
         }
+        await Promise.all(workers);
 
         // 2단계: 신규 추가된 ROM 파일 디스크 스캔 및 등록
         if (scanStatus) scanStatus.textContent = '새로운 ROM 파일 및 디렉터리를 스캔하는 중...';
