@@ -1576,8 +1576,15 @@
           method: 'POST',
           body: formData,
         });
-        const result = await res.json();
-        if (result.success) {
+        let result = null;
+        const text = await res.text();
+        try {
+          result = JSON.parse(text);
+        } catch (e) {
+          result = { success: false, error: text || `서버 응답 오류 (HTTP ${res.status})` };
+        }
+
+        if (result && result.success) {
           completed++;
           if (result.notice) {
             setTimeout(() => {
@@ -1589,11 +1596,11 @@
             }, 1200);
           }
         } else {
-          showToast(`업로드 실패 (${file.name}): ${result.error}`, true);
+          showToast(`업로드 실패 (${file.name}): ${result && result.error ? result.error : '알 수 없는 오류'}`, true);
         }
       } catch (err) {
         console.error('[GBA] Upload error:', err);
-        showToast(`업로드 에러 (${file.name})`, true);
+        showToast(`업로드 에러 (${file.name}): ${err.message || err}`, true);
       }
     }
 
