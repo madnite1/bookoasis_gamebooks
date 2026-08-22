@@ -77,8 +77,8 @@
   // --------------------------------------------------------------------------
   // 데이터 로드 & 렌더링
   // --------------------------------------------------------------------------
-  async function loadLibrary() {
-    showLoading(true);
+  async function loadLibrary(silent = false) {
+    if (!silent) showLoading(true);
     try {
       const data = await apiCall('list_games');
       if (data.success) {
@@ -123,7 +123,7 @@
       console.error('[GBA] Load library error:', err);
       showToast('서버와 통신 중 오류가 발생했습니다.', true);
     } finally {
-      showLoading(false);
+      if (!silent) showLoading(false);
     }
   }
 
@@ -841,16 +841,6 @@
     const container = $('gbaEmulatorContainer');
     container.innerHTML = '';
 
-    // EmulatorJS 컨테이너 엘리먼트 생성 (tabIndex를 주어야 div가 키보드 이벤트를 수신함)
-    const emuDiv = document.createElement('div');
-    emuDiv.id = 'ejs-game-frame';
-    emuDiv.tabIndex = 0;
-    emuDiv.style.width = '100%';
-    emuDiv.style.height = '100%';
-    emuDiv.style.outline = 'none';
-    container.appendChild(emuDiv);
-    emuDiv.focus();
-
     // EmulatorJS 공식 문서(docs4devs/cores) 규격 기반 동적 시스템/코어 매퍼
     const EMULATORJS_CORE_MAP = {
       // 닌텐도 (Nintendo)
@@ -951,17 +941,6 @@
       }
     }
 
-    // 이전 로더 스크립트 제거 (동적 코어 스위칭 무결성 보장)
-    document.querySelectorAll('script[src*="loader.js"], script[src*="emulatorjs"]').forEach((s) => s.remove());
-
-    // EmulatorJS 설정 (기본 하단 툴바는 모두 비활성화하고 자체 툴바에 연동)
-    window.EJS_player = '#ejs-game-frame';
-    window.EJS_core = coreToUse;
-    // 아케이드 코어는 EJS_gameName을 8자 MAME 드라이버 이름으로 인식
-    window.EJS_gameName = isArcade ? rawStem : game.title;
-    window.EJS_gameUrl = window.location.origin + game.rom_url;
-    window.EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
-
     // 시스템 바이오스(BIOS) EJS_biosUrl 자동 매핑
     const biosList = (state.available_bios || []).map((b) => b.toLowerCase());
     let neededBiosFile = null;
@@ -988,12 +967,44 @@
       if (d3doBios) neededBiosFile = d3doBios;
     }
 
-    if (neededBiosFile) {
-      window.EJS_biosUrl = `${window.location.origin}/api/webhook/bookoasis_gamebooks/bios/${encodeURIComponent(neededBiosFile)}`;
-    } else {
-      delete window.EJS_biosUrl;
-    }
+    const biosUrl = neededBiosFile ? `${window.location.origin}/api/webhook/bookoasis_gamebooks/bios/${encodeURIComponent(neededBiosFile)}` : null;
+    const gameUrl = window.location.origin + game.rom_url;
+    const gameName = isArcade ? rawStem : game.title;
+    const loadStateUrl = game.has_state ? window.location.origin + game.state_url : null;
 
+    // SPA 환경에서의 전역 변수 충돌(let EJS_STORAGE redeclaration) 및 WASM 메모리 누수 방지를 위해
+    // 완전히 독립된 iframe 샌드박스를 생성하여 EmulatorJS를 격리 실행
+    const iframe = document.createElement('iframe');
+    iframe.id = 'gbaEmulatorIframe';
+    iframe.style.width = '100%';
+    iframe.style.height = '100%';
+    iframe.style.border = 'none';
+    iframe.style.outline = 'none';
+    iframe.allow = 'autoplay; gamepad; fullscreen; cross-origin-isolated';
+    container.appendChild(iframe);
+
+    const iframeHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #game { width: 100%; height: 100%; }
+    .ejs_menu_bar, [class*="ejs_menu"] { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="game"></div>
+  <script>
+    window.EJS_player = '#game';
+    window.EJS_core = ${JSON.stringify(coreToUse)};
+    window.EJS_gameName = ${JSON.stringify(gameName)};
+    window.EJS_gameUrl = ${JSON.stringify(gameUrl)};
+    window.EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
+    ${biosUrl ? `window.EJS_biosUrl = ${JSON.stringify(biosUrl)};` : ''}
+    ${loadStateUrl ? `window.EJS_loadStateURL = ${JSON.stringify(loadStateUrl)};` : ''}
     window.EJS_startOnLoaded = true;
     window.EJS_color = '#6366f1';
     window.EJS_alignStartButton = 'center';
@@ -1001,52 +1012,30 @@
     window.EJS_mouse = true;
     window.EJS_pointerLock = false;
     window.EJS_hideSettings = true;
-
-    // EmulatorJS 기본 하단 메뉴 버튼 전체 비활성화
     window.EJS_Buttons = {
-      playPause: false,
-      restart: false,
-      mute: false,
-      settings: false,
-      fullscreen: false,
-      saveState: false,
-      loadState: false,
-      screenRecord: false,
-      gamepad: false,
-      cheat: false,
-      volume: false,
-      saveSavFiles: false,
-      loadSavFiles: false,
-      quickSave: false,
-      quickLoad: false,
-      screenshot: false,
-      cacheManager: false,
-      contextMenu: false,
-      disks: false,
-      netplay: false,
+      playPause: false, restart: false, mute: false, settings: false, fullscreen: false,
+      saveState: false, loadState: false, screenRecord: false, gamepad: false, cheat: false,
+      volume: false, saveSavFiles: false, loadSavFiles: false, quickSave: false, quickLoad: false,
+      screenshot: false, cacheManager: false, contextMenu: false, disks: false, netplay: false
     };
-
-    const focusEmulator = () => {
-      const frame = $('ejs-game-frame');
-      if (frame) frame.focus();
-      const canvas = document.querySelector('#ejs-game-frame canvas') || document.querySelector('canvas');
-      if (canvas) {
-        canvas.setAttribute('tabindex', '0');
-        canvas.focus();
+    window.EJS_onGameStart = function() {
+      if (window.parent && window.parent.__GBA_ON_GAME_START__) {
+        window.parent.__GBA_ON_GAME_START__();
       }
     };
-
-    window.EJS_onGameStart = () => {
-      const emu = window.EJS_emulator;
-      if (emu && emu.elements) {
-        if (emu.elements.menu) emu.elements.menu.style.display = 'none';
-        if (emu.elements.menuToggle) emu.elements.menuToggle.style.display = 'none';
-        if (emu.elements.contextmenu) emu.elements.contextmenu.style.display = 'none';
+    window.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      if (window.parent && window.parent.__GBA_ON_CONTEXT_MENU__) {
+        window.parent.__GBA_ON_CONTEXT_MENU__(e.clientX, e.clientY, e.screenX, e.screenY);
       }
-      document.querySelectorAll('#ejs-game-frame .ejs_menu_bar, #ejs-game-frame [class*="ejs_menu"]').forEach((el) => {
-        el.style.display = 'none';
-      });
+    });
+  <\/script>
+  <script src="https://cdn.emulatorjs.org/stable/data/loader.js"><\/script>
+</body>
+</html>`;
 
+    // 부모-자식 프레임 브릿지 콜백 등록
+    window.__GBA_ON_GAME_START__ = () => {
       focusEmulator();
       setTimeout(() => {
         applyGraphicsSettings();
@@ -1055,37 +1044,57 @@
       setTimeout(focusEmulator, 800);
     };
 
+    window.__GBA_ON_CONTEXT_MENU__ = (clientX, clientY) => {
+      if (!state.activeGame) return;
+      const iframeRect = iframe.getBoundingClientRect();
+      const x = iframeRect.left + clientX;
+      const y = iframeRect.top + clientY;
+      showCustomContextMenu(x, y);
+    };
+
+    const focusEmulator = () => {
+      try {
+        if (iframe && iframe.contentWindow) {
+          iframe.contentWindow.focus();
+          const innerDoc = iframe.contentDocument || iframe.contentWindow.document;
+          const canvas = innerDoc.querySelector('canvas') || innerDoc.querySelector('#game');
+          if (canvas) {
+            canvas.setAttribute('tabindex', '0');
+            canvas.focus();
+          }
+        }
+      } catch (e) {}
+    };
+
     container.onclick = focusEmulator;
     $('gbaEmulatorViewport').onclick = focusEmulator;
 
-    // 저장된 실시간 스냅샷이 있다면 로드 설정 (그 화면 그대로 즉시 이어하기)
-    if (game.has_state) {
-      window.EJS_loadStateURL = window.location.origin + game.state_url;
-    }
+    // iframe 콘텐츠 주입
+    const doc = iframe.contentWindow.document;
+    doc.open();
+    doc.write(iframeHtml);
+    doc.close();
 
-    // EmulatorJS 스크립트 로드
-    const script = document.createElement('script');
-    script.src = 'https://cdn.emulatorjs.org/stable/data/loader.js';
-    script.onload = () => {
-      setSaveStatus('클라우드 세이브 준비됨', 'ready');
-      setupAutoSave(game);
-      startGamepadPoller();
-      if (coreToUse === 'mame2003') {
-        showToast('💡 [MAME] 시작 시 방향키 "←" "→" (또는 Enter)를 누르면 게임으로 진입합니다.', false);
+    setSaveStatus('클라우드 세이브 준비됨', 'ready');
+    setupAutoSave(game);
+    startGamepadPoller();
+    if (coreToUse === 'mame2003') {
+      showToast('💡 [MAME] 시작 시 방향키 "←" "→" (또는 Enter)를 누르면 게임으로 진입합니다.', false);
+    }
+  }
+
+  function getIframeEmulator() {
+    try {
+      const iframe = $('gbaEmulatorIframe');
+      if (iframe && iframe.contentWindow) {
+        return iframe.contentWindow.EJS_emulator || window.EJS_emulator;
       }
-      setTimeout(() => {
-        applyGraphicsSettings();
-      }, 500);
-    };
-    script.onerror = () => {
-      setSaveStatus('에뮬레이터 코어 로드 실패', 'saving');
-      showToast('에뮬레이터 코어를 불러오지 못했습니다. 네트워크를 확인해주세요.', true);
-    };
-    document.body.appendChild(script);
+    } catch (e) {}
+    return window.EJS_emulator;
   }
 
   function applyGraphicsSettings() {
-    const emu = window.EJS_emulator;
+    const emu = getIframeEmulator();
     if (emu && typeof emu.enableShader === 'function') {
       try {
         emu.enableShader(state.graphics.shader || 'disabled');
@@ -1094,23 +1103,27 @@
       }
     }
 
-    const canvas = document.querySelector('#ejs-game-frame canvas') || document.querySelector('canvas');
-    if (canvas) {
-      canvas.style.imageRendering = state.graphics.pixelMode || 'pixelated';
-      canvas.style.margin = '0 auto';
-      if (state.graphics.aspectRatio === 'stretch') {
-        canvas.style.aspectRatio = 'unset';
-        canvas.style.width = '100%';
-        canvas.style.height = '100%';
-        canvas.style.objectFit = 'fill';
-      } else {
-        canvas.style.aspectRatio = state.graphics.aspectRatio || '3/2';
-        canvas.style.width = 'auto';
-        canvas.style.height = '100%';
-        canvas.style.maxWidth = '100%';
-        canvas.style.objectFit = 'contain';
+    try {
+      const iframe = $('gbaEmulatorIframe');
+      const innerDoc = iframe ? (iframe.contentDocument || iframe.contentWindow.document) : document;
+      const canvas = innerDoc.querySelector('#game canvas') || innerDoc.querySelector('canvas');
+      if (canvas) {
+        canvas.style.imageRendering = state.graphics.pixelMode || 'pixelated';
+        canvas.style.margin = '0 auto';
+        if (state.graphics.aspectRatio === 'stretch') {
+          canvas.style.aspectRatio = 'unset';
+          canvas.style.width = '100%';
+          canvas.style.height = '100%';
+          canvas.style.objectFit = 'fill';
+        } else {
+          canvas.style.aspectRatio = state.graphics.aspectRatio || '3/2';
+          canvas.style.width = 'auto';
+          canvas.style.height = '100%';
+          canvas.style.maxWidth = '100%';
+          canvas.style.objectFit = 'contain';
+        }
       }
-    }
+    } catch (e) {}
   }
 
   function setupAutoSave(game) {
@@ -1128,7 +1141,7 @@
 
   async function triggerSaveSync(game, isManual = false) {
     if (!game) return false;
-    const emu = window.EJS_emulator;
+    const emu = getIframeEmulator();
     if (!emu || !emu.gameManager) {
       if (isManual) showToast('에뮬레이터 코어가 로딩 중입니다. 잠시 후 다시 시도해 주세요.');
       return false;
@@ -1222,7 +1235,7 @@
   }
 
   function togglePausePlay() {
-    const emu = window.EJS_emulator;
+    const emu = getIframeEmulator();
     if (!emu || !emu.gameManager || typeof emu.gameManager.toggleMainLoop !== 'function') {
       showToast('에뮬레이터가 아직 로딩 중입니다.');
       return;
@@ -1238,7 +1251,7 @@
   }
 
   function cycleSpeed() {
-    const emu = window.EJS_emulator;
+    const emu = getIframeEmulator();
     if (!emu || !emu.gameManager) {
       showToast('에뮬레이터가 아직 로딩 중입니다.');
       return;
@@ -1263,7 +1276,7 @@
   }
 
   function toggleMuteVolume() {
-    const emu = window.EJS_emulator;
+    const emu = getIframeEmulator();
     if (!emu || typeof emu.setVolume !== 'function') {
       showToast('에뮬레이터가 아직 로딩 중입니다.');
       return;
@@ -1316,7 +1329,7 @@
   }
 
   async function exitGame() {
-    const emu = window.EJS_emulator;
+    const emu = getIframeEmulator();
 
     // 1. 종료 전 세이브 동기화
     if (state.activeGame) {
@@ -1330,19 +1343,10 @@
     // 2. 오디오 즉시 뮤트 및 WebAudio / WASM 메인 루프 완전 정지
     if (emu) {
       try {
-        // 볼륨 0으로 즉시 차단
-        if (typeof emu.setVolume === 'function') {
-          emu.setVolume(0);
-        }
-        // 에뮬레이션 루프 중지
-        if (emu.gameManager && typeof emu.gameManager.toggleMainLoop === 'function') {
-          emu.gameManager.toggleMainLoop(0);
-        }
-        // WebAssembly 모듈 및 OpenAL 오디오 컨텍스트 닫기
+        if (typeof emu.setVolume === 'function') emu.setVolume(0);
+        if (emu.gameManager && typeof emu.gameManager.toggleMainLoop === 'function') emu.gameManager.toggleMainLoop(0);
         if (emu.Module) {
-          if (typeof emu.Module.pauseMainLoop === 'function') {
-            emu.Module.pauseMainLoop();
-          }
+          if (typeof emu.Module.pauseMainLoop === 'function') emu.Module.pauseMainLoop();
           if (emu.Module.AL && emu.Module.AL.currentCtx) {
             try {
               emu.Module.AL.currentCtx.suspend();
@@ -1350,15 +1354,12 @@
             } catch (err) {}
           }
           if (typeof emu.Module.abort === 'function') {
-            try {
-              emu.Module.abort();
-            } catch (err) {}
+            try { emu.Module.abort(); } catch (err) {}
           }
         }
       } catch (e) {
         console.warn('[GBA] Emulator shutdown error:', e);
       }
-      window.EJS_emulator = null;
     }
 
     // 3. 타이머 및 패드 폴러 정지
@@ -1368,11 +1369,13 @@
     }
     stopGamepadPoller();
 
-    // 4. DOM 컨테이너 비우기 및 플레이어 모달 닫기
+    // 4. iframe 완전 제거 및 DOM 컨테이너 비우기 (메모리 완전 해제 및 let 재선언 충돌 방지)
     const container = $('gbaEmulatorContainer');
     if (container) {
       container.innerHTML = '';
     }
+    window.__GBA_ON_GAME_START__ = null;
+    window.EJS_emulator = null;
     $('gbaPlayerModal').style.display = 'none';
     state.activeGame = null;
     renderGames();
@@ -1415,10 +1418,18 @@
     window.dispatchEvent(event);
     document.dispatchEvent(event);
 
-    const canvas = document.querySelector('#ejs-game-frame canvas') || document.querySelector('canvas');
-    if (canvas) {
-      canvas.dispatchEvent(event);
-    }
+    try {
+      const iframe = $('gbaEmulatorIframe');
+      if (iframe && iframe.contentWindow) {
+        iframe.contentWindow.dispatchEvent(event);
+        const innerDoc = iframe.contentDocument || iframe.contentWindow.document;
+        if (innerDoc) {
+          innerDoc.dispatchEvent(event);
+          const canvas = innerDoc.querySelector('canvas') || innerDoc.querySelector('#game');
+          if (canvas) canvas.dispatchEvent(event);
+        }
+      }
+    } catch (e) {}
   }
 
   function startGamepadPoller() {
@@ -2148,17 +2159,96 @@
     $('gbaBiosUploadBtn')?.addEventListener('click', openBiosModal);
     $('gbaEmptyUploadBtn')?.addEventListener('click', () => $('gbaFileInput').click());
     $('gbaScanBtn').addEventListener('click', async () => {
-      showToast('디스크에서 ROM 파일을 스캔하고 DB를 갱신합니다...');
-      showLoading(true);
+      const scanBtn = $('gbaScanBtn');
+      if (scanBtn.classList.contains('gba-btn-scanning')) return;
+
+      const scanModal = $('gbaScanModal');
+      const scanStatus = $('gbaScanStatus');
+      const scanProgressBar = $('gbaScanProgressBar');
+      const scanDetails = $('gbaScanDetails');
+
+      scanBtn.classList.add('gba-btn-scanning');
+      scanBtn.title = '게임 라이브러리 재스캔 진행 중...';
+
+      // 목록을 지우지 않고, 클릭을 방지하는 재스캔 프로그레스바 모달 표시
+      if (scanModal) {
+        scanModal.style.display = 'flex';
+        if (scanStatus) scanStatus.textContent = '게임 파일 및 커버 유효성을 검증하는 중...';
+        if (scanProgressBar) scanProgressBar.style.width = '0%';
+        if (scanDetails) scanDetails.textContent = '검증 준비 중...';
+      }
+
       try {
-        const res = await apiCall('scan_roms');
-        if (res.success) {
-          showToast(res.message || 'ROM 스캔 및 DB 동기화 완료!');
+        const gamesToCheck = [...(state.games || [])];
+        const total = gamesToCheck.length;
+
+        let checkedCount = 0;
+        let coverUpdatedCount = 0;
+        let deletedCount = 0;
+
+        // 1단계: 기존 목록 게임 유효성 및 커버 검사 (3개씩 비동기 병렬 처리)
+        const CONCURRENCY = 3;
+        for (let i = 0; i < gamesToCheck.length; i += CONCURRENCY) {
+          const chunk = gamesToCheck.slice(i, i + CONCURRENCY);
+          await Promise.all(
+            chunk.map(async (game) => {
+              try {
+                const res = await apiCall('check_game', { game_id: game.id });
+                checkedCount++;
+                if (res && res.success && res.result) {
+                  if (res.result.deleted) {
+                    deletedCount++;
+                    state.games = state.games.filter((g) => g.id !== game.id);
+                  } else if (res.result.cover_updated) {
+                    coverUpdatedCount++;
+                    game.cover_path = true;
+                    if (res.result.cover_url) {
+                      game.cover_url = res.result.cover_url;
+                    }
+                  }
+                }
+              } catch (err) {
+                checkedCount++;
+                console.error('[GBA] Check game error:', game.id, err);
+              }
+            })
+          );
+
+          // 프로그레스바 및 상태 업데이트
+          const percent = total > 0 ? Math.min(Math.round((checkedCount / total) * 85), 85) : 85;
+          if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
+          if (scanDetails) scanDetails.textContent = `${Math.min(checkedCount, total)} / ${total} 게임 검증 완료 (${percent}%)`;
+          renderGames();
         }
+
+        // 2단계: 신규 추가된 ROM 파일 디스크 스캔 및 등록
+        if (scanStatus) scanStatus.textContent = '새로운 ROM 파일 및 디렉터리를 스캔하는 중...';
+        if (scanProgressBar) scanProgressBar.style.width = '90%';
+        if (scanDetails) scanDetails.textContent = '신규 ROM 등록 중...';
+
+        await apiCall('scan_new_roms');
+
+        if (scanProgressBar) scanProgressBar.style.width = '100%';
+        if (scanDetails) scanDetails.textContent = '라이브러리 동기화 완료!';
+
+        // 최종 전체 라이브러리 동기화
+        await loadLibrary(true);
+
+        let resultMsg = '스캔 및 동기화 완료!';
+        if (coverUpdatedCount > 0 || deletedCount > 0) {
+          resultMsg += ` (커버 ${coverUpdatedCount}개 등록, 미존재 ${deletedCount}개 정리)`;
+        }
+        showToast(resultMsg);
       } catch (e) {
         console.error('[GBA] Scan error:', e);
+        showToast('스캔 중 오류가 발생했습니다.', true);
+        loadLibrary(true);
       } finally {
-        loadLibrary();
+        scanBtn.classList.remove('gba-btn-scanning');
+        scanBtn.title = '폴더 스캔 및 새로고침';
+        if (scanModal) {
+          scanModal.style.display = 'none';
+        }
       }
     });
 
@@ -2288,6 +2378,10 @@
       const extraPath = $('gbaSettingExtraPath').value.trim();
       const cloudSave = $('gbaSettingCloudSave').checked ? '1' : '0';
       const interval = $('gbaSettingInterval').value.trim();
+      const saveBtn = $('gbaSettingsSaveBtn');
+
+      saveBtn.disabled = true;
+      saveBtn.textContent = '저장 중...';
 
       try {
         const res = await apiCall('save_settings', {
@@ -2295,16 +2389,21 @@
           cloud_save_enabled: cloudSave,
           auto_save_interval_sec: interval,
         });
-        if (res.success) {
+        if (res && res.success) {
           state.config.extra_roms_path = extraPath;
           state.config.cloud_save_enabled = cloudSave === '1';
           state.config.auto_save_interval_sec = parseInt(interval, 10) || 60;
           $('gbaSettingsModal').style.display = 'none';
           showToast('설정이 저장되었습니다.');
           loadLibrary();
+        } else {
+          showToast(res && res.error ? res.error : '설정 저장에 실패했습니다.', true);
         }
       } catch (e) {
-        showToast('설정 저장 중 오류가 발생했습니다.', true);
+        showToast(`설정 저장 중 오류 발생: ${e.message || e}`, true);
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = '설정 저장';
       }
     });
 
@@ -2634,13 +2733,30 @@
     });
   }
 
+  function showCustomContextMenu(clientX, clientY) {
+    const contextMenu = $('gbaContextMenu');
+    if (!contextMenu || !state.activeGame) return;
+
+    const menuWidth = 290;
+    const menuHeight = 130;
+    let x = clientX;
+    let y = clientY;
+
+    if (x + menuWidth > window.innerWidth) {
+      x = window.innerWidth - menuWidth - 10;
+    }
+    if (y + menuHeight > window.innerHeight) {
+      y = window.innerHeight - menuHeight - 10;
+    }
+
+    contextMenu.style.left = `${x}px`;
+    contextMenu.style.top = `${y}px`;
+    contextMenu.style.display = 'flex';
+  }
+
   async function captureGameScreenshotAndSetCover() {
     if (!state.activeGame) return;
-    const emu = window.EJS_emulator;
-    if (!emu) {
-      showToast('에뮬레이터 코어가 로딩 중입니다. 잠시 후 다시 시도해 주세요.', true);
-      return;
-    }
+    const emu = getIframeEmulator();
 
     showToast('게임 화면을 캡처하여 최적의 커버 이미지를 생성하는 중...');
 
@@ -2648,7 +2764,7 @@
       let rawBlob = null;
 
       // 1. EmulatorJS Canvas 스크린샷 (source: "canvas") with 500ms timeout
-      if (typeof emu.screenshot === 'function') {
+      if (emu && typeof emu.screenshot === 'function') {
         try {
           rawBlob = await Promise.race([
             new Promise((resolve) => {
@@ -2662,7 +2778,7 @@
       }
 
       // 2. EmulatorJS 고수준 스크린샷 (source: "retroarch") with 500ms timeout
-      if (!rawBlob && typeof emu.screenshot === 'function') {
+      if (!rawBlob && emu && typeof emu.screenshot === 'function') {
         try {
           rawBlob = await Promise.race([
             new Promise((resolve) => {
@@ -2675,9 +2791,15 @@
         }
       }
 
-      // 3. WebGL / Canvas 직접 프레임 동기화 캡처 (requestAnimationFrame)
+      // 3. iframe 내부의 WebGL / Canvas 직접 프레임 동기화 캡처
       if (!rawBlob) {
-        const canvas = document.querySelector('#ejs-game-frame canvas') || document.querySelector('canvas');
+        let canvas = null;
+        try {
+          const iframe = $('gbaEmulatorIframe');
+          const innerDoc = iframe ? (iframe.contentDocument || iframe.contentWindow.document) : document;
+          canvas = innerDoc.querySelector('#game canvas') || innerDoc.querySelector('canvas') || document.querySelector('#ejs-game-frame canvas') || document.querySelector('canvas');
+        } catch (e) {}
+
         if (canvas) {
           rawBlob = await new Promise((resolve) => {
             requestAnimationFrame(() => {
@@ -2704,7 +2826,7 @@
       }
 
       // 4. RetroArch 코어 네이티브 버퍼 (gameManager.screenshot) with 500ms timeout
-      if (!rawBlob && emu.gameManager && typeof emu.gameManager.screenshot === 'function') {
+      if (!rawBlob && emu && emu.gameManager && typeof emu.gameManager.screenshot === 'function') {
         try {
           const rawPng = await Promise.race([
             emu.gameManager.screenshot(),

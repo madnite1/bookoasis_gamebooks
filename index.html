@@ -133,6 +133,22 @@
     </div>
   </div>
 
+  <!-- 재스캔 진행률 모달 -->
+  <div id="gbaScanModal" class="gba-modal" style="display: none;">
+    <div class="gba-modal-box">
+      <div class="gba-modal-header">
+        <h3><i class="fa-solid fa-arrows-rotate fa-spin"></i> 게임 라이브러리 재스캔</h3>
+      </div>
+      <div class="gba-modal-body">
+        <div class="gba-upload-status" id="gbaScanStatus">게임 파일 및 커버 유효성을 검증하는 중...</div>
+        <div class="gba-progress-bar-wrap">
+          <div class="gba-progress-bar" id="gbaScanProgressBar" style="width: 0%;"></div>
+        </div>
+        <div class="gba-upload-details" id="gbaScanDetails">0 / 0 게임 검증 완료</div>
+      </div>
+    </div>
+  </div>
+
   <!-- 홈브류 허브 모달 -->
   <div id="gbaHomebrewModal" class="gba-modal" style="display: none;">
     <div class="gba-modal-box gba-homebrew-modal-box">

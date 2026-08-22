@@ -12,6 +12,8 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -21,6 +23,12 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 
 from plugins.metadata.base import BaseMetadataProvider
+
+# 플러그인 전용 격리 패키지(libs/) sys.path 등록
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+_LIBS_DIR = os.path.join(_PLUGIN_DIR, "libs")
+if os.path.isdir(_LIBS_DIR) and _LIBS_DIR not in sys.path:
+    sys.path.insert(0, _LIBS_DIR)
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +289,53 @@ def _fetch_libretro_artwork(platform_or_core, filename, raw_title=""):
                 break
         except Exception:
             pass
+
+    # 직접 URL 히트 실패 시, 레포 전체 타이틀 목록 캐시를 활용한 스마트 퍼지 검색 (1차 일치 항목 자동 다운로드)
+    try:
+        repo_titles = _get_libretro_repo_titles(system_repo)
+        if repo_titles:
+            search_terms = []
+            if raw_title:
+                search_terms.append(raw_title)
+            search_terms.append(base_orig)
+            if no_tag and no_tag not in search_terms:
+                search_terms.append(no_tag)
+
+            stopwords = {"64", "v64", "z64", "n64", "k", "j", "u", "e", "the", "of", "and", "in", "to", "ad", "rpg", "act"}
+            best_match = None
+            for term in search_terms:
+                kws = [w.lower() for w in re.sub(r"[^a-zA-Z0-9\s]", " ", term).split() if len(w) >= 2]
+                meaningful = [w for w in kws if w not in stopwords]
+                if not meaningful:
+                    continue
+
+                for rt in repo_titles:
+                    rt_lower = rt.lower()
+                    if all(m in rt_lower for m in meaningful):
+                        best_match = rt
+                        break
+                if best_match:
+                    break
+
+            if best_match:
+                enc_match = urllib.parse.quote(f"{best_match}.png", safe="")
+                match_url = f"{LIBRETRO_CDN_BASE}/{system_repo}/master/Named_Boxarts/{enc_match}"
+                curr_url = match_url
+                for _ in range(3):
+                    req = urllib.request.Request(curr_url, headers={"User-Agent": HH_USER_AGENT})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        if resp.status == 200:
+                            data = resp.read()
+                            if len(data) < 256 and b".png" in data:
+                                target_filename = data.decode("utf-8", errors="ignore").strip()
+                                base_url_dir = curr_url.rsplit("/", 1)[0]
+                                curr_url = f"{base_url_dir}/{urllib.parse.quote(target_filename)}"
+                                continue
+                            if data and len(data) > 512:
+                                return data
+                    break
+    except Exception as e:
+        logger.debug(f"[{SELF_ID}] Libretro fuzzy match error: {e}")
 
     return None
 
@@ -775,15 +830,21 @@ def _detect_rom_info(file_path):
 
                 if matching:
                     inner_name, inner_ext = matching[0]
-                    sys_info = SUPPORTED_SYSTEMS[inner_ext]
-                    info["core"] = sys_info["core"]
-                    info["platform"] = sys_info["platform"]
-                    with z.open(inner_name) as zf:
-                        raw_data = zf.read(0x10000)
-                    base_inner = os.path.splitext(os.path.basename(inner_name))[0]
-                    clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                    if clean_inner:
-                        info["title"] = clean_inner
+                    # GP32 스마트미디어 카드 (.smc) 및 미지원 기종 오인 방지
+                    fpath_lower = file_path.lower()
+                    if inner_ext == ".smc" and ("gp32" in fpath_lower or "gamepark" in fpath_lower or "/gp32/" in fpath_lower):
+                        info["core"] = "_skip_"
+                        info["platform"] = "_skip_"
+                    else:
+                        sys_info = SUPPORTED_SYSTEMS[inner_ext]
+                        info["core"] = sys_info["core"]
+                        info["platform"] = sys_info["platform"]
+                        with z.open(inner_name) as zf:
+                            raw_data = zf.read(0x10000)
+                        base_inner = os.path.splitext(os.path.basename(inner_name))[0]
+                        clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                        if clean_inner:
+                            info["title"] = clean_inner
                 else:
                     # KNOWN_ARCADE_TITLES에 등록된 게임만 아케이드/네오지오로 인정
                     # 등록되지 않은 zip은 MAME 디바이스/펌웨어/바이오스로 간주하여 무시
@@ -797,6 +858,84 @@ def _detect_rom_info(file_path):
                         info["platform"] = "_skip_"
         except Exception as e:
             logger.debug(f"[{SELF_ID}] Zip inspect error: {e}")
+    elif ext == ".7z":
+        try:
+            import py7zr
+            if py7zr.is_7zfile(file_path):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with py7zr.SevenZipFile(file_path, mode="r") as z7:
+                        z7.extract(path=tmpdir)
+                    extracted_files = [f for f in os.listdir(tmpdir) if not f.startswith(".")]
+
+                    matching = []
+                    for fname in extracted_files:
+                        e = os.path.splitext(fname)[1].lower()
+                        if e in SUPPORTED_SYSTEMS:
+                            matching.append((fname, e))
+
+                    if matching:
+                        inner_name, inner_ext = matching[0]
+                        sys_info = SUPPORTED_SYSTEMS[inner_ext]
+                        info["core"] = sys_info["core"]
+                        info["platform"] = sys_info["platform"]
+                        with open(os.path.join(tmpdir, inner_name), "rb") as ef:
+                            raw_data = ef.read(0x10000)
+                        base_inner = os.path.splitext(os.path.basename(inner_name))[0]
+                        clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                        if clean_inner:
+                            info["title"] = clean_inner
+                    elif extracted_files:
+                        # .bin / .rom 확장자이거나 폴더명/파일명 기반 코어 분석
+                        for fname in extracted_files:
+                            full_ef = os.path.join(tmpdir, fname)
+                            with open(full_ef, "rb") as ef:
+                                header_data = ef.read(0x10000)
+
+                            # 세가 메가드라이브 (SEGA / GENESIS / MEGA DRIVE 헤더)
+                            if len(header_data) >= 0x120 and (b"SEGA" in header_data[0x100:0x110] or b"GENESIS" in header_data[0x100:0x110] or b"MEGA DRIVE" in header_data[0x100:0x120]):
+                                info["core"] = "segaMD"
+                                info["platform"] = "Genesis"
+                                raw_data = header_data
+                                base_inner = os.path.splitext(os.path.basename(fname))[0]
+                                info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                break
+                            # GBA (0x04:0x08 == b' \x00\x00\xea')
+                            elif len(header_data) >= 0xC0 and header_data[0x04:0x08] == b" \x00\x00\xea":
+                                info["core"] = "gba"
+                                info["platform"] = "GBA"
+                                raw_data = header_data
+                                base_inner = os.path.splitext(os.path.basename(fname))[0]
+                                info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                break
+                            # N64
+                            elif len(header_data) >= 0x40 and header_data[:4] in (b"\x80\x37\x12\x40", b"\x37\x80\x40\x12", b"\x40\x12\x37\x80"):
+                                info["core"] = "n64"
+                                info["platform"] = "N64"
+                                raw_data = header_data
+                                base_inner = os.path.splitext(os.path.basename(fname))[0]
+                                info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                break
+                            # SNES
+                            elif len(header_data) >= 0x8000 and any(len(header_data) >= off + 21 and not "".join(chr(b) for b in header_data[off:off+21] if 32 <= b <= 126).strip().startswith("???") for off in (0x7FC0, 0xFFC0)):
+                                info["core"] = "snes"
+                                info["platform"] = "SNES"
+                                raw_data = header_data
+                                base_inner = os.path.splitext(os.path.basename(fname))[0]
+                                info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                break
+
+                        if info["core"] == "gba" and ("megadriv" in file_path.lower() or "genesis" in file_path.lower() or "md" in file_path.lower()):
+                            info["core"] = "segaMD"
+                            info["platform"] = "Genesis"
+
+                    if not info["title"]:
+                        stem = os.path.splitext(os.path.basename(file_path))[0].lower()
+                        if stem in KNOWN_ARCADE_TITLES:
+                            info["core"] = "arcade"
+                            info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
+                            info["title"] = KNOWN_ARCADE_TITLES[stem]
+        except Exception as e:
+            logger.debug(f"[{SELF_ID}] 7z inspect error: {e}")
     else:
         if ext in SUPPORTED_SYSTEMS:
             sys_info = SUPPORTED_SYSTEMS[ext]
@@ -905,6 +1044,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "style.css",
             "script.js",
             "README.md",
+            "requirements.txt",
         ],
     }
 
@@ -1160,10 +1300,46 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return None
 
     # ------------------------------------------------------------------
-    # ROM 스캔 및 등록 로직
-    # ------------------------------------------------------------------
-    def _scan_roms(self):
-        """기본 roms 폴더 및 설정된 추가 경로의 ROM을 스캔하여 DB에 동기화합니다."""
+    def _check_and_update_game(self, game_id):
+        """특정 게임의 ROM 파일 존재 여부 검사 및 누락된 커버 검색/세팅"""
+        rows = self._db_query("SELECT * FROM games WHERE id = ?", (game_id,))
+        if not rows:
+            return {"exists": False, "deleted": False, "cover_updated": False}
+
+        game = rows[0]
+        file_path = game.get("file_path") or ""
+
+        # 1. 파일 존재 여부 검사
+        if not file_path or not os.path.exists(file_path):
+            self._db_execute("DELETE FROM games WHERE id = ?", (game_id,))
+            self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (game_id,))
+            return {"exists": False, "deleted": True, "cover_updated": False}
+
+        # 2. 커버 상태 검사 및 누락 시 자동 검색/세팅
+        cover_path = game.get("cover_path") or ""
+        cover_ok = bool(cover_path and os.path.exists(cover_path))
+        cover_updated = False
+
+        if not cover_ok:
+            core = game.get("core") or game.get("platform") or ""
+            filename = game.get("filename") or ""
+            raw_title = game.get("title") or ""
+            new_cover = self._auto_fetch_and_save_cover(game_id, core, filename, file_path=file_path, raw_title=raw_title)
+            if new_cover:
+                cover_updated = True
+                cover_path = new_cover
+
+        return {
+            "exists": True,
+            "deleted": False,
+            "cover_updated": cover_updated,
+            "cover_url": f"{ROUTE_BASE}/cover/{game_id}" if (cover_path and os.path.exists(cover_path)) else None,
+        }
+
+    def _scan_roms(self, new_only=False):
+        """기본 roms 폴더 및 설정된 추가 경로의 ROM을 스캔하여 DB에 동기화합니다.
+        new_only가 True이면 기존에 등록된 게임의 커버 검색은 건너뛰고 새로 발견된 게임만 등록 및 커버를 검색합니다.
+        """
         self._migrate_bios_files()
 
         scan_dirs = [self._get_roms_dir()]
@@ -1203,6 +1379,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         now_str = _get_kst_now_str()
 
         for gid, info in found_files.items():
+            if new_only and gid in existing_games:
+                # new_only 모드일 때 이미 존재하는 게임은 커버 재탐색 없이 파일 경로/크기만 업데이트
+                self._db_execute(
+                    "UPDATE games SET file_path = ?, size_bytes = ? WHERE id = ?",
+                    (info["file_path"], info["size_bytes"], gid),
+                )
+                continue
+
             rom_info = _detect_rom_info(info["file_path"])
             # MAME 디바이스/펌웨어/바이오스 zip은 게임으로 등록하지 않음
             if rom_info.get("platform") == "_skip_":
@@ -1261,7 +1445,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
             if gid not in existing_games:
                 self._db_execute(
-                    """INSERT INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, added_at)
+                    """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, added_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         gid,
@@ -1375,7 +1559,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
     # 라우트 핸들러 (ROM 서빙 / 유저별 세이브 다운로드 & 업로드 / 커버아트)
     # ------------------------------------------------------------------
     def _route_rom_stream(self, game_id, filename=None):
-        """ROM 바이너리 다운로드 / 스트리밍"""
+        """ROM 바이너리 다운로드 / 스트리밍 (.7z 압축 롬은 내부 롬을 즉시 추출하여 EmulatorJS 호환 스트림으로 전송)"""
+        import io
         from flask import Response, abort, request
 
         rows = self._db_query("SELECT file_path, filename FROM games WHERE id = ?", (game_id,))
@@ -1384,9 +1569,44 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         file_path = rows[0]["file_path"]
         actual_filename = filename or rows[0]["filename"]
-        file_size = os.path.getsize(file_path)
+        ext = os.path.splitext(file_path)[1].lower()
 
-        # ASCII 안전 파일명 및 UTF-8 URL 인코딩 파일명 (WSGI latin-1 헤더 인코딩 오류 방지)
+        # .7z 압축 롬 파일인 경우: py7zr을 이용해 내부 롬 파일을 표준 .zip 형식으로 메모리 변환하여 서빙
+        if ext == ".7z":
+            try:
+                import py7zr
+                if py7zr.is_7zfile(file_path):
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        with py7zr.SevenZipFile(file_path, mode="r") as z7:
+                            z7.extract(path=tmpdir)
+                        extracted_files = [f for f in os.listdir(tmpdir) if not f.startswith(".")]
+
+                        # 표준 ZIP 아카이브 메모리 생성
+                        zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                            for fname in extracted_files:
+                                full_ef = os.path.join(tmpdir, fname)
+                                if os.path.isfile(full_ef):
+                                    zout.write(full_ef, fname)
+
+                        zip_bytes = zip_buffer.getvalue()
+                        clean_stem = os.path.splitext(actual_filename)[0]
+                        zip_filename = f"{clean_stem}.zip"
+
+                        ascii_fallback = re.sub(r"[^\x20-\x7E]", "_", zip_filename)
+                        encoded_filename = urllib.parse.quote(zip_filename)
+                        content_disposition = f'inline; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_filename}'
+
+                        resp = Response(zip_bytes, 200, mimetype="application/zip")
+                        resp.headers["Content-Length"] = str(len(zip_bytes))
+                        resp.headers["Content-Disposition"] = content_disposition
+                        resp.headers["Cache-Control"] = "public, max-age=86400"
+                        return resp
+            except Exception as e:
+                logger.error(f"[{SELF_ID}] 7z on-the-fly zip conversion error: {e}")
+
+        # 일반 롬 및 .zip 파일: 일반 바이너리 스트리밍 (Range 지원)
+        file_size = os.path.getsize(file_path)
         ascii_fallback = re.sub(r"[^\x20-\x7E]", "_", actual_filename)
         encoded_filename = urllib.parse.quote(actual_filename)
         content_disposition = f'inline; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_filename}'
@@ -1920,7 +2140,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                     g["has_save"] = 1 if (has_sav or has_state) else 0
                     g["has_state"] = 1 if has_state else 0
-                    g["rom_url"] = f"{ROUTE_BASE}/rom/{g['id']}/{urllib.parse.quote(g['filename'])}"
+                    url_fname = g["filename"]
+                    if url_fname.lower().endswith(".7z"):
+                        url_fname = os.path.splitext(url_fname)[0] + ".zip"
+                    g["rom_url"] = f"{ROUTE_BASE}/rom/{g['id']}/{urllib.parse.quote(url_fname)}"
                     g["save_url"] = f"{ROUTE_BASE}/save/{g['id']}?user_id={user_id}"
                     g["state_url"] = f"{ROUTE_BASE}/state/{g['id']}?user_id={user_id}"
                     g["cover_url"] = f"{ROUTE_BASE}/cover/{g['id']}"
@@ -1954,6 +2177,17 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "igdb_client_secret": str(self._get_setting("IGDB_CLIENT_SECRET", "") or "").strip(),
                     },
                 }
+
+            elif action == "check_game":
+                game_id = request.args.get("game_id", "").strip()
+                if not game_id:
+                    return {"success": False, "error": "game_id 파라미터가 필요합니다."}
+                res = self._check_and_update_game(game_id)
+                return {"success": True, "result": res}
+
+            elif action == "scan_new_roms":
+                self._scan_roms(new_only=True)
+                return {"success": True, "message": "새로운 ROM 파일 스캔 및 등록이 완료되었습니다."}
 
             elif action == "scan_roms":
                 self._scan_roms()
@@ -2059,16 +2293,21 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 if not _is_current_user_admin():
                     return {"success": False, "error": "관리자(admin) 권한이 있는 사용자만 설정을 변경할 수 있습니다."}
 
-                extra_path = request.args.get("extra_roms_path", "").strip()
-                cloud_save_raw = request.args.get("cloud_save_enabled", "1")
-                interval_raw = request.args.get("auto_save_interval_sec", "60")
+                # args, form, json 지원
+                json_data = request.get_json(silent=True) or {}
+                def _get_val(key, default=""):
+                    return request.args.get(key) or request.form.get(key) or json_data.get(key) or default
 
-                ss_devid = request.args.get("ss_devid", "").strip()
-                ss_devpassword = request.args.get("ss_devpassword", "").strip()
-                ss_user = request.args.get("ss_user", "").strip()
-                ss_password = request.args.get("ss_password", "").strip()
-                igdb_client_id = request.args.get("igdb_client_id", "").strip()
-                igdb_client_secret = request.args.get("igdb_client_secret", "").strip()
+                extra_path = str(_get_val("extra_roms_path", "")).strip()
+                cloud_save_raw = _get_val("cloud_save_enabled", "1")
+                interval_raw = _get_val("auto_save_interval_sec", "60")
+
+                ss_devid = str(_get_val("ss_devid", "")).strip()
+                ss_devpassword = str(_get_val("ss_devpassword", "")).strip()
+                ss_user = str(_get_val("ss_user", "")).strip()
+                ss_password = str(_get_val("ss_password", "")).strip()
+                igdb_client_id = str(_get_val("igdb_client_id", "")).strip()
+                igdb_client_secret = str(_get_val("igdb_client_secret", "")).strip()
 
                 cloud_save = True if str(cloud_save_raw).lower() in ("1", "true", "yes", "on") else False
                 try:
@@ -2086,7 +2325,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 self._set_setting("IGDB_CLIENT_ID", igdb_client_id)
                 self._set_setting("IGDB_CLIENT_SECRET", igdb_client_secret)
 
-                self._scan_roms()
+                # ROM 디렉토리 스캔을 백그라운드로 실행하여 저장 응답 타임아웃 방지
+                threading.Thread(target=self._scan_roms, daemon=True).start()
                 return {"success": True, "message": "설정이 성공적으로 저장되었습니다."}
 
             elif action == "search_artwork":

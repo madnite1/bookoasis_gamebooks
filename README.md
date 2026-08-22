@@ -10,22 +10,24 @@
 
 | 플랫폼 / 콘솔 | 지원 확장자 | 기본 에뮬레이션 코어 |
 | :--- | :--- | :--- |
-| **SFC / SNES** (슈퍼패미컴) | `.sfc`, `.smc`, `.snes`, `.fig` | Snes9x |
-| **GBA** (게임보이 어드밴스) | `.gba` | mGBA |
-| **FC / NES** (패미컴 / 패미컴 디스크) | `.nes`, `.fds`, `.unf` | FCEUmm / Nestopia |
-| **GB / GBC** (게임보이 / 컬러) | `.gb`, `.gbc` | Gambatte |
-| **NDS** (닌텐도 DS) | `.nds` | DeSmuME / melonDS |
-| **N64** (닌텐도 64) | `.n64`, `.z64`, `.v64` | Mupen64Plus |
-| **Mega Drive / Genesis** (메가드라이브) | `.md`, `.gen`, `.smd` | Genesis Plus GX |
-| **Master System / Game Gear** | `.sms`, `.gg`, `.sg` | SMS Plus GX |
-| **PlayStation 1 (PS1)** | `.psx`, `.ps1`, `.pbp`, `.cue` | PCSX ReARMed |
-| **PSP** (PlayStation Portable) | `.cso`, `.pbp` | PPSSPP |
+| **SFC / SNES** (슈퍼패미컴) | `.sfc`, `.smc`, `.snes`, `.fig`, `.zip`, `.7z` | Snes9x |
+| **GBA** (게임보이 어드밴스) | `.gba`, `.zip`, `.7z` | mGBA |
+| **FC / NES** (패미컴 / 패미컴 디스크) | `.nes`, `.fds`, `.unf`, `.zip`, `.7z` | FCEUmm / Nestopia |
+| **GB / GBC** (게임보이 / 컬러) | `.gb`, `.gbc`, `.zip`, `.7z` | Gambatte |
+| **NDS** (닌텐도 DS) | `.nds`, `.zip`, `.7z` | DeSmuME / melonDS |
+| **N64** (닌텐도 64) | `.n64`, `.z64`, `.v64`, `.zip`, `.7z` | Mupen64Plus |
+| **Mega Drive / Genesis** (메가드라이브) | `.md`, `.gen`, `.smd`, `.zip`, `.7z` | Genesis Plus GX |
+| **Master System / Game Gear** | `.sms`, `.gg`, `.sg`, `.zip`, `.7z` | SMS Plus GX |
+| **PlayStation 1 (PS1)** | `.psx`, `.ps1`, `.pbp`, `.cue`, `.zip`, `.7z` | PCSX ReARMed |
+| **PSP** (PlayStation Portable) | `.cso`, `.pbp`, `.zip`, `.7z` | PPSSPP |
 | **Neo-Geo (SNK 네오지오)** | `.zip` (`mslug`, `kof`, `samsho` 등) | FBNeo / MAME 2003+ |
 | **Arcade / MAME / FBNeo** | `.zip`, `.7z` | FBNeo / MAME 2003+ |
-| **PC Engine / TurboGrafx-16** | `.pce`, `.sgx` | Mednafen PCE |
-| **WonderSwan / Color** | `.ws`, `.wsc` | Mednafen Swan |
-| **Neo Geo Pocket / Color** | `.ngp`, `.ngc` | Mednafen NGP |
-| **Atari 2600 / 5200 / 7800 / Lynx** | `.a26`, `.a52`, `.a78`, `.lnx` | Stella / ProSystem |
+| **PC Engine / TurboGrafx-16** | `.pce`, `.sgx`, `.zip`, `.7z` | Mednafen PCE |
+| **WonderSwan / Color** | `.ws`, `.wsc`, `.zip`, `.7z` | Mednafen Swan |
+| **Neo Geo Pocket / Color** | `.ngp`, `.ngc`, `.zip`, `.7z` | Mednafen NGP |
+| **Atari 2600 / 5200 / 7800 / Lynx** | `.a26`, `.a52`, `.a78`, `.lnx`, `.zip`, `.7z` | Stella / ProSystem |
+
+> 💡 **`.7z` 압축 롬 완전 지원**: `py7zr`을 통해 `.7z` 압축 파일 내부의 롬을 실시간으로 감지하고 브라우저 스트리밍 시 메모리 상에서 즉시 변환 전송하므로, 별도로 압축을 풀거나 `.zip`으로 변환할 필요 없이 `.7z` 파일을 그대로 보관 및 플레이할 수 있습니다.
 
 ---
 
