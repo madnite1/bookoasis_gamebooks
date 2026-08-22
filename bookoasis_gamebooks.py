@@ -1234,29 +1234,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         "sessions": ["general"],
     }
 
-    config_schema = [
-        {
-            "key": "cloud_save_enabled",
-            "label": "클라우드 세이브 자동 동기화",
-            "type": "boolean",
-            "default": True,
-            "description": "게임 플레이 세이브를 서버에 유저별로 실시간 보관합니다.",
-        },
-        {
-            "key": "auto_save_interval_sec",
-            "label": "세이브 동기화 주기 (초)",
-            "type": "number",
-            "default": 60,
-            "description": "브라우저 세이브를 서버로 전송하는 주기입니다.",
-        },
-        {
-            "key": "extra_roms_path",
-            "label": "추가 ROM 스캔 경로",
-            "type": "text",
-            "required": False,
-            "description": "기본 폴더 외에 추가로 읽어올 외부 폴더 경로입니다.",
-        },
-    ]
+    config_schema = []
 
     update_manifest = {
         "enabled": True,
