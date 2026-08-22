@@ -5,6 +5,7 @@
 ROM 라이브러리 관리자 및 유저별 영속 클라우드 세이브(배터리 세이브 + 실시간 스냅샷) 동기화 플러그인.
 """
 
+import concurrent.futures
 import hashlib
 import json
 import logging
