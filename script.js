@@ -2248,11 +2248,10 @@
             })
           );
 
-          // 프로그레스바 및 상태 업데이트
+          // 프로그레스바 및 상태 업데이트 (화면 리스트는 전체 검증 완료 후 1회만 일괄 갱신)
           const percent = total > 0 ? Math.min(Math.round((checkedCount / total) * 85), 85) : 85;
           if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
           if (scanDetails) scanDetails.textContent = `${Math.min(checkedCount, total)} / ${total} 게임 검증 완료 (${percent}%)`;
-          renderGames();
         }
 
         // 2단계: 신규 추가된 ROM 파일 디스크 스캔 및 등록
