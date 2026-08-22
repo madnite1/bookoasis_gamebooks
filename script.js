@@ -1912,7 +1912,7 @@
       ],
     },
     nes: {
-      name: "패미컴 (FC / NES / GB)",
+      name: "패미컴 (FC / NES / GB / GBC)",
       rows: [
         { action: "방향키 (D-Pad)", key: "↑ ↓ ← →", pad: "십자키 / 왼쪽 스틱" },
         { action: "A 버튼", key: "X", pad: "A (Xbox) / ✕ (PS) / B (스위치)" },
@@ -1921,15 +1921,52 @@
         { action: "START / SELECT", key: "Enter / Shift", pad: "Start / Back" },
       ],
     },
+    n64: {
+      name: "닌텐도 64 (N64)",
+      rows: [
+        { action: "아날로그 스틱 (이동)", key: "↑ ↓ ← →", pad: "왼쪽 아날로그 스틱" },
+        { action: "A 버튼 / B 버튼", key: "X / Z", pad: "A / B (Xbox) (✕ / ○ PS)" },
+        { action: "Z 트리거 (주요 발사/앉기)", key: "Q (또는 E)", pad: "LT / L2 / ZL" },
+        { action: "L / R 버튼", key: "A / S", pad: "LB / RB (L1 / R1)" },
+        { action: "C 버튼 (상/하/좌/우)", key: "I / K / J / L", pad: "오른쪽 아날로그 스틱" },
+        { action: "START", key: "Enter", pad: "Start / Menu" },
+      ],
+    },
     genesis: {
-      name: "메가드라이브 (MD / Genesis)",
+      name: "메가드라이브 (MD / Genesis / MasterSystem / GameGear)",
       rows: [
         { action: "방향키 (D-Pad)", key: "↑ ↓ ← →", pad: "십자키 / 왼쪽 스틱" },
-        { action: "A 버튼", key: "A", pad: "Y (Xbox) / △ (PS) / X (스위치)" },
-        { action: "B 버튼", key: "Z", pad: "B (Xbox) / ○ (PS) / A (스위치)" },
-        { action: "C 버튼", key: "X", pad: "A (Xbox) / ✕ (PS) / B (스위치)" },
-        { action: "X / Y / Z (6버튼)", key: "Q / S / W", pad: "LB / X / RB" },
+        { action: "A 버튼 (공격 1)", key: "A", pad: "Y (Xbox) / △ (PS) / X (스위치)" },
+        { action: "B 버튼 (점프/공격 2)", key: "Z", pad: "B (Xbox) / ○ (PS) / A (스위치)" },
+        { action: "C 버튼 (특수/공격 3)", key: "X", pad: "A (Xbox) / ✕ (PS) / B (스위치)" },
+        { action: "X / Y / Z (6버튼 격투)", key: "Q / S / W", pad: "LB / X / RB" },
         { action: "START", key: "Enter", pad: "Start / Menu" },
+      ],
+    },
+    arcade: {
+      name: "오락실 아케이드 / MAME (Arcade / FBNeo)",
+      rows: [
+        { action: "레버 / 스틱 (8방향 이동)", key: "↑ ↓ ← →", pad: "십자키 / 왼쪽 스틱" },
+        { action: "동전 넣기 (COIN 1)", key: "Shift (또는 5 / 6)", pad: "Back / Select / Share" },
+        { action: "1인용 시작 (START 1)", key: "Enter (또는 1)", pad: "Start / Options / +" },
+        { action: "버튼 1 (약펀치 / 샷)", key: "Z", pad: "A (Xbox) / ✕ (PS)" },
+        { action: "버튼 2 (강펀치 / 점프)", key: "X", pad: "B (Xbox) / ○ (PS)" },
+        { action: "버튼 3 (약킥 / 폭탄)", key: "A", pad: "X (Xbox) / □ (PS)" },
+        { action: "버튼 4 (강킥 / 특수)", key: "S", pad: "Y (Xbox) / △ (PS)" },
+        { action: "버튼 5 / 6 (6버튼 격투)", key: "Q / W", pad: "LB / RB (L1 / R1)" },
+        { action: "MAME 서비스/테스트 메뉴", key: "F2 / Tab", pad: "R3 (오른쪽 스틱 클릭)" },
+      ],
+    },
+    neogeo: {
+      name: "SNK 네오지오 (Neo-Geo MVS/AES)",
+      rows: [
+        { action: "레버 (방향 이동)", key: "↑ ↓ ← →", pad: "십자키 / 왼쪽 스틱" },
+        { action: "동전 (COIN / SELECT)", key: "Shift", pad: "Back / Select / Share" },
+        { action: "1P 스타트 (START)", key: "Enter", pad: "Start / +" },
+        { action: "A 버튼 (약펀치 / 샷)", key: "Z", pad: "A (Xbox) / ✕ (PS) / B (스위치)" },
+        { action: "B 버튼 (약킥 / 점프)", key: "X", pad: "B (Xbox) / ○ (PS) / A (스위치)" },
+        { action: "C 버튼 (강펀치 / 폭탄)", key: "A", pad: "X (Xbox) / □ (PS) / Y (스위치)" },
+        { action: "D 버튼 (강킥 / 구르기)", key: "S", pad: "Y (Xbox) / △ (PS) / X (스위치)" },
       ],
     },
     psx: {
@@ -1945,6 +1982,18 @@
         { action: "START / SELECT", key: "Enter / Shift", pad: "Start / Back" },
       ],
     },
+    psp: {
+      name: "플레이스테이션 포터블 (PSP)",
+      rows: [
+        { action: "아날로그 패드 / D-Pad", key: "↑ ↓ ← →", pad: "왼쪽 아날로그 스틱 / 십자키" },
+        { action: "○ (동그라미)", key: "X", pad: "A (Xbox) / ✕ (PS) / B (스위치)" },
+        { action: "✕ (엑스)", key: "Z", pad: "B (Xbox) / ○ (PS) / A (스위치)" },
+        { action: "△ (세모)", key: "S", pad: "X (Xbox) / □ (PS) / Y (스위치)" },
+        { action: "□ (네모)", key: "A", pad: "Y (Xbox) / △ (PS) / X (스위치)" },
+        { action: "L / R 트리거", key: "Q / W", pad: "LB / RB (L1 / R1)" },
+        { action: "START / SELECT", key: "Enter / Shift", pad: "Start / Back" },
+      ],
+    },
     nds: {
       name: "닌텐도 DS (NDS)",
       rows: [
@@ -1953,6 +2002,26 @@
         { action: "L / R 트리거", key: "Q / W", pad: "LB / RB" },
         { action: "하단 터치스크린", key: "마우스 좌클릭 & 드래그", pad: "터치패드 / 마우스" },
         { action: "START / SELECT", key: "Enter / Shift", pad: "Start / Back" },
+      ],
+    },
+    saturn: {
+      name: "세가 새턴 (Sega Saturn)",
+      rows: [
+        { action: "방향키 (D-Pad)", key: "↑ ↓ ← →", pad: "십자키 / 왼쪽 스틱" },
+        { action: "A / B / C 버튼 (하단 3열)", key: "A / Z / X", pad: "X / A / B (Xbox) (□ / ✕ / ○ PS)" },
+        { action: "X / Y / Z 버튼 (상단 3열)", key: "Q / S / W", pad: "Y / LB / RB" },
+        { action: "L / R 트리거", key: "E / R", pad: "LT / RT (L2 / R2)" },
+        { action: "START", key: "Enter", pad: "Start / Menu" },
+      ],
+    },
+    pce: {
+      name: "PC엔진 (PC Engine / TurboGrafx-16)",
+      rows: [
+        { action: "방향키 (D-Pad)", key: "↑ ↓ ← →", pad: "십자키 / 왼쪽 스틱" },
+        { action: "I 버튼 (결정/공격 1)", key: "X", pad: "A (Xbox) / ✕ (PS) / B (스위치)" },
+        { action: "II 버튼 (취소/공격 2)", key: "Z", pad: "B (Xbox) / ○ (PS) / A (스위치)" },
+        { action: "III ~ VI (6버튼 패드)", key: "A / S / Q / W", pad: "X / Y / LB / RB" },
+        { action: "RUN / SELECT", key: "Enter / Shift", pad: "Start / Back" },
       ],
     },
   };
@@ -2161,12 +2230,19 @@
       // 현재 실행 중인 게임 기종에 맞추어 탭 자동 선택
       let targetSys = 'snes';
       if (state.activeGame) {
-        const core = state.activeGame.core || '';
-        if (core === 'gba') targetSys = 'gba';
-        else if (core === 'nes' || core === 'gb' || core === 'gbc') targetSys = 'nes';
-        else if (core === 'segaMD' || core === 'segaMS' || core === 'segaGG') targetSys = 'genesis';
-        else if (core === 'psx' || core === 'psp') targetSys = 'psx';
-        else if (core === 'nds') targetSys = 'nds';
+        const core = (state.activeGame.core || '').toLowerCase();
+        const platform = (state.activeGame.platform || '').toLowerCase();
+        if (core === 'gba' || platform === 'gba') targetSys = 'gba';
+        else if (core === 'nes' || core === 'gb' || core === 'gbc' || platform === 'nes' || platform === 'gb' || platform === 'gbc') targetSys = 'nes';
+        else if (core === 'n64' || platform === 'n64') targetSys = 'n64';
+        else if (core === 'arcade' || core === 'mame2003' || core === 'mame' || platform === 'arcade') targetSys = 'arcade';
+        else if (platform === 'neo-geo' || platform === 'neogeo') targetSys = 'neogeo';
+        else if (core === 'psx' || platform === 'ps1' || platform === 'psx') targetSys = 'psx';
+        else if (core === 'psp' || platform === 'psp') targetSys = 'psp';
+        else if (core === 'nds' || platform === 'nds') targetSys = 'nds';
+        else if (core === 'segasaturn' || core === 'saturn' || platform === 'saturn') targetSys = 'saturn';
+        else if (core === 'pce' || platform === 'pce' || platform === 'supergrafx') targetSys = 'pce';
+        else if (core.includes('sega') || platform === 'genesis' || platform === 'megadrive' || platform === 'md' || platform === 'sms' || platform === 'gg') targetSys = 'genesis';
         else targetSys = 'snes';
       }
 
