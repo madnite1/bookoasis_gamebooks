@@ -1752,12 +1752,21 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (game_id,))
             return {"exists": False, "deleted": True, "cover_updated": False}
 
-        # 2. 커버 상태 검사 및 누락 시 자동 검색/세팅 + 타이틀 한글화 자동 보정
+        # 2. 기종/코어 재검증 (과거 잘못 등록된 arcade/other 기종 보정)
+        rom_info = _detect_rom_info(file_path)
+        if rom_info.get("platform") != "_skip_":
+            detected_core = rom_info.get("core") or rom_info.get("platform")
+            detected_platform = rom_info.get("platform") or detected_core
+            if detected_core and (detected_core != game.get("core") or detected_platform != game.get("platform")):
+                self._db_execute("UPDATE games SET core = ?, platform = ? WHERE id = ?", (detected_core, detected_platform, game_id))
+                game["core"] = detected_core
+                game["platform"] = detected_platform
+
         core = game.get("core") or game.get("platform") or ""
         filename = game.get("filename") or ""
-        raw_title = game.get("title") or ""
+        raw_title = rom_info.get("title") or game.get("title") or ""
         clean_title = _resolve_korean_game_title(filename, raw_title)
-        if clean_title and clean_title != raw_title:
+        if clean_title and clean_title != game.get("title"):
             self._db_execute("UPDATE games SET title = ? WHERE id = ?", (clean_title, game_id))
 
         cover_path = game.get("cover_path") or ""
