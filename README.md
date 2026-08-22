@@ -120,7 +120,7 @@
 │   └── bookoasis_gamebooks/               # [플러그인 소스 코드]
 │       ├── __init__.py                    # 모듈 패키지 진입점
 │       ├── bookoasis_gamebooks.py         # 플러그인 백엔드 (Flask 라우트 & 멀티 코어 감지)
-│       ├── VERSION                        # 버전 정보 (v1.6.4)
+│       ├── VERSION                        # 버전 정보 (v1.6.5)
 │       ├── LICENSE                        # 오픈소스 라이선스 (GNU AGPL-3.0)
 │       ├── index.html                     # UI 레이아웃, 조작키, 설정 & 바이오스 모달
 │       ├── style.css                      # 모던 레트로 다크 테마 & 반응형 스타일

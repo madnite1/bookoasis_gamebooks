@@ -1810,6 +1810,29 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 clean_title = res["clean_title"]
                 mapped_header = res["mapped_header"]
 
+                # 기종에 맞지 않는 폴더에 위치한 롬 파일 자동 정리 (올바른 코어 하위 폴더로 이동)
+                curr_file_path = info["file_path"]
+                curr_dir = os.path.dirname(os.path.abspath(curr_file_path))
+                base_dir = os.path.dirname(curr_dir)  # 예: /mnt/gdrive/emulatorjs/roms
+
+                target_core_folder = (rom_info.get("core") or rom_info.get("platform") or "other").lower()
+                target_core_folder = re.sub(r"[^a-zA-Z0-9_\-]", "_", target_core_folder).strip() or "other"
+
+                # 현재 위치한 폴더명이 해당 코어 이름과 다르면 올바른 코어 폴더로 이동
+                current_folder_name = os.path.basename(curr_dir).lower()
+                if current_folder_name != target_core_folder and current_folder_name not in ("roms", ""):
+                    try:
+                        ideal_dir = os.path.join(base_dir, target_core_folder)
+                        os.makedirs(ideal_dir, exist_ok=True)
+                        dest_file_path = os.path.join(ideal_dir, info["filename"])
+                        if not os.path.exists(dest_file_path):
+                            shutil.move(curr_file_path, dest_file_path)
+                            curr_file_path = dest_file_path
+                            info["file_path"] = dest_file_path
+                            logger.info(f"[{SELF_ID}] Relocated ROM from {current_folder_name}/ to {target_core_folder}/: {info['filename']}")
+                    except Exception as move_ex:
+                        logger.debug(f"[{SELF_ID}] ROM relocate error ({info['filename']}): {move_ex}")
+
                 if gid not in existing_games:
                     self._db_execute(
                         """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at)
@@ -1817,7 +1840,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         (
                             gid,
                             info["filename"],
-                            info["file_path"],
+                            curr_file_path,
                             clean_title,
                             rom_info["game_code"],
                             rom_info["maker_code"],
@@ -1832,13 +1855,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         gid,
                         rom_info.get("core") or rom_info.get("platform"),
                         info["filename"],
-                        info["file_path"],
+                        curr_file_path,
                         mapped_header or clean_title
                     ))
                 else:
                     self._db_execute(
                         "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ? WHERE id = ?",
-                        (info["file_path"], info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, gid),
+                        (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, gid),
                     )
                     existing_entry = existing_games.get(gid)
                     if not new_only and (not existing_entry or not existing_entry.get("cover_path") or not os.path.exists(existing_entry["cover_path"])):
@@ -1846,7 +1869,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             gid,
                             rom_info.get("core") or rom_info.get("platform"),
                             info["filename"],
-                            info["file_path"],
+                            curr_file_path,
                             mapped_header or clean_title
                         ))
 
