@@ -1362,10 +1362,50 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return moved_count
 
     def _get_bios_dir(self):
-        """시스템 바이오스 파일 디렉터리 (../../data/bookoasis_gamebooks/bios/)"""
+        """시스템 바이오스 파일 디렉터리 (설정된 BIOS_PATH 또는 기본 ../../data/bookoasis_gamebooks/bios/)"""
+        custom_path = self._get_setting("BIOS_PATH", "").strip()
+        if custom_path:
+            try:
+                os.makedirs(custom_path, exist_ok=True)
+                if os.path.exists(custom_path) and os.path.isdir(custom_path):
+                    return custom_path
+            except Exception as e:
+                logger.warning(f"[{SELF_ID}] Custom bios dir error ({custom_path}): {e}")
         bios_dir = os.path.join(self._get_data_dir(), "bios")
         os.makedirs(bios_dir, exist_ok=True)
         return bios_dir
+
+    def _migrate_bios_to_custom_dir(self, new_dir):
+        """기존 바이오스 폴더의 파일들을 새로 설정된 폴더로 이동"""
+        if not new_dir:
+            return 0
+        new_dir = os.path.abspath(new_dir.strip())
+        os.makedirs(new_dir, exist_ok=True)
+
+        old_default_dir = os.path.abspath(os.path.join(self._get_data_dir(), "bios"))
+        moved_count = 0
+
+        if os.path.exists(old_default_dir) and old_default_dir != new_dir:
+            try:
+                for f in os.listdir(old_default_dir):
+                    if f.startswith("."):
+                        continue
+                    src_f = os.path.join(old_default_dir, f)
+                    if os.path.isfile(src_f):
+                        dst_f = os.path.join(new_dir, f)
+                        try:
+                            if not os.path.exists(dst_f):
+                                shutil.move(src_f, dst_f)
+                            else:
+                                os.remove(src_f)
+                            moved_count += 1
+                        except Exception as e:
+                            logger.error(f"[{SELF_ID}] Move bios file error ({f}): {e}")
+            except Exception as e:
+                logger.error(f"[{SELF_ID}] Bios migration error: {e}")
+
+        logger.info(f"[{SELF_ID}] Migrated {moved_count} bios files to {new_dir}")
+        return moved_count
 
     def _get_db_path(self):
         """설정 및 게임 메타 SQLite DB 경로"""
@@ -2416,6 +2456,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "auto_save_interval_sec": int(self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")),
                         "extra_roms_path": str(self._get_setting("EXTRA_ROMS_PATH", "") or "").strip(),
                         "covers_path": str(self._get_setting("COVERS_PATH", "") or "").strip(),
+                        "bios_path": str(self._get_setting("BIOS_PATH", "") or "").strip(),
                         "ss_devid": str(self._get_setting("SS_DEVID", "") or "").strip(),
                         "ss_devpassword": str(self._get_setting("SS_DEVPASSWORD", "") or "").strip(),
                         "ss_user": str(self._get_setting("SS_USER", "") or "").strip(),
@@ -2473,6 +2514,68 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         unique_list.append(item)
 
                 return {"success": True, "total": len(unique_list), "items": unique_list, "target_dir": target_dir}
+
+            elif action == "get_bios_migration_candidates":
+                if not _is_current_user_admin():
+                    return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
+                target_dir = request.args.get("target_dir", "").strip()
+                if not target_dir:
+                    return {"success": False, "error": "target_dir 파라미터가 필요합니다."}
+                target_dir = os.path.abspath(target_dir)
+
+                old_default_dir = os.path.abspath(os.path.join(self._get_data_dir(), "bios"))
+                files_to_migrate = []
+
+                if os.path.exists(old_default_dir) and old_default_dir != target_dir:
+                    try:
+                        for f in os.listdir(old_default_dir):
+                            if f.startswith("."):
+                                continue
+                            full_p = os.path.join(old_default_dir, f)
+                            if os.path.isfile(full_p):
+                                files_to_migrate.append({"type": "file", "path": full_p, "name": f})
+                    except Exception as e:
+                        logger.error(f"[{SELF_ID}] List bios error: {e}")
+
+                seen_paths = set()
+                unique_list = []
+                for item in files_to_migrate:
+                    if item.get("path") and item["path"] not in seen_paths:
+                        seen_paths.add(item["path"])
+                        unique_list.append(item)
+
+                return {"success": True, "total": len(unique_list), "items": unique_list, "target_dir": target_dir}
+
+            elif action == "migrate_bios_batch":
+                if not _is_current_user_admin():
+                    return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
+                json_data = request.get_json(silent=True) or {}
+                target_dir = json_data.get("target_dir") or request.form.get("target_dir") or request.args.get("target_dir") or ""
+                target_dir = os.path.abspath(target_dir.strip()) if target_dir else ""
+                if not target_dir:
+                    return {"success": False, "error": "target_dir 파라미터가 필요합니다."}
+
+                os.makedirs(target_dir, exist_ok=True)
+                items = json_data.get("items", [])
+                moved_count = 0
+
+                for it in items:
+                    src_p = it.get("path")
+                    fname = it.get("name") or (os.path.basename(src_p) if src_p else "")
+
+                    if src_p and os.path.exists(src_p):
+                        dst_p = os.path.join(target_dir, fname)
+                        if src_p != dst_p:
+                            try:
+                                if not os.path.exists(dst_p):
+                                    shutil.move(src_p, dst_p)
+                                else:
+                                    os.remove(src_p)
+                                moved_count += 1
+                            except Exception as e:
+                                logger.error(f"[{SELF_ID}] Move bios batch error ({fname}): {e}")
+
+                return {"success": True, "moved_count": moved_count}
 
             elif action == "migrate_cover_batch":
                 if not _is_current_user_admin():
@@ -2629,6 +2732,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                 extra_path = str(_get_val("extra_roms_path", "")).strip()
                 covers_path = str(_get_val("covers_path", "")).strip()
+                bios_path = str(_get_val("bios_path", "")).strip()
                 cloud_save_raw = _get_val("cloud_save_enabled", "1")
                 interval_raw = _get_val("auto_save_interval_sec", "60")
 
@@ -2646,9 +2750,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     interval = 60
 
                 prev_covers_path = str(self._get_setting("COVERS_PATH", "")).strip()
+                prev_bios_path = str(self._get_setting("BIOS_PATH", "")).strip()
 
                 self._set_setting("EXTRA_ROMS_PATH", extra_path)
                 self._set_setting("COVERS_PATH", covers_path)
+                self._set_setting("BIOS_PATH", bios_path)
                 self._set_setting("CLOUD_SAVE_ENABLED", cloud_save)
                 self._set_setting("AUTO_SAVE_INTERVAL_SEC", interval)
                 self._set_setting("SS_DEVID", ss_devid)
@@ -2664,6 +2770,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         self._migrate_covers_to_custom_dir(covers_path)
                     except Exception as e:
                         logger.error(f"[{SELF_ID}] Cover migration during save_settings error: {e}")
+
+                # 바이오스 폴더가 새로 지정되었거나 변경되었을 경우 기존 바이오스 파일들을 새 위치로 마이그레이션
+                if bios_path and bios_path != prev_bios_path:
+                    try:
+                        self._migrate_bios_to_custom_dir(bios_path)
+                    except Exception as e:
+                        logger.error(f"[{SELF_ID}] Bios migration during save_settings error: {e}")
 
                 # ROM 디렉토리 스캔을 백그라운드로 실행하여 저장 응답 타임아웃 방지
                 threading.Thread(target=self._scan_roms, daemon=True).start()

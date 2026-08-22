@@ -2392,6 +2392,7 @@
       $('gbaSettingInterval').value = state.config.auto_save_interval_sec;
       $('gbaSettingExtraPath').value = state.config.extra_roms_path || '';
       $('gbaSettingCoversPath').value = state.config.covers_path || '';
+      $('gbaSettingBiosPath').value = state.config.bios_path || '';
       $('gbaSettingsModal').style.display = 'flex';
     });
 
@@ -2405,12 +2406,16 @@
     $('gbaSettingsSaveBtn').addEventListener('click', async () => {
       const extraPath = $('gbaSettingExtraPath').value.trim();
       const coversPath = $('gbaSettingCoversPath').value.trim();
+      const biosPath = $('gbaSettingBiosPath').value.trim();
       const cloudSave = $('gbaSettingCloudSave').checked ? '1' : '0';
       const interval = $('gbaSettingInterval').value.trim();
       const saveBtn = $('gbaSettingsSaveBtn');
 
       const prevCoversPath = (state.config.covers_path || '').trim();
-      const needMigration = coversPath && coversPath !== prevCoversPath;
+      const needCoverMigration = coversPath && coversPath !== prevCoversPath;
+
+      const prevBiosPath = (state.config.bios_path || '').trim();
+      const needBiosMigration = biosPath && biosPath !== prevBiosPath;
 
       saveBtn.disabled = true;
       saveBtn.textContent = '저장 중...';
@@ -2421,36 +2426,64 @@
       const scanDetails = $('gbaScanDetails');
 
       try {
-        if (needMigration) {
+        if (needCoverMigration || needBiosMigration) {
           $('gbaSettingsModal').style.display = 'none';
           if (scanModal) {
             scanModal.style.display = 'flex';
-            if (scanStatus) scanStatus.textContent = '기존 커버 이미지 마이그레이션 대상을 분석하는 중...';
+            if (scanStatus) scanStatus.textContent = '기존 파일 마이그레이션 대상을 분석하는 중...';
             if (scanProgressBar) scanProgressBar.style.width = '0%';
             if (scanDetails) scanDetails.textContent = '분석 준비 중...';
           }
 
-          // 1. 마이그레이션 대상 파일 목록 조회
-          const candRes = await apiCall('get_cover_migration_candidates', { target_dir: coversPath });
-          const items = (candRes && candRes.success && candRes.items) ? candRes.items : [];
-          const total = items.length;
+          // 1. 커버 마이그레이션
+          if (needCoverMigration) {
+            const candRes = await apiCall('get_cover_migration_candidates', { target_dir: coversPath });
+            const items = (candRes && candRes.success && candRes.items) ? candRes.items : [];
+            const total = items.length;
 
-          if (total > 0) {
-            if (scanStatus) scanStatus.textContent = `기존 커버 이미지를 새 폴더로 이동하는 중... (${total}개)`;
-            const BATCH_SIZE = 10;
-            let movedTotal = 0;
+            if (total > 0) {
+              if (scanStatus) scanStatus.textContent = `기존 커버 이미지를 새 폴더로 이동하는 중... (${total}개)`;
+              const BATCH_SIZE = 10;
+              let movedTotal = 0;
 
-            for (let i = 0; i < total; i += BATCH_SIZE) {
-              const batch = items.slice(i, i + BATCH_SIZE);
-              await apiCall('migrate_cover_batch', {
-                target_dir: coversPath,
-                items: batch,
-              });
+              for (let i = 0; i < total; i += BATCH_SIZE) {
+                const batch = items.slice(i, i + BATCH_SIZE);
+                await apiCall('migrate_cover_batch', {
+                  target_dir: coversPath,
+                  items: batch,
+                });
 
-              movedTotal += batch.length;
-              const percent = Math.min(Math.round((movedTotal / total) * 90), 90);
-              if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
-              if (scanDetails) scanDetails.textContent = `${movedTotal} / ${total} 커버 파일 이동 완료 (${percent}%)`;
+                movedTotal += batch.length;
+                const percent = Math.min(Math.round((movedTotal / total) * 50), 50);
+                if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
+                if (scanDetails) scanDetails.textContent = `${movedTotal} / ${total} 커버 파일 이동 완료`;
+              }
+            }
+          }
+
+          // 2. 바이오스 마이그레이션
+          if (needBiosMigration) {
+            const biosCandRes = await apiCall('get_bios_migration_candidates', { target_dir: biosPath });
+            const biosItems = (biosCandRes && biosCandRes.success && biosCandRes.items) ? biosCandRes.items : [];
+            const biosTotal = biosItems.length;
+
+            if (biosTotal > 0) {
+              if (scanStatus) scanStatus.textContent = `기존 바이오스 파일을 새 폴더로 이동하는 중... (${biosTotal}개)`;
+              const BATCH_SIZE = 10;
+              let biosMovedTotal = 0;
+
+              for (let i = 0; i < biosTotal; i += BATCH_SIZE) {
+                const batch = biosItems.slice(i, i + BATCH_SIZE);
+                await apiCall('migrate_bios_batch', {
+                  target_dir: biosPath,
+                  items: batch,
+                });
+
+                biosMovedTotal += batch.length;
+                const percent = 50 + Math.min(Math.round((biosMovedTotal / biosTotal) * 40), 40);
+                if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
+                if (scanDetails) scanDetails.textContent = `${biosMovedTotal} / ${biosTotal} 바이오스 파일 이동 완료`;
+              }
             }
           }
 
@@ -2461,6 +2494,7 @@
         const res = await apiCall('save_settings', {
           extra_roms_path: extraPath,
           covers_path: coversPath,
+          bios_path: biosPath,
           cloud_save_enabled: cloudSave,
           auto_save_interval_sec: interval,
         });
@@ -2468,6 +2502,7 @@
         if (res && res.success) {
           state.config.extra_roms_path = extraPath;
           state.config.covers_path = coversPath;
+          state.config.bios_path = biosPath;
           state.config.cloud_save_enabled = cloudSave === '1';
           state.config.auto_save_interval_sec = parseInt(interval, 10) || 60;
           $('gbaSettingsModal').style.display = 'none';
@@ -2475,7 +2510,7 @@
           if (scanProgressBar) scanProgressBar.style.width = '100%';
           if (scanDetails) scanDetails.textContent = '설정 및 마이그레이션 완료!';
 
-          showToast('설정 및 커버 마이그레이션이 성공적으로 완료되었습니다! 📁');
+          showToast('설정 및 마이그레이션이 성공적으로 완료되었습니다! 📁');
           loadLibrary(true);
         } else {
           showToast(res && res.error ? res.error : '설정 저장에 실패했습니다.', true);
