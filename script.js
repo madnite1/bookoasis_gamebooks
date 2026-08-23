@@ -233,7 +233,7 @@
         if (state.isFavoriteOnly && !g.is_favorite) return false;
 
         // 100% 정상 구동 롬만 보기 필터
-        if (state.isPassOnly && (g.health_status === 'incomplete' || g.health_status === 'chd_required')) return false;
+        if (state.isPassOnly && g.health_status !== 'pass') return false;
 
         // 기종 드롭다운 카테고리 필터
         if (state.category === 'snes' && g.core !== 'snes' && g.platform !== 'SNES') return false;
@@ -442,6 +442,9 @@
           <span class="gba-badge ${sysInfo.colorClass}" title="${escapeHtml(sysInfo.name)}">${escapeHtml(sysInfo.label)}</span>
           ${game.has_save ? `<span class="gba-badge gba-badge-save" title="클라우드 세이브 보관됨"><i class="fa-solid fa-floppy-disk"></i> SAVE</span>` : ''}
           ${game.health_status === 'incomplete' ? `<span class="gba-badge" style="background: rgba(245, 158, 11, 0.9); color: #000; font-weight: 700;" title="일부 칩셋이 누락된 구형 롬셋입니다."><i class="fa-solid fa-triangle-exclamation"></i> 칩셋 누락</span>` : ''}
+          ${game.health_status === 'bios_required' ? `<span class="gba-badge" style="background: rgba(249, 115, 22, 0.92); color: #fff; font-weight: 700;" title="필수 BIOS 또는 시스템 파일이 누락되었습니다."><i class="fa-solid fa-microchip"></i> BIOS 필요</span>` : ''}
+          ${game.health_status === 'parent_required' ? `<span class="gba-badge" style="background: rgba(234, 88, 12, 0.92); color: #fff; font-weight: 700;" title="필수 부모 롬(Parent ROM)이 누락되었습니다."><i class="fa-solid fa-folder-tree"></i> Parent 필요</span>` : ''}
+          ${game.health_status === 'bad_dump_or_unknown' ? `<span class="gba-badge" style="background: rgba(107, 114, 128, 0.95); color: #fff; font-weight: 700;" title="손상되었거나 DAT와 일치하지 않는 롬셋일 수 있습니다."><i class="fa-solid fa-circle-question"></i> 재확인 필요</span>` : ''}
           ${game.health_status === 'chd_required' ? `<span class="gba-badge" style="background: rgba(239, 68, 68, 0.9); color: #fff; font-weight: 700;" title="대용량 CHD 음원 디스크 이미지가 필요합니다."><i class="fa-solid fa-compact-disc"></i> CHD 필요</span>` : ''}
         </div>
         ${isBiosMissing ? `
@@ -897,7 +900,42 @@
     }
 
     // 3. 롬 무결성 정밀 진단 결과 가드 (칩셋 누락 / CHD 필요)
-    if (game.health_status === 'chd_required') {
+    if (game.health_status === 'parent_required') {
+      const requiredParent = (game.missing_roms || '').trim() || `${rawStem}.zip`;
+      return {
+        type: 'parent',
+        needed: requiredParent,
+        systemName: '아케이드 클론(Clone) 롬셋',
+        title: '아케이드 부모 롬(Parent ROM) 필요',
+        reason: `이 게임은 단독 실행이 불가능한 클론/파생 롬셋으로 판정되었습니다.<br>필수 부모 롬 <code>${escapeHtml(requiredParent)}</code> 파일이 roms 폴더에 함께 있어야 정상 구동됩니다.`,
+        notice: `부모 롬(<code>${escapeHtml(requiredParent)}</code>) 없이 실행 시 <strong>Romset is unknown</strong> 오류가 발생합니다.`,
+        btnText: `부모 롬 (${requiredParent}) 업로드`,
+        isOptional: false,
+      };
+    } else if (game.health_status === 'bios_required') {
+      const requiredBios = (game.needed_bios || game.missing_roms || '').trim() || '필수 BIOS';
+      return {
+        type: 'bios',
+        needed: requiredBios,
+        systemName: '시스템 BIOS / 기판 파일',
+        title: '필수 BIOS 파일 필요',
+        reason: `이 게임은 필수 BIOS 또는 시스템 파일 <code>${escapeHtml(requiredBios)}</code> 이(가) 없으면 정상 구동되지 않습니다.`,
+        notice: `필수 BIOS(<code>${escapeHtml(requiredBios)}</code>) 없이 실행 시 <strong>Romset is unknown</strong> 또는 부팅 실패가 발생할 수 있습니다.`,
+        btnText: `BIOS (${requiredBios}) 업로드`,
+        isOptional: false,
+      };
+    } else if (game.health_status === 'bad_dump_or_unknown') {
+      return {
+        type: 'unknown',
+        needed: '최신 Non-Merged 롬셋',
+        systemName: '손상/미지원/미확인 롬셋',
+        title: '롬셋 재확인 필요',
+        reason: `이 롬 파일은 현재 DAT와 일치하지 않거나 손상된 덤프일 가능성이 있습니다.<br>${escapeHtml(game.missing_roms || '최신 Non-Merged 정식 롬셋으로 다시 교체해 확인해 주세요.')}`,
+        notice: `실행을 강행하면 <strong>Romset is unknown</strong> 또는 즉시 종료가 발생할 수 있습니다.`,
+        btnText: `롬 파일 다시 업로드`,
+        isOptional: false,
+      };
+    } else if (game.health_status === 'chd_required') {
       return {
         type: 'chd',
         needed: `${rawStem}.chd`,
@@ -941,17 +979,22 @@
       return;
     }
     const isParent = missing.type === 'parent';
+    const iconClass = missing.type === 'parent'
+      ? 'fa-solid fa-folder-tree'
+      : missing.type === 'chd'
+        ? 'fa-solid fa-compact-disc'
+        : missing.type === 'unknown'
+          ? 'fa-solid fa-circle-question'
+          : 'fa-solid fa-microchip';
 
     if ($('gbaBiosWarningHeaderSpan')) {
       $('gbaBiosWarningHeaderSpan').textContent = missing.title || (isParent ? '아케이드 부모 롬(Parent ROM) 필요' : '시스템 바이오스(BIOS) 확인');
     }
     if ($('gbaBiosWarningHeaderIcon')) {
-      $('gbaBiosWarningHeaderIcon').className = isParent ? 'fa-solid fa-folder-tree' : 'fa-solid fa-microchip';
+      $('gbaBiosWarningHeaderIcon').className = iconClass;
     }
     if ($('gbaBiosWarningBodyIcon')) {
-      $('gbaBiosWarningBodyIcon').innerHTML = isParent
-        ? '<i class="fa-solid fa-folder-tree"></i>'
-        : '<i class="fa-solid fa-microchip"></i>';
+      $('gbaBiosWarningBodyIcon').innerHTML = `<i class="${iconClass}"></i>`;
     }
     if ($('gbaBiosWarningGameTitle')) {
       $('gbaBiosWarningGameTitle').textContent = game.title;

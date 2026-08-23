@@ -1273,6 +1273,28 @@ def _is_bios_file(file_or_path):
 
     return False
 
+
+def _normalize_required_archive(name):
+    req = str(name or "").strip().lower()
+    if not req:
+        return ""
+    if not req.endswith((".zip", ".bin", ".rom", ".pce")):
+        req += ".zip"
+    return req
+
+
+def _looks_like_bios_requirement(name):
+    req = _normalize_required_archive(name)
+    if not req:
+        return False
+    stem = os.path.splitext(req)[0]
+    return _is_bios_file(req) or stem in KNOWN_BIOS_STEMS or stem in ("boardrom", "bootrom", "sysrom", "firmware")
+
+
+def _is_optional_runtime_bios(name):
+    req = _normalize_required_archive(name)
+    return req.startswith("scph")
+
 def _query_arcade_dat(stem, internal_crcs=None):
     """내장된 All-In-One DAT DB (Arcade + SNES + GBA + NES + MD + PCE 등) 조회"""
     dat_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arcade_dat.db")
@@ -1418,6 +1440,7 @@ def _detect_rom_info(file_path):
         "game_code": "",
         "maker_code": "",
         "needed_bios": "",
+        "parent_hint": "",
     }
     ext = os.path.splitext(file_path)[1].lower()
     raw_data = None
@@ -1497,11 +1520,14 @@ def _detect_rom_info(file_path):
                                 info["game_code"] = dat_match["name"]
                             if dat_match.get("description"):
                                 info["title"] = dat_match["description"]
-                            if dat_match.get("romof"):
-                                romof_bios = dat_match["romof"].lower()
-                                if not romof_bios.endswith(".zip") and not romof_bios.endswith(".bin"):
-                                    romof_bios += ".zip"
-                                info["needed_bios"] = romof_bios
+                            romof_name = _normalize_required_archive(dat_match.get("romof"))
+                            cloneof_name = _normalize_required_archive(dat_match.get("cloneof"))
+                            if cloneof_name:
+                                info["parent_hint"] = cloneof_name
+                            elif romof_name and romof_name != f"{stem}.zip" and not _looks_like_bios_requirement(romof_name):
+                                info["parent_hint"] = romof_name
+                            if romof_name and _looks_like_bios_requirement(romof_name):
+                                info["needed_bios"] = romof_name
                         # 3. 내장 아케이드 정적 사전(KNOWN_ARCADE_TITLES) 보조 대조
                         elif stem in KNOWN_ARCADE_TITLES:
                             info["core"] = "arcade"
@@ -1708,11 +1734,14 @@ def _detect_rom_info(file_path):
 
                             if dat_match.get("description"):
                                 info["title"] = dat_match["description"]
-                            if dat_match.get("romof"):
-                                romof_bios = dat_match["romof"].lower()
-                                if not romof_bios.endswith(".zip") and not romof_bios.endswith(".bin"):
-                                    romof_bios += ".zip"
-                                info["needed_bios"] = romof_bios
+                            romof_name = _normalize_required_archive(dat_match.get("romof"))
+                            cloneof_name = _normalize_required_archive(dat_match.get("cloneof"))
+                            if cloneof_name:
+                                info["parent_hint"] = cloneof_name
+                            elif romof_name and romof_name != f"{stem}.zip" and not _looks_like_bios_requirement(romof_name):
+                                info["parent_hint"] = romof_name
+                            if romof_name and _looks_like_bios_requirement(romof_name):
+                                info["needed_bios"] = romof_name
                         else:
                             # 2. 콘솔 헤더 전수 분석
                             for fname in extracted_files:
@@ -1858,6 +1887,11 @@ def _detect_rom_info(file_path):
         info["needed_bios"] = "saturn_bios.bin"
     elif c_lower == "3do" or p_lower == "3do":
         info["needed_bios"] = "3dobios.rom"
+
+    if c_lower in ("arcade", "mame2003") and not info.get("parent_hint"):
+        clone_match = re.match(r"^([a-z0-9_]+?)([juka-e1-3])$", f_stem, re.IGNORECASE)
+        if clone_match and len(clone_match.group(1)) >= 3:
+            info["parent_hint"] = f"{clone_match.group(1).lower()}.zip"
 
     return info
 
@@ -2382,6 +2416,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         existing_games = {g["id"]: g for g in self._db_query("SELECT * FROM games")}
         now_str = _get_kst_now_str()
+        available_rom_names = {str(v.get("filename") or "").lower() for v in found_files.values() if v.get("filename")}
+        available_bios_names = set()
+        bios_dir = self._get_bios_dir()
+        if os.path.isdir(bios_dir):
+            try:
+                available_bios_names = {f.lower() for f in os.listdir(bios_dir) if not f.startswith(".")}
+            except Exception:
+                available_bios_names = set()
 
         # 병렬 분석이 필요한 파일 목록 선별
         files_to_process = []
@@ -2504,9 +2546,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                                         zout.writestr(b_info.filename, zb.read(b_info.filename))
                         if os.path.exists(curr_file_path):
                             os.remove(curr_file_path)
+                        available_rom_names.discard(str(info.get("filename") or "").lower())
                         curr_file_path = dest_zip_path
                         info["file_path"] = dest_zip_path
                         info["filename"] = zip_fname
+                        available_rom_names.add(zip_fname.lower())
                         info["size_bytes"] = os.path.getsize(dest_zip_path)
                         info["mtime"] = os.path.getmtime(dest_zip_path)
 
@@ -2526,8 +2570,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         dest_file_path = os.path.join(ideal_dir, info["filename"])
                         if not os.path.exists(dest_file_path):
                             shutil.move(curr_file_path, dest_file_path)
+                            available_rom_names.discard(str(info.get("filename") or "").lower())
                             curr_file_path = dest_file_path
                             info["file_path"] = dest_file_path
+                            available_rom_names.add(info["filename"].lower())
                             
                             sdir = info.get("sdir") or base_dir
                             rel = os.path.relpath(dest_file_path, sdir)
@@ -2584,11 +2630,20 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 r_core = (rom_info.get("core") or "").lower()
                 r_plat = rom_info.get("platform") or ""
                 gcode = rom_info.get("game_code") or ""
+                required_bios = _normalize_required_archive(rom_info.get("needed_bios") or "")
+                required_parent = _normalize_required_archive(rom_info.get("parent_hint") or "")
+                is_arcade = (r_core in ("arcade", "mame2003") or r_plat in ("Arcade", "Neo-Geo"))
 
-                if (r_core in ("arcade", "mame2003") or r_plat in ("Arcade", "Neo-Geo")) and stem.startswith(("bm", "ddr", "popn", "gfdm", "jubeat")):
+                if is_arcade and stem.startswith(("bm", "ddr", "popn", "gfdm", "jubeat")):
                     health_status = "chd_required"
                     missing_roms_str = "CHD 디스크 이미지 필요"
-                elif (r_core in ("arcade", "mame2003") or r_plat in ("Arcade", "Neo-Geo")) and curr_file_path.endswith(".zip"):
+                elif required_parent and required_parent not in available_rom_names:
+                    health_status = "parent_required"
+                    missing_roms_str = required_parent
+                elif required_bios and not _is_optional_runtime_bios(required_bios) and required_bios not in available_bios_names:
+                    health_status = "bios_required"
+                    missing_roms_str = required_bios
+                elif is_arcade and curr_file_path.endswith(".zip"):
                     dat_db_p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arcade_dat.db")
                     if os.path.isfile(dat_db_p):
                         try:
@@ -2610,6 +2665,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 if m_roms:
                                     health_status = "incomplete"
                                     missing_roms_str = json.dumps(m_roms[:6], ensure_ascii=False)
+                            else:
+                                health_status = "bad_dump_or_unknown"
+                                missing_roms_str = "DAT 미일치 또는 미지원/손상 의심 롬셋"
                         except Exception:
                             pass
 
@@ -3789,7 +3847,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 conn_dat = sqlite3.connect(dat_db_path, timeout=10)
                 cur_dat = conn_dat.cursor()
 
-                all_games = self._db_query("SELECT id, filename, file_path, core, platform, title, game_code, needed_bios FROM games ORDER BY title ASC")
+                all_games = self._db_query("SELECT id, filename, file_path, core, platform, title, game_code, needed_bios, COALESCE(health_status, 'pass') AS health_status, COALESCE(missing_roms, '') AS missing_roms FROM games ORDER BY title ASC")
                 
                 pass_count = 0
                 incomplete_list = []
@@ -3802,15 +3860,18 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     core = (g["core"] or "").lower()
                     plat = g["platform"] or ""
                     title = g["title"] or fname
-                    gcode = g["game_code"] or ""
+                    health_status = (g.get("health_status") or "pass").strip() or "pass"
+                    missing_roms = g.get("missing_roms") or ""
+                    needed_bios = _normalize_required_archive(g.get("needed_bios") or "")
 
                     if not os.path.exists(fpath):
                         continue
 
-                    stem = os.path.splitext(fname)[0].lower()
+                    if health_status == "pass":
+                        pass_count += 1
+                        continue
 
-                    # 1. CHD 의심 검사 (비트매니아, DDR 등 코나미/대형 체감형 기판)
-                    if (core in ("arcade", "mame2003") or plat in ("Arcade", "Neo-Geo")) and stem.startswith(("bm", "ddr", "popn", "gfdm", "jubeat")):
+                    if health_status == "chd_required":
                         chd_list.append({
                             "id": gid,
                             "title": title,
@@ -3821,42 +3882,36 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         })
                         continue
 
-                    # 2. 아케이드 롬 무결성 정밀 검사
-                    if (core in ("arcade", "mame2003") or plat in ("Arcade", "Neo-Geo")) and fpath.endswith(".zip"):
+                    if health_status == "incomplete":
                         try:
-                            with zipfile.ZipFile(fpath, "r") as z:
-                                file_crcs = {f"{z.getinfo(n).CRC:08x}".lower(): n for n in z.namelist() if not n.startswith(".") and z.getinfo(n).file_size > 0}
-
-                            target_sys = "MAME2003Plus" if core == "mame2003" else "FBNeo"
-                            cur_dat.execute("SELECT r.rom_name, r.crc32 FROM games g JOIN roms r ON g.id = r.game_id WHERE g.name = ? AND g.system_name = ?", (gcode or stem, target_sys))
-                            expected = cur_dat.fetchall()
-
-                            if not expected and target_sys == "FBNeo":
-                                cur_dat.execute("SELECT r.rom_name, r.crc32 FROM games g JOIN roms r ON g.id = r.game_id WHERE g.name = ? AND g.system_name = 'MAME2003Plus'", (gcode or stem,))
-                                expected = cur_dat.fetchall()
-
-                            if expected:
-                                missing_roms = [r[0] for r in expected if r[1] not in file_crcs]
-                                if missing_roms:
-                                    incomplete_list.append({
-                                        "id": gid,
-                                        "title": title,
-                                        "filename": fname,
-                                        "core": core,
-                                        "platform": plat,
-                                        "missing_count": len(missing_roms),
-                                        "total_expected": len(expected),
-                                        "missing_samples": missing_roms[:4],
-                                        "reason": f"필수 칩셋 {len(expected)}개 중 {len(missing_roms)}개 누락 ({', '.join(missing_roms[:3])}...)"
-                                    })
-                                else:
-                                    pass_count += 1
-                            else:
-                                pass_count += 1
+                            parsed_missing = json.loads(missing_roms) if missing_roms else []
+                            missing_samples = parsed_missing[:4] if isinstance(parsed_missing, list) else []
                         except Exception:
-                            pass_count += 1
+                            missing_samples = []
+                        reason = f"필수 칩셋 누락 ({', '.join(missing_samples[:3])}...)" if missing_samples else "필수 칩셋 누락이 있는 불완전 롬셋입니다."
+                    elif health_status == "bios_required":
+                        reason = f"필수 BIOS/시스템 파일 {needed_bios or missing_roms or '알 수 없음'} 누락"
+                        missing_samples = []
+                    elif health_status == "parent_required":
+                        reason = f"필수 부모 롬 {missing_roms or '알 수 없음'} 누락"
+                        missing_samples = []
+                    elif health_status == "bad_dump_or_unknown":
+                        reason = missing_roms or "DAT 미일치 또는 미지원/손상 의심 롬셋"
+                        missing_samples = []
                     else:
                         pass_count += 1
+                        continue
+
+                    incomplete_list.append({
+                        "id": gid,
+                        "title": title,
+                        "filename": fname,
+                        "core": core,
+                        "platform": plat,
+                        "health_status": health_status,
+                        "missing_samples": missing_samples,
+                        "reason": reason,
+                    })
 
                 conn_dat.close()
 
