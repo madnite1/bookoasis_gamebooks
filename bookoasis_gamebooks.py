@@ -2431,9 +2431,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 target_core_folder = re.sub(r"[^a-zA-Z0-9_\-]", "_", target_core_folder).strip() or "other"
                 current_folder_name = os.path.basename(curr_dir).lower()
 
-                # 아케이드/네오지오 .7z 파일인 경우: 표준 .zip 변환 및 바이오스 자동 병합
+                # 모든 .7z 압축 롬 파일: 브라우저 EmulatorJS 호환성 및 안정적 구동을 위해 표준 .zip으로 영구 자동 변환
                 f_ext = os.path.splitext(info["filename"])[1].lower()
-                if f_ext == ".7z" and (rom_info.get("core") == "arcade" or rom_info.get("platform") in ("Arcade", "Neo-Geo")):
+                if f_ext == ".7z":
                     try:
                         import py7zr
                         zip_fname = os.path.splitext(info["filename"])[0] + ".zip"
@@ -3077,8 +3077,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 dest_path = os.path.join(target_sub_dir, f"{base_n}_{counter}{ext_n}")
                 counter += 1
 
-            # 아케이드/네오지오 .7z 롬인 경우: 브라우저 에뮬레이터(FBNeo) 호환성을 위해 표준 .zip으로 자동 변환 및 바이오스 병합
-            if ext == ".7z" and (rom_info.get("core") == "arcade" or rom_info.get("platform") in ("Arcade", "Neo-Geo")):
+            # 모든 .7z 압축 롬 업로드 시: 브라우저 WebAssembly 에뮬레이터 호환성을 위해 표준 .zip으로 영구 자동 변환
+            if ext == ".7z":
                 try:
                     import py7zr
                     zip_safe_filename = f"{base_n}.zip"
