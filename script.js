@@ -1002,6 +1002,15 @@
       if (biosList.includes('neogeo.zip')) neededBiosFile = 'neogeo.zip';
     } else if (isArcade && (rawStem.startsWith('olds') || rawStem.startsWith('kov') || rawStem.startsWith('orlegend') || rawStem.startsWith('dmnfrnt'))) {
       if (biosList.includes('pgm.zip')) neededBiosFile = 'pgm.zip';
+    } else if (isArcade && (rawStem.startsWith('bldyror') || rawStem.startsWith('brvblade') || rawStem.startsWith('sfex') || rawStem.startsWith('rvschool') || rawStem.startsWith('starglad') || rawStem.startsWith('strider2') || rawStem.startsWith('techromn') || rawStem.startsWith('jgts') || rawStem.startsWith('raiden2') || rawStem.startsWith('raidendx'))) {
+      // Sony ZN-1 / ZN-2 아케이드 기판 바이오스 자동 주입
+      if (biosList.includes('acpsx.zip')) {
+        neededBiosFile = 'acpsx.zip';
+      } else if (biosList.includes('atluspsx.zip')) {
+        neededBiosFile = 'atluspsx.zip';
+      } else if (biosList.includes('boardrom.zip')) {
+        neededBiosFile = 'boardrom.zip';
+      }
     } else if (coreToUse === 'psx' || platformKey === 'ps1') {
       const psxBios = biosList.find((b) => b.startsWith('scph5501') || b.startsWith('scph1001') || b.startsWith('scph5500') || b.startsWith('scph5502') || b.startsWith('scph7001'));
       if (psxBios) neededBiosFile = psxBios;
