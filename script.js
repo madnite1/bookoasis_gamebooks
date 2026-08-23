@@ -1107,7 +1107,7 @@
 
     const biosUrl = neededBiosFile ? `${window.location.origin}/api/webhook/bookoasis_gamebooks/bios/${encodeURIComponent(neededBiosFile)}` : null;
     const gameUrl = window.location.origin + game.rom_url;
-    const gameName = isArcade ? rawStem : game.title;
+    const gameName = isArcade ? (game.game_code || rawStem) : game.title;
     const loadStateUrl = game.has_state ? window.location.origin + game.state_url : null;
 
     // SPA 환경에서의 전역 변수 충돌(let EJS_STORAGE redeclaration) 및 WASM 메모리 누수 방지를 위해
@@ -2551,41 +2551,76 @@
         if (scanProgressBar) scanProgressBar.style.width = '5%';
         if (scanDetails) scanDetails.textContent = '통합 DAT DB 및 바이너리 헤더 전수 분석 준비 중...';
 
-        // 0.4초 간격으로 실시간 파일 단위 프로그레스 폴링
+        // 0.35초 간격으로 실시간 파일 단위 프로그레스 폴링
         pollTimer = setInterval(async () => {
           try {
             const pollRes = await apiCall('scan_progress');
             if (pollRes && pollRes.success && pollRes.progress) {
               const p = pollRes.progress;
               if (p.total > 0) {
-                const percent = Math.min(Math.round((p.current / p.total) * 90), 90);
-                if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
-                if (scanDetails) {
-                  scanDetails.textContent = `${p.current} / ${p.total} 파일 분석 중 (${percent}%) - ${p.current_file || ''}`;
+                let percent = 5;
+                if (p.status === 'saving') {
+                  percent = 95;
+                  if (scanDetails) {
+                    scanDetails.textContent = '분석 완료. 데이터베이스 및 메타데이터 일괄 동기화 중...';
+                  }
+                } else if (p.status === 'completed') {
+                  percent = 100;
+                  if (scanDetails) {
+                    scanDetails.textContent = '동기화 완료!';
+                  }
+                } else {
+                  percent = Math.min(Math.round((p.current / p.total) * 90), 90);
+                  if (scanDetails) {
+                    scanDetails.textContent = `${p.current} / ${p.total} 파일 분석 중 (${percent}%) - ${p.current_file || ''}`;
+                  }
                 }
+                if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
               }
             }
           } catch (e) {
             // 폴링 오류 무시
           }
-        }, 400);
+        }, 350);
       }
 
       try {
         const res = await apiCall('full_scan');
+        if (!res || !res.success) {
+          throw new Error(res && res.error ? res.error : '전체 재스캔 시작 실패');
+        }
+
+        // 백그라운드 스캔 완료될 때까지 비동기 대기
+        await new Promise((resolve) => {
+          const checkDone = setInterval(async () => {
+            try {
+              const pollRes = await apiCall('scan_progress');
+              if (pollRes && pollRes.success && pollRes.progress) {
+                const p = pollRes.progress;
+                if (!p.is_running && p.status === 'completed') {
+                  clearInterval(checkDone);
+                  resolve();
+                }
+              }
+            } catch (e) {
+              // ignore
+            }
+          }, 500);
+        });
+
         if (pollTimer) clearInterval(pollTimer);
 
-        if (scanProgressBar) scanProgressBar.style.width = '95%';
+        if (scanProgressBar) scanProgressBar.style.width = '98%';
         if (scanDetails) scanDetails.textContent = '라이브러리 갱신 중...';
 
         await loadLibrary(true);
 
         if (scanProgressBar) scanProgressBar.style.width = '100%';
-        showToast(res && res.message ? res.message : '전체 재스캔 및 메타데이터 동기화가 완료되었습니다!');
+        showToast('전체 재스캔 및 메타데이터 동기화가 완료되었습니다!');
       } catch (err) {
         if (pollTimer) clearInterval(pollTimer);
         console.error('[GBA] Full scan error:', err);
-        showToast('전체 재스캔 중 오류가 발생했습니다.', true);
+        showToast('전체 재스캔 중 오류가 발생했습니다: ' + (err.message || err), true);
         loadLibrary(true);
       } finally {
         if (pollTimer) clearInterval(pollTimer);
