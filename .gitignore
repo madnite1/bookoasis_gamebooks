@@ -1,4 +1,5 @@
 *.db
+!arcade_dat.db
 *.db-wal
 *.db-shm
 __pycache__/

@@ -1249,125 +1249,125 @@ def _detect_rom_info(file_path):
                             info["title"] = KNOWN_ARCADE_TITLES[stem]
                         else:
                             # 4. ZIP 내부 모든 파일 바이너리 헤더 전수 조사 (메가드라이브, SNES, NES, GBA, GB, N64 등)
-                        detected_by_header = False
-                        for inner_f in z.namelist():
-                            if inner_f.startswith(".") or inner_f.endswith("/"):
-                                continue
-                            try:
-                                with z.open(inner_f) as zf:
-                                    sample = zf.read(0x10000)
-                                if not sample:
+                            detected_by_header = False
+                            for inner_f in z.namelist():
+                                if inner_f.startswith(".") or inner_f.endswith("/"):
                                     continue
+                                try:
+                                    with z.open(inner_f) as zf:
+                                        sample = zf.read(0x10000)
+                                    if not sample:
+                                        continue
 
-                                # 3-1. Sega Mega Drive / Genesis 헤더 (0x100:0x120)
-                                if len(sample) >= 0x150 and (b"SEGA" in sample[0x100:0x110] or b"GENESIS" in sample[0x100:0x110] or b"MEGA DRIVE" in sample[0x100:0x120]):
-                                    info["core"] = "segaMD"
-                                    info["platform"] = "Genesis"
-                                    raw_data = sample
-                                    base_inner = os.path.splitext(os.path.basename(inner_f))[0]
-                                    clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                                    if clean_inner:
-                                        info["title"] = clean_inner
-                                    detected_by_header = True
-                                    break
+                                    # 3-1. Sega Mega Drive / Genesis 헤더 (0x100:0x120)
+                                    if len(sample) >= 0x150 and (b"SEGA" in sample[0x100:0x110] or b"GENESIS" in sample[0x100:0x110] or b"MEGA DRIVE" in sample[0x100:0x120]):
+                                        info["core"] = "segaMD"
+                                        info["platform"] = "Genesis"
+                                        raw_data = sample
+                                        base_inner = os.path.splitext(os.path.basename(inner_f))[0]
+                                        clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                        if clean_inner:
+                                            info["title"] = clean_inner
+                                        detected_by_header = True
+                                        break
 
-                                # 3-2. Nintendo NES / Famicom iNES 헤더 (0x00)
-                                elif len(sample) >= 16 and sample[:4] == b"NES\x1a":
-                                    info["core"] = "nes"
-                                    info["platform"] = "NES"
-                                    raw_data = sample
-                                    base_inner = os.path.splitext(os.path.basename(inner_f))[0]
-                                    clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                                    if clean_inner:
-                                        info["title"] = clean_inner
-                                    detected_by_header = True
-                                    break
+                                    # 3-2. Nintendo NES / Famicom iNES 헤더 (0x00)
+                                    elif len(sample) >= 16 and sample[:4] == b"NES\x1a":
+                                        info["core"] = "nes"
+                                        info["platform"] = "NES"
+                                        raw_data = sample
+                                        base_inner = os.path.splitext(os.path.basename(inner_f))[0]
+                                        clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                        if clean_inner:
+                                            info["title"] = clean_inner
+                                        detected_by_header = True
+                                        break
 
-                                # 3-3. Nintendo Game Boy Advance 헤더 (0x04)
-                                elif len(sample) >= 0xC0 and sample[0x04:0x08] == b" \x00\x00\xea":
-                                    info["core"] = "gba"
-                                    info["platform"] = "GBA"
-                                    raw_data = sample
-                                    base_inner = os.path.splitext(os.path.basename(inner_f))[0]
-                                    clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                                    if clean_inner:
-                                        info["title"] = clean_inner
-                                    detected_by_header = True
-                                    break
+                                    # 3-3. Nintendo Game Boy Advance 헤더 (0x04)
+                                    elif len(sample) >= 0xC0 and sample[0x04:0x08] == b" \x00\x00\xea":
+                                        info["core"] = "gba"
+                                        info["platform"] = "GBA"
+                                        raw_data = sample
+                                        base_inner = os.path.splitext(os.path.basename(inner_f))[0]
+                                        clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                        if clean_inner:
+                                            info["title"] = clean_inner
+                                        detected_by_header = True
+                                        break
 
-                                # 3-4. Nintendo N64 매직 넘버 (0x00)
-                                elif len(sample) >= 0x40 and sample[:4] in (b"\x80\x37\x12\x40", b"\x37\x80\x40\x12", b"\x40\x12\x37\x80"):
-                                    info["core"] = "n64"
-                                    info["platform"] = "N64"
-                                    raw_data = sample
-                                    base_inner = os.path.splitext(os.path.basename(inner_f))[0]
-                                    clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                                    if clean_inner:
-                                        info["title"] = clean_inner
-                                    detected_by_header = True
-                                    break
+                                    # 3-4. Nintendo N64 매직 넘버 (0x00)
+                                    elif len(sample) >= 0x40 and sample[:4] in (b"\x80\x37\x12\x40", b"\x37\x80\x40\x12", b"\x40\x12\x37\x80"):
+                                        info["core"] = "n64"
+                                        info["platform"] = "N64"
+                                        raw_data = sample
+                                        base_inner = os.path.splitext(os.path.basename(inner_f))[0]
+                                        clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                        if clean_inner:
+                                            info["title"] = clean_inner
+                                        detected_by_header = True
+                                        break
 
-                                # 3-5. Nintendo SNES / Super Famicom 내부 롬 헤더 (0x7FC0 / 0xFFC0)
-                                elif len(sample) >= 0x8000 and any(len(sample) >= off + 21 and not "".join(chr(b) for b in sample[off:off+21] if 32 <= b <= 126).strip().startswith("???") for off in (0x7FC0, 0xFFC0)):
+                                    # 3-5. Nintendo SNES / Super Famicom 내부 롬 헤더 (0x7FC0 / 0xFFC0)
+                                    elif len(sample) >= 0x8000 and any(len(sample) >= off + 21 and not "".join(chr(b) for b in sample[off:off+21] if 32 <= b <= 126).strip().startswith("???") for off in (0x7FC0, 0xFFC0)):
+                                        info["core"] = "snes"
+                                        info["platform"] = "SNES"
+                                        raw_data = sample
+                                        base_inner = os.path.splitext(os.path.basename(inner_f))[0]
+                                        clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                        if clean_inner:
+                                            info["title"] = clean_inner
+                                        detected_by_header = True
+                                        break
+                                except Exception:
+                                    pass
+
+                            if not detected_by_header:
+                                # 4. 헤더가 없는 경우 상위 디렉터리명 기반 콘솔 롬셋 판별
+                                fpath_lower = file_path.lower().replace("\\", "/")
+                                parts = fpath_lower.split("/")
+                                parent_dir = parts[-2] if len(parts) >= 2 else ""
+
+                                detected_console = False
+                                if parent_dir in ("snes", "sfc", "super_nintendo"):
                                     info["core"] = "snes"
                                     info["platform"] = "SNES"
-                                    raw_data = sample
-                                    base_inner = os.path.splitext(os.path.basename(inner_f))[0]
-                                    clean_inner = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                                    if clean_inner:
-                                        info["title"] = clean_inner
-                                    detected_by_header = True
-                                    break
-                            except Exception:
-                                pass
+                                    detected_console = True
+                                elif parent_dir in ("megadriv", "genesis", "sega", "md", "segamd"):
+                                    info["core"] = "segaMD"
+                                    info["platform"] = "Genesis"
+                                    detected_console = True
+                                elif parent_dir in ("nes", "fc", "famicom"):
+                                    info["core"] = "nes"
+                                    info["platform"] = "NES"
+                                    detected_console = True
+                                elif parent_dir in ("gba", "gameboy_advance"):
+                                    info["core"] = "gba"
+                                    info["platform"] = "GBA"
+                                    detected_console = True
+                                elif parent_dir in ("gb", "gbc", "gameboy"):
+                                    info["core"] = "gb"
+                                    info["platform"] = "GB"
+                                    detected_console = True
+                                elif parent_dir in ("n64", "nintendo64"):
+                                    info["core"] = "n64"
+                                    info["platform"] = "N64"
+                                    detected_console = True
+                                elif parent_dir in ("psx", "ps1", "playstation", "isos"):
+                                    info["core"] = "psx"
+                                    info["platform"] = "PS1"
+                                    detected_console = True
+                                elif parent_dir in ("nds", "nintendods"):
+                                    info["core"] = "nds"
+                                    info["platform"] = "NDS"
+                                    detected_console = True
 
-                        if not detected_by_header:
-                            # 4. 헤더가 없는 경우 상위 디렉터리명 기반 콘솔 롬셋 판별
-                            fpath_lower = file_path.lower().replace("\\", "/")
-                            parts = fpath_lower.split("/")
-                            parent_dir = parts[-2] if len(parts) >= 2 else ""
+                                if not detected_console:
+                                    # 5. 상위 폴더가 콘솔이 아니면 아케이드/네오지오로 판별
+                                    info["core"] = "arcade"
+                                    info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
 
-                            detected_console = False
-                            if parent_dir in ("snes", "sfc", "super_nintendo"):
-                                info["core"] = "snes"
-                                info["platform"] = "SNES"
-                                detected_console = True
-                            elif parent_dir in ("megadriv", "genesis", "sega", "md", "segamd"):
-                                info["core"] = "segaMD"
-                                info["platform"] = "Genesis"
-                                detected_console = True
-                            elif parent_dir in ("nes", "fc", "famicom"):
-                                info["core"] = "nes"
-                                info["platform"] = "NES"
-                                detected_console = True
-                            elif parent_dir in ("gba", "gameboy_advance"):
-                                info["core"] = "gba"
-                                info["platform"] = "GBA"
-                                detected_console = True
-                            elif parent_dir in ("gb", "gbc", "gameboy"):
-                                info["core"] = "gb"
-                                info["platform"] = "GB"
-                                detected_console = True
-                            elif parent_dir in ("n64", "nintendo64"):
-                                info["core"] = "n64"
-                                info["platform"] = "N64"
-                                detected_console = True
-                            elif parent_dir in ("psx", "ps1", "playstation", "isos"):
-                                info["core"] = "psx"
-                                info["platform"] = "PS1"
-                                detected_console = True
-                            elif parent_dir in ("nds", "nintendods"):
-                                info["core"] = "nds"
-                                info["platform"] = "NDS"
-                                detected_console = True
-
-                            if not detected_console:
-                                # 5. 상위 폴더가 콘솔이 아니면 아케이드/네오지오로 판별
-                                info["core"] = "arcade"
-                                info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
-
-                            raw_title = clean_fname.split(".")[0].replace("_", " ").replace("-", " ")
-                            info["title"] = raw_title.title() if not raw_title.isupper() else raw_title
+                                raw_title = clean_fname.split(".")[0].replace("_", " ").replace("-", " ")
+                                info["title"] = raw_title.title() if not raw_title.isupper() else raw_title
         except Exception as e:
             logger.debug(f"[{SELF_ID}] Zip inspect error: {e}")
     elif ext == ".7z":
