@@ -1046,7 +1046,20 @@ def _is_valid_header_title(text):
     # 연속된 동일 특수문자 (예: @@@@@)
     if re.search(r"([^a-zA-Z0-9\s])\1{2,}", t):
         return False
-    return True
+def _scan_cd_serial(file_path):
+    """CD/디스크 이미지(.bin, .iso, .img, .chd) 앞부분 2MB를 초고속 스캔하여 PS1/Saturn 고유 시리얼 번호 추출"""
+    serial_pattern = re.compile(rb"([CS][LUE][PUE][SAM][_\-][0-9]{3}[_\.][0-9]{2})|([CS][LUE][PUE][SAM][0-9]{5})")
+    try:
+        with open(file_path, "rb") as f:
+            chunk = f.read(2 * 1024 * 1024)
+            match = serial_pattern.search(chunk)
+            if match:
+                raw_serial = (match.group(1) or match.group(2)).decode("ascii", errors="ignore")
+                clean_serial = re.sub(r"[^A-Za-z0-9]", "-", raw_serial).upper()
+                return clean_serial
+    except Exception:
+        pass
+    return None
 
 
 def _is_bios_file(file_or_path):
@@ -1347,6 +1360,13 @@ def _detect_rom_info(file_path):
             sys_info = SUPPORTED_SYSTEMS[ext]
             info["core"] = sys_info["core"]
             info["platform"] = sys_info["platform"]
+        elif ext in (".bin", ".iso", ".img", ".chd"):
+            # CD/디스크 이미지 시리얼 스캔 (PS1 등)
+            serial = _scan_cd_serial(file_path)
+            if serial:
+                info["core"] = "psx"
+                info["platform"] = "PS1"
+                info["game_code"] = serial
         try:
             with open(file_path, "rb") as f:
                 raw_data = f.read(0x10000)
