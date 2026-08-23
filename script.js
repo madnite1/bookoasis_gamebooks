@@ -1655,6 +1655,39 @@
         continue;
       }
 
+      // [Pre-flight] 브라우저 단에서 16바이트 헤더 슬라이싱 후 0.05초 만에 사전 검증
+      if (type === 'rom') {
+        try {
+          const headSlice = file.slice(0, 16);
+          const headBuf = await headSlice.arrayBuffer();
+          const headBytes = new Uint8Array(headBuf);
+          let headHex = '';
+          for (let b = 0; b < headBytes.length; b++) {
+            headHex += headBytes[b].toString(16).padStart(2, '0');
+          }
+
+          const preflightRes = await fetch(`${API_WEBHOOK}/preflight`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              filename: file.name,
+              filesize: file.size,
+              head_hex: headHex,
+            }),
+          });
+          const preflight = await preflightRes.json();
+
+          if (preflight && preflight.is_split) {
+            showToast(
+              `⚠️ '${file.name}' 은(는) 부모 롬(${preflight.parent_hint || '원본'}.zip)이 필요한 스플릿(Split) 롬셋입니다. 원활한 단독 구동을 위해 Non-Merged 완본 롬셋을 권장합니다.`,
+              false
+            );
+          }
+        } catch (e) {
+          // Pre-flight 실패 시 일반 업로드로 자연스럽게 진행
+        }
+      }
+
       statusEl.textContent = `'${file.name}' 업로드 중... (${fileMb}MB)`;
       progEl.style.width = `${Math.round((i / total) * 100)}%`;
       detailsEl.textContent = `${i} / ${total} 파일 완료`;

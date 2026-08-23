@@ -2148,6 +2148,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "gba_state_file": (f"{ROUTE_BASE}/state/<game_id>/<int:slot>", ["GET", "POST", "HEAD"]),
                     "gba_cover_file": (f"{ROUTE_BASE}/cover/<game_id>", ["GET", "HEAD"]),
                     "gba_direct_upload": (f"{ROUTE_BASE}/upload", ["POST"]),
+                    "gba_preflight_check": (f"{ROUTE_BASE}/preflight", ["POST"]),
                     "gba_homebrew_install": (f"{ROUTE_BASE}/homebrew-install", ["POST"]),
                 }
 
@@ -2603,6 +2604,86 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             return jsonify({"success": True, "message": "커버 이미지가 성공적으로 등록되었습니다.", "type": "cover"})
 
         return jsonify({"success": False, "error": f"지원하지 않는 파일 형식입니다. ({ext})"}), 400
+
+    def _route_preflight_check(self):
+        """업로드 전 클라이언트 헤더 기반 초고속 Pre-flight 검증 (/preflight)"""
+        from flask import jsonify, request
+
+        payload = request.get_json(silent=True) or {}
+        filename = str(payload.get("filename", "")).strip()
+        filesize = int(payload.get("filesize", 0))
+        head_hex = str(payload.get("head_hex", "")).strip().lower()
+        internal_names = [str(n).lower() for n in payload.get("internal_names", [])]
+
+        safe_filename = re.sub(r"[^\w\.\-\(\) ]", "_", filename)
+        stem = os.path.splitext(safe_filename)[0].lower()
+        ext = os.path.splitext(safe_filename)[1].lower()
+
+        # 1. 바이오스 여부 사전 판정
+        is_bios = _is_bios_file(safe_filename)
+        if any(any(k in n for k in ("bios", "boardrom", "bootrom", "firmware", "coh-1000", "coh-1001")) for n in internal_names):
+            is_bios = True
+
+        if is_bios:
+            return jsonify({
+                "valid": True,
+                "is_bios": True,
+                "platform": "BIOS",
+                "message": f"'{safe_filename}' 파일은 시스템 바이오스(BIOS)로 자동 분류되어 등록됩니다.",
+            })
+
+        # 2. 콘솔/아케이드 기종 및 필요 바이오스 사전 판정
+        detected_platform = "Unknown"
+        needed_bios = ""
+        is_split = False
+        parent_hint = ""
+
+        # NES 헤더 (4E45531A)
+        if head_hex.startswith("4e45531a") or ext in (".nes", ".fds"):
+            detected_platform = "FDS" if ext == ".fds" else "NES"
+            if ext == ".fds":
+                needed_bios = "disksys.rom"
+        # GBA 헤더
+        elif ext == ".gba" or (len(head_hex) >= 16 and head_hex[8:16] == "200000ea"):
+            detected_platform = "GBA"
+        # N64 매직넘버 (80371240 / 37804012 / 40123780)
+        elif ext in (".z64", ".n64", ".v64") or head_hex.startswith(("80371240", "37804012", "40123780")):
+            detected_platform = "N64"
+        # SNES
+        elif ext in (".sfc", ".smc"):
+            detected_platform = "SNES"
+        # MD / Genesis
+        elif ext in (".md", ".gen", ".smd"):
+            detected_platform = "Genesis"
+        # PS1 / Saturn
+        elif ext in (".iso", ".chd", ".cue", ".pbp"):
+            detected_platform = "PS1"
+            needed_bios = "scph5501.bin"
+        elif ext == ".zip":
+            # 아케이드 롬셋 정밀 사전 분석
+            if stem in KNOWN_ARCADE_TITLES or stem in KNOWN_NEOGEO_STEMS:
+                detected_platform = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
+                if stem in KNOWN_NEOGEO_STEMS or any(stem.startswith(k) for k in ("mslug", "kof", "samsho", "fatfur", "garou", "aof", "lastblad")):
+                    needed_bios = "neogeo.zip"
+                elif any(stem.startswith(k) for k in ("olds", "kov", "orlegend", "dmnfrnt")):
+                    needed_bios = "pgm.zip"
+                elif any(stem.startswith(k) for k in ("bldyror", "brvblade", "sfex", "rvschool", "starglad", "strider2", "techromn")):
+                    needed_bios = "acpsx.zip"
+            elif internal_names:
+                # 내부 파일 개수 및 용량 기반 스플릿/완본 휴리스틱
+                if filesize < 200 * 1024 and len(internal_names) <= 3:
+                    is_split = True
+                    parent_hint = stem[:-1] if stem[-1] in "juka" and len(stem) > 3 else stem
+
+        return jsonify({
+            "valid": True,
+            "is_bios": False,
+            "platform": detected_platform,
+            "needed_bios": needed_bios,
+            "is_split": is_split,
+            "parent_hint": parent_hint,
+            "message": "Pre-flight check passed",
+        })
 
     def _hh_dest_name(self, slug, relpath):
         base = os.path.basename(relpath)
