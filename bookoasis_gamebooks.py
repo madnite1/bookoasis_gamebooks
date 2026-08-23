@@ -1266,6 +1266,8 @@ def _is_bios_file(file_or_path):
         except Exception:
             pass
 
+    return False
+
 def _query_arcade_dat(stem, internal_crcs=None):
     """내장된 All-In-One DAT DB (Arcade + SNES + GBA + NES + MD + PCE 등) 조회"""
     dat_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arcade_dat.db")
