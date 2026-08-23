@@ -1097,7 +1097,86 @@ def _is_bios_file(file_or_path):
         except Exception:
             pass
 
-    return False
+def _query_arcade_dat(stem, internal_crcs=None):
+    """내장된 FBNeo + MAME2003Plus 아케이드 DAT DB (arcade_dat.db) 조회"""
+    dat_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arcade_dat.db")
+    if not os.path.isfile(dat_db_path):
+        return None
+
+    try:
+        conn = sqlite3.connect(dat_db_path, timeout=5)
+        cursor = conn.cursor()
+
+        # 1. 파일명 stem 기반 우선 조회
+        clean_stem = stem.lower().strip()
+        cursor.execute("SELECT id, name, description, romof, cloneof, system_name FROM games WHERE name = ?", (clean_stem,))
+        row = cursor.fetchone()
+        if row:
+            gid, gname, desc, romof, cloneof, sys_name = row
+            # 해당 게임의 필수 칩 개수
+            cursor.execute("SELECT COUNT(*) FROM roms WHERE game_id = ?", (gid,))
+            cnt_row = cursor.fetchone()
+            total_roms = cnt_row[0] if cnt_row else 0
+            
+            matched_count = 0
+            if internal_crcs:
+                placeholders = ",".join(["?"] * len(internal_crcs))
+                cursor.execute(f"SELECT COUNT(*) FROM roms WHERE game_id = ? AND crc32 IN ({placeholders})", [gid] + internal_crcs)
+                mc_row = cursor.fetchone()
+                matched_count = mc_row[0] if mc_row else 0
+
+            match_rate = (matched_count / total_roms * 100) if total_roms > 0 else 100
+            conn.close()
+            return {
+                "name": gname,
+                "description": desc,
+                "romof": romof,
+                "cloneof": cloneof,
+                "system_name": sys_name,
+                "matched_count": matched_count,
+                "total_roms": total_roms,
+                "match_rate": round(match_rate, 1),
+                "is_non_merged": (match_rate >= 75.0),
+            }
+
+        # 2. 내부 CRC32 다중 매칭 조회 (파일명이 변형되었을 때 원본 롬셋 식별)
+        if internal_crcs and len(internal_crcs) >= 2:
+            placeholders = ",".join(["?"] * len(internal_crcs))
+            query = f"""
+                SELECT g.id, g.name, g.description, g.romof, g.cloneof, g.system_name, COUNT(r.id) as matched
+                FROM roms r
+                JOIN games g ON r.game_id = g.id
+                WHERE r.crc32 IN ({placeholders})
+                GROUP BY g.id
+                ORDER BY matched DESC
+                LIMIT 1
+            """
+            cursor.execute(query, internal_crcs)
+            best = cursor.fetchone()
+            if best and best[6] >= 2:
+                gid, gname, desc, romof, cloneof, sys_name, matched_cnt = best
+                cursor.execute("SELECT COUNT(*) FROM roms WHERE game_id = ?", (gid,))
+                cnt_row = cursor.fetchone()
+                total_roms = cnt_row[0] if cnt_row else 0
+                match_rate = (matched_cnt / total_roms * 100) if total_roms > 0 else 0
+                conn.close()
+                return {
+                    "name": gname,
+                    "description": desc,
+                    "romof": romof,
+                    "cloneof": cloneof,
+                    "system_name": sys_name,
+                    "matched_count": matched_cnt,
+                    "total_roms": total_roms,
+                    "match_rate": round(match_rate, 1),
+                    "is_non_merged": (match_rate >= 75.0),
+                }
+
+        conn.close()
+    except Exception as e:
+        logger.debug(f"[{SELF_ID}] Arcade DAT DB query error: {e}")
+
+    return None
 
 
 def _detect_rom_info(file_path):
@@ -1149,13 +1228,27 @@ def _detect_rom_info(file_path):
                     if _is_bios_file(file_path) or _is_bios_file(clean_fname) or stem in KNOWN_BIOS_STEMS:
                         info["core"] = "_skip_"
                         info["platform"] = "_skip_"
-                    # 2. 내장 아케이드 사전(KNOWN_ARCADE_TITLES)에 등록된 인기 타이틀
-                    elif stem in KNOWN_ARCADE_TITLES:
-                        info["core"] = "arcade"
-                        info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
-                        info["title"] = KNOWN_ARCADE_TITLES[stem]
                     else:
-                        # 3. ZIP 내부 모든 파일 바이너리 헤더 전수 조사 (메가드라이브, SNES, NES, GBA, GB, N64 등)
+                        # 2. 내장 아케이드 DAT DB (FBNeo + MAME2003Plus) 초고속 조회
+                        internal_crcs = [f"{z.getinfo(n).CRC:08x}".lower() for n in z.namelist() if not n.startswith(".") and z.getinfo(n).file_size > 0]
+                        dat_match = _query_arcade_dat(stem, internal_crcs)
+                        if dat_match:
+                            info["core"] = "arcade"
+                            info["platform"] = "Neo-Geo" if (dat_match.get("romof") == "neogeo" or stem in KNOWN_NEOGEO_STEMS) else "Arcade"
+                            if dat_match.get("description"):
+                                info["title"] = dat_match["description"]
+                            if dat_match.get("romof"):
+                                romof_bios = dat_match["romof"].lower()
+                                if not romof_bios.endswith(".zip") and not romof_bios.endswith(".bin"):
+                                    romof_bios += ".zip"
+                                info["needed_bios"] = romof_bios
+                        # 3. 내장 아케이드 정적 사전(KNOWN_ARCADE_TITLES) 보조 대조
+                        elif stem in KNOWN_ARCADE_TITLES:
+                            info["core"] = "arcade"
+                            info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
+                            info["title"] = KNOWN_ARCADE_TITLES[stem]
+                        else:
+                            # 4. ZIP 내부 모든 파일 바이너리 헤더 전수 조사 (메가드라이브, SNES, NES, GBA, GB, N64 등)
                         detected_by_header = False
                         for inner_f in z.namelist():
                             if inner_f.startswith(".") or inner_f.endswith("/"):
@@ -1485,6 +1578,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "script.js",
             "README.md",
             "requirements.txt",
+            "arcade_dat.db",
         ],
     }
 
@@ -2660,8 +2754,18 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             detected_platform = "PS1"
             needed_bios = "scph5501.bin"
         elif ext == ".zip":
-            # 아케이드 롬셋 정밀 사전 분석
-            if stem in KNOWN_ARCADE_TITLES or stem in KNOWN_NEOGEO_STEMS:
+            # 아케이드 롬셋 DAT DB 사전 정밀 분석
+            dat_match = _query_arcade_dat(stem)
+            if dat_match:
+                detected_platform = "Neo-Geo" if (dat_match.get("romof") == "neogeo" or stem in KNOWN_NEOGEO_STEMS) else "Arcade"
+                if dat_match.get("romof"):
+                    romof_bios = dat_match["romof"].lower()
+                    if not romof_bios.endswith(".zip") and not romof_bios.endswith(".bin"):
+                        romof_bios += ".zip"
+                    needed_bios = romof_bios
+                if dat_match.get("cloneof"):
+                    parent_hint = dat_match["cloneof"]
+            elif stem in KNOWN_ARCADE_TITLES or stem in KNOWN_NEOGEO_STEMS:
                 detected_platform = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
                 if stem in KNOWN_NEOGEO_STEMS or any(stem.startswith(k) for k in ("mslug", "kof", "samsho", "fatfur", "garou", "aof", "lastblad")):
                     needed_bios = "neogeo.zip"
