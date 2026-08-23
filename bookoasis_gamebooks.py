@@ -1095,6 +1095,7 @@ def _detect_rom_info(file_path):
         "title": "",
         "game_code": "",
         "maker_code": "",
+        "needed_bios": "",
     }
     ext = os.path.splitext(file_path)[1].lower()
     raw_data = None
@@ -1405,6 +1406,31 @@ def _detect_rom_info(file_path):
     if not _is_valid_header_title(info.get("title", "")):
         info["title"] = ""
 
+    # 기종 및 롬셋 기반 필요 바이오스(needed_bios) 자동 동적 판별
+    f_lower = os.path.basename(file_path).lower()
+    f_stem = os.path.splitext(f_lower)[0].lower()
+    c_lower = (info.get("core") or "").lower()
+    p_lower = (info.get("platform") or "").lower()
+
+    if p_lower == "neo-geo" or (c_lower == "arcade" and any(f_stem.startswith(k) for k in ("mslug", "kof", "samsho", "fatfur", "garou", "aof", "lastblad", "neogeo", "snk", "rbff", "spinmast", "maglord", "pulstar", "blazstar"))):
+        info["needed_bios"] = "neogeo.zip"
+    elif c_lower == "arcade" and any(f_stem.startswith(k) for k in ("olds", "kov", "orlegend", "dmnfrnt", "martmast")):
+        info["needed_bios"] = "pgm.zip"
+    elif c_lower == "arcade" and any(f_stem.startswith(k) for k in ("bldyror", "brvblade", "sfex", "rvschool", "starglad", "strider2", "techromn", "jgts", "raiden2", "raidendx")):
+        info["needed_bios"] = "acpsx.zip"
+    elif c_lower == "psx" or p_lower == "ps1":
+        info["needed_bios"] = "scph5501.bin"
+    elif p_lower == "fds" or f_lower.endswith(".fds"):
+        info["needed_bios"] = "disksys.rom"
+    elif c_lower == "pce" or p_lower == "pce":
+        info["needed_bios"] = "syscard3.pce"
+    elif c_lower == "segacd" or p_lower == "segacd":
+        info["needed_bios"] = "bios_cd_u.bin"
+    elif c_lower == "saturn" or p_lower == "saturn":
+        info["needed_bios"] = "saturn_bios.bin"
+    elif c_lower == "3do" or p_lower == "3do":
+        info["needed_bios"] = "3dobios.rom"
+
     return info
 
 
@@ -1677,10 +1703,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         size_bytes INTEGER DEFAULT 0,
                         mtime REAL DEFAULT 0,
                         added_at TEXT,
-                        cover_path TEXT
+                        cover_path TEXT,
+                        needed_bios TEXT
                     )"""
                 )
-                for col, ctype in (("core", "TEXT DEFAULT 'gba'"), ("platform", "TEXT DEFAULT 'GBA'"), ("mtime", "REAL DEFAULT 0")):
+                for col, ctype in (("core", "TEXT DEFAULT 'gba'"), ("platform", "TEXT DEFAULT 'GBA'"), ("mtime", "REAL DEFAULT 0"), ("needed_bios", "TEXT")):
                     try:
                         conn.execute(f"ALTER TABLE games ADD COLUMN {col} {ctype}")
                     except Exception:
@@ -1833,9 +1860,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         header_title = rom_info.get("title") if _is_valid_header_title(rom_info.get("title")) else ""
         raw_title = header_title or (game.get("title") if _is_valid_header_title(game.get("title")) else "") or raw_name
         clean_title = _resolve_korean_game_title(filename, raw_title)
+        needed_bios = rom_info.get("needed_bios") or ""
         if clean_title and clean_title != game.get("title"):
-            self._db_execute("UPDATE games SET title = ? WHERE id = ?", (clean_title, game_id))
+            self._db_execute("UPDATE games SET title = ?, needed_bios = ? WHERE id = ?", (clean_title, needed_bios, game_id))
             game["title"] = clean_title
+            game["needed_bios"] = needed_bios
+        elif needed_bios != (game.get("needed_bios") or ""):
+            self._db_execute("UPDATE games SET needed_bios = ? WHERE id = ?", (needed_bios, game_id))
+            game["needed_bios"] = needed_bios
 
         cover_path = game.get("cover_path") or ""
         cover_ok = bool(cover_path and os.path.exists(cover_path))
@@ -1992,8 +2024,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                 if gid not in existing_games:
                     self._db_execute(
-                        """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, needed_bios)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             gid,
                             info["filename"],
@@ -2006,6 +2038,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             info["size_bytes"],
                             info["mtime"],
                             now_str,
+                            rom_info.get("needed_bios") or "",
                         ),
                     )
                     covers_to_fetch.append((
@@ -2017,8 +2050,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     ))
                 else:
                     self._db_execute(
-                        "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ? WHERE id = ?",
-                        (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, gid),
+                        "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ?, needed_bios = ? WHERE id = ?",
+                        (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, rom_info.get("needed_bios") or "", gid),
                     )
                     existing_entry = existing_games.get(gid)
                     if not new_only and (not existing_entry or not existing_entry.get("cover_path") or not os.path.exists(existing_entry["cover_path"])):
@@ -2706,7 +2739,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                 games = self._db_query(
                     """SELECT g.id, g.filename, g.file_path, g.title, g.game_code, g.maker_code,
-                              g.size_bytes, g.added_at, g.cover_path, g.core, g.platform,
+                              g.size_bytes, g.added_at, g.cover_path, g.core, g.platform, g.needed_bios,
                               COALESCE(u.is_favorite, 0) AS is_favorite,
                               u.last_played_at,
                               COALESCE(u.play_count, 0) AS play_count

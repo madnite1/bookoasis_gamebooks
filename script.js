@@ -335,6 +335,11 @@
       `;
     }
 
+    // 필요한 바이오스 미설치 여부 검사
+    const biosList = (state.available_bios || []).map((b) => b.toLowerCase());
+    const neededBios = (game.needed_bios || '').trim().toLowerCase();
+    const isBiosMissing = neededBios && !biosList.includes(neededBios);
+
     card.innerHTML = `
       <div class="gba-card-cover-wrap" data-action="play">
         ${coverHtml}
@@ -347,6 +352,12 @@
           <span class="gba-badge ${sysInfo.colorClass}" title="${escapeHtml(sysInfo.name)}">${escapeHtml(sysInfo.label)}</span>
           ${game.has_save ? `<span class="gba-badge gba-badge-save" title="클라우드 세이브 보관됨"><i class="fa-solid fa-floppy-disk"></i> SAVE</span>` : ''}
         </div>
+        ${isBiosMissing ? `
+          <div class="gba-card-missing-bios" title="구동 필수 바이오스 '${escapeHtml(neededBios)}' 누락됨 (바이오스 업로드 필요)">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+            <span>${escapeHtml(neededBios)} 필요</span>
+          </div>
+        ` : ''}
         <button class="gba-card-fav-btn ${game.is_favorite ? 'active' : ''}" data-action="toggle-fav" title="${game.is_favorite ? '즐겨찾기 해제' : '즐겨찾기 추가'}">
           <i class="fa-${game.is_favorite ? 'solid' : 'regular'} fa-star"></i>
         </button>
@@ -994,39 +1005,39 @@
       }
     }
 
-    // 시스템 바이오스(BIOS) EJS_biosUrl 자동 매핑
+    // 시스템 바이오스(BIOS) EJS_biosUrl 자동 매핑 (DB needed_bios 우선 연동)
     const biosList = (state.available_bios || []).map((b) => b.toLowerCase());
     let neededBiosFile = null;
 
-    if (platformKey === 'neo-geo' || (isArcade && (rawStem.startsWith('mslug') || rawStem.startsWith('kof') || rawStem.startsWith('samsho') || rawStem.startsWith('fatfur') || rawStem.startsWith('garou')))) {
-      if (biosList.includes('neogeo.zip')) neededBiosFile = 'neogeo.zip';
-    } else if (isArcade && (rawStem.startsWith('olds') || rawStem.startsWith('kov') || rawStem.startsWith('orlegend') || rawStem.startsWith('dmnfrnt'))) {
-      if (biosList.includes('pgm.zip')) neededBiosFile = 'pgm.zip';
-    } else if (isArcade && (rawStem.startsWith('bldyror') || rawStem.startsWith('brvblade') || rawStem.startsWith('sfex') || rawStem.startsWith('rvschool') || rawStem.startsWith('starglad') || rawStem.startsWith('strider2') || rawStem.startsWith('techromn') || rawStem.startsWith('jgts') || rawStem.startsWith('raiden2') || rawStem.startsWith('raidendx'))) {
-      // Sony ZN-1 / ZN-2 아케이드 기판 바이오스 자동 주입
-      if (biosList.includes('acpsx.zip')) {
-        neededBiosFile = 'acpsx.zip';
-      } else if (biosList.includes('atluspsx.zip')) {
-        neededBiosFile = 'atluspsx.zip';
-      } else if (biosList.includes('boardrom.zip')) {
-        neededBiosFile = 'boardrom.zip';
+    if (game.needed_bios && biosList.includes(game.needed_bios.toLowerCase())) {
+      neededBiosFile = game.needed_bios;
+    } else {
+      // 폴백: DB에 바이오스가 미기록된 레거시 롬 동적 보정
+      if (platformKey === 'neo-geo' || (isArcade && (rawStem.startsWith('mslug') || rawStem.startsWith('kof') || rawStem.startsWith('samsho') || rawStem.startsWith('fatfur') || rawStem.startsWith('garou')))) {
+        if (biosList.includes('neogeo.zip')) neededBiosFile = 'neogeo.zip';
+      } else if (isArcade && (rawStem.startsWith('olds') || rawStem.startsWith('kov') || rawStem.startsWith('orlegend') || rawStem.startsWith('dmnfrnt'))) {
+        if (biosList.includes('pgm.zip')) neededBiosFile = 'pgm.zip';
+      } else if (isArcade && (rawStem.startsWith('bldyror') || rawStem.startsWith('brvblade') || rawStem.startsWith('sfex') || rawStem.startsWith('rvschool') || rawStem.startsWith('starglad') || rawStem.startsWith('strider2') || rawStem.startsWith('techromn') || rawStem.startsWith('jgts') || rawStem.startsWith('raiden2') || rawStem.startsWith('raidendx'))) {
+        if (biosList.includes('acpsx.zip')) neededBiosFile = 'acpsx.zip';
+        else if (biosList.includes('atluspsx.zip')) neededBiosFile = 'atluspsx.zip';
+        else if (biosList.includes('boardrom.zip')) neededBiosFile = 'boardrom.zip';
+      } else if (coreToUse === 'psx' || platformKey === 'ps1') {
+        const psxBios = biosList.find((b) => b.startsWith('scph5501') || b.startsWith('scph1001') || b.startsWith('scph5500') || b.startsWith('scph5502') || b.startsWith('scph7001'));
+        if (psxBios) neededBiosFile = psxBios;
+      } else if (platformKey === 'fds' || (game.filename || '').toLowerCase().endsWith('.fds')) {
+        if (biosList.includes('disksys.rom')) neededBiosFile = 'disksys.rom';
+      } else if (platformKey === 'segacd' || coreToUse === 'segacd') {
+        const cdBios = biosList.find((b) => b.startsWith('bios_cd'));
+        if (cdBios) neededBiosFile = cdBios;
+      } else if (platformKey === 'pce' || coreToUse === 'pce') {
+        if (biosList.includes('syscard3.pce')) neededBiosFile = 'syscard3.pce';
+      } else if (platformKey === 'saturn' || coreToUse === 'saturn' || coreToUse === 'segasaturn') {
+        const saturnBios = biosList.find((b) => b.includes('saturn'));
+        if (saturnBios) neededBiosFile = saturnBios;
+      } else if (platformKey === '3do' || coreToUse === '3do') {
+        const d3doBios = biosList.find((b) => b.includes('3do'));
+        if (d3doBios) neededBiosFile = d3doBios;
       }
-    } else if (coreToUse === 'psx' || platformKey === 'ps1') {
-      const psxBios = biosList.find((b) => b.startsWith('scph5501') || b.startsWith('scph1001') || b.startsWith('scph5500') || b.startsWith('scph5502') || b.startsWith('scph7001'));
-      if (psxBios) neededBiosFile = psxBios;
-    } else if (platformKey === 'fds' || (game.filename || '').toLowerCase().endsWith('.fds')) {
-      if (biosList.includes('disksys.rom')) neededBiosFile = 'disksys.rom';
-    } else if (platformKey === 'segacd' || coreToUse === 'segacd') {
-      const cdBios = biosList.find((b) => b.startsWith('bios_cd'));
-      if (cdBios) neededBiosFile = cdBios;
-    } else if (platformKey === 'pce' || coreToUse === 'pce') {
-      if (biosList.includes('syscard3.pce')) neededBiosFile = 'syscard3.pce';
-    } else if (platformKey === 'saturn' || coreToUse === 'saturn' || coreToUse === 'segasaturn') {
-      const saturnBios = biosList.find((b) => b.includes('saturn'));
-      if (saturnBios) neededBiosFile = saturnBios;
-    } else if (platformKey === '3do' || coreToUse === '3do') {
-      const d3doBios = biosList.find((b) => b.includes('3do'));
-      if (d3doBios) neededBiosFile = d3doBios;
     }
 
     const biosUrl = neededBiosFile ? `${window.location.origin}/api/webhook/bookoasis_gamebooks/bios/${encodeURIComponent(neededBiosFile)}` : null;

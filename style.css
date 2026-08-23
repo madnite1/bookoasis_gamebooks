@@ -451,6 +451,37 @@
   color: #fff;
 }
 
+/* 커버 오른쪽 하단 필요 바이오스 누락 배지 */
+.gba-card-missing-bios {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(239, 68, 68, 0.9);
+  color: #fff;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  border: 1px solid rgba(254, 202, 202, 0.4);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  z-index: 2;
+  animation: gbaPulseAlert 2s infinite ease-in-out;
+}
+
+.gba-card-missing-bios i {
+  color: #fef08a;
+  font-size: 0.75rem;
+}
+
+@keyframes gbaPulseAlert {
+  0%, 100% { transform: scale(1); opacity: 0.95; }
+  50% { transform: scale(1.04); opacity: 1; }
+}
+
 .gba-card-fav-btn {
   position: absolute;
   top: 8px;
