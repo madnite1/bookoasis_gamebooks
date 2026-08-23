@@ -49,6 +49,7 @@
     filteredGames: [],
     scrollObserver: null,
     coverQueuePollTimer: null,
+    coverQueueSeenActive: false,
     coverQueue: {
       is_running: false,
       total: 0,
@@ -172,16 +173,17 @@
         const res = await apiCall('cover_queue_status');
         if (res && res.success && res.cover_queue) {
           const q = res.cover_queue;
+          const wasQueueActive = !!state.coverQueueSeenActive;
+          const isQueueActive = !!(q.is_running || (q.remaining && q.remaining > 0));
+          const didQueueJustFinish = wasQueueActive && !q.is_running && q.remaining === 0 && q.total > 0;
+
           state.coverQueue = q;
+          state.coverQueueSeenActive = isQueueActive;
           updateCoverQueueBadge(q);
 
-          // 큐가 완료되었을 때 마지막으로 라이브러리 커버 실시간 리로드
-          if (!q.is_running && q.remaining === 0 && q.total > 0 && q.completed > 0) {
-            // 다운로드 작업이 막 끝났다면 한 번 라이브러리를 조용히 갱신
-            if (q._refreshed !== true) {
-              q._refreshed = true;
-              loadLibrary(true);
-            }
+          // 큐가 활성 상태였다가 방금 완료된 시점에만 1회 갱신
+          if (didQueueJustFinish) {
+            loadLibrary(true);
           }
         }
       } catch (e) {
