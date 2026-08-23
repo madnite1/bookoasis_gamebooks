@@ -202,6 +202,8 @@
     const countEl = $('gbaGameCount');
     const sentinel = $('gbaScrollSentinel');
 
+    if (!grid) return;
+
     if (resetPaging) {
       state.renderedCount = state.pageSize;
 
@@ -259,16 +261,16 @@
     }
 
     const filtered = state.filteredGames;
-    countEl.textContent = `${filtered.length}개의 게임 (전체 ${state.games.length}개)`;
+    if (countEl) countEl.textContent = `${filtered.length}개의 게임 (전체 ${state.games.length}개)`;
 
     if (filtered.length === 0) {
       grid.style.display = 'none';
       if (sentinel) sentinel.style.display = 'none';
-      emptyState.style.display = 'flex';
+      if (emptyState) emptyState.style.display = 'flex';
       return;
     }
 
-    emptyState.style.display = 'none';
+    if (emptyState) emptyState.style.display = 'none';
     grid.style.display = 'grid';
 
     // 현재 렌더링할 범위 (Paging Window)
