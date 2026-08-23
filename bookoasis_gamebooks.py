@@ -1012,6 +1012,8 @@ def _resolve_korean_game_title(filename, raw_title=""):
         if len(eng_key) >= 4 and re.search(r"\b" + re.escape(eng_key) + r"\b", norm_key):
             return kor_title
 
+    return clean or name or os.path.splitext(os.path.basename(filename))[0]
+
 def _is_valid_header_title(text):
     """내부 바이너리 헤더에서 추출된 텍스트가 유효한 영문/숫자 게임명인지 검증 (깨진 바이너리/특수문자 찌꺼기 폐기)"""
     if not text or not isinstance(text, str):
@@ -1785,10 +1787,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         core = game.get("core") or game.get("platform") or ""
         filename = game.get("filename") or ""
-        raw_title = rom_info.get("title") or game.get("title") or ""
+        raw_name = _strip_romm_name_prefix(os.path.splitext(filename)[0])
+        header_title = rom_info.get("title") if _is_valid_header_title(rom_info.get("title")) else ""
+        raw_title = header_title or (game.get("title") if _is_valid_header_title(game.get("title")) else "") or raw_name
         clean_title = _resolve_korean_game_title(filename, raw_title)
         if clean_title and clean_title != game.get("title"):
             self._db_execute("UPDATE games SET title = ? WHERE id = ?", (clean_title, game_id))
+            game["title"] = clean_title
 
         cover_path = game.get("cover_path") or ""
         cover_ok = bool(cover_path and os.path.exists(cover_path))
