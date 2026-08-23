@@ -2718,6 +2718,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "ss_password": str(self._get_setting("SS_PASSWORD", "") or "").strip(),
                         "igdb_client_id": str(self._get_setting("IGDB_CLIENT_ID", "") or "").strip(),
                         "igdb_client_secret": str(self._get_setting("IGDB_CLIENT_SECRET", "") or "").strip(),
+                        "max_content_length_mb": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100),
+                        "max_upload_bytes": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100) * 1024 * 1024,
                     },
                 }
 

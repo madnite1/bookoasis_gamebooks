@@ -1557,6 +1557,9 @@
       return;
     }
 
+    const maxUploadBytes = (state.config && state.config.max_upload_bytes) ? state.config.max_upload_bytes : (100 * 1024 * 1024);
+    const maxMb = (state.config && state.config.max_content_length_mb) ? state.config.max_content_length_mb : Math.round(maxUploadBytes / (1024 * 1024));
+
     $('gbaUploadModal').style.display = 'flex';
     const statusEl = $('gbaUploadStatus');
     const progEl = $('gbaProgressBar');
@@ -1567,7 +1570,19 @@
 
     for (let i = 0; i < total; i++) {
       const file = files[i];
-      statusEl.textContent = `'${file.name}' 업로드 중...`;
+      const fileMb = (file.size / (1024 * 1024)).toFixed(1);
+
+      // 클라이언트 측 실시간 사전 용량 검증 (MAX_CONTENT_LENGTH_MB 동적 연동)
+      if (file.size > maxUploadBytes) {
+        showToast(
+          `업로드 실패 (${file.name}, ${fileMb}MB): 파일 크기가 서버 허용 한도(${maxMb}MB)를 초과했습니다. ` +
+          `대용량 파일은 설정된 롬 저장소 폴더에 직접 넣고 [스캔]을 실행하시거나, 북오아시스 .env의 MAX_CONTENT_LENGTH_MB를 늘려주세요.`,
+          true
+        );
+        continue;
+      }
+
+      statusEl.textContent = `'${file.name}' 업로드 중... (${fileMb}MB)`;
       progEl.style.width = `${Math.round((i / total) * 100)}%`;
       detailsEl.textContent = `${i} / ${total} 파일 완료`;
 
@@ -1583,6 +1598,7 @@
           method: 'POST',
           body: formData,
         });
+
         let result = null;
         const text = await res.text();
         try {
@@ -1591,7 +1607,13 @@
           result = { success: false, error: text || `서버 응답 오류 (HTTP ${res.status})` };
         }
 
-        if (result && result.success) {
+        if (res.status === 413 || (result && typeof result.error === 'string' && result.error.includes('too large'))) {
+          showToast(
+            `업로드 실패 (${file.name}, ${fileMb}MB): 파일 크기가 서버 허용 한도(${maxMb}MB)를 초과했습니다. ` +
+            `대용량 롬은 설정된 롬 폴더에 직접 복사 후 [스캔]을 이용해 주세요.`,
+            true
+          );
+        } else if (result && result.success) {
           completed++;
           if (result.notice) {
             setTimeout(() => {
