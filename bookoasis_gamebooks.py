@@ -698,6 +698,21 @@ KNOWN_ARCADE_TITLES = {
     "wofj": "천지를 먹다 2 (천지식을먹다 2)",
     "wofa": "천지를 먹다 2 (아시아판)",
     "wofu": "천지를 먹다 2 (북미판)",
+    "bldyror2": "블러디 로어 2 (동물철권 2)",
+    "bldyror": "블러디 로어 (동물철권)",
+    "brvblade": "브레이브 블레이드 (Brave Blade)",
+    "sfex": "스트리트 파이터 EX",
+    "sfexplus": "스트리트 파이터 EX 플러스",
+    "sfexp": "스트리트 파이터 EX 플러스",
+    "sfex2": "스트리트 파이터 EX 2",
+    "sfex2p": "스트리트 파이터 EX 2 플러스",
+    "rvschool": "사립 저스티스 학원 (Rival Schools)",
+    "jgts": "사립 저스티스 학원 (일판)",
+    "starglad": "스타 글래디에이터 (Star Gladiator)",
+    "strider2": "스트라이더 비룡 2 (Strider 2)",
+    "techromn": "초강전기 키카이오 (Tech Romancer)",
+    "raiden2": "라이덴 2 (Raiden II)",
+    "raidendx": "라이덴 DX (Raiden DX)",
     "captcomm": "캡틴 코만도 (Captain Commando)",
     "captcommj": "캡틴 코만도 (일판)",
     "dino": "캐딜락 & 다이노소어 (Cadillacs & Dinosaurs)",
@@ -1034,14 +1049,41 @@ def _is_valid_header_title(text):
     return True
 
 
-def _is_bios_file(filename):
-    """주요 에뮬레이터 및 아케이드(MAME/FBNeo) 기판 바이오스 파일 여부 확인"""
-    fname = os.path.basename(filename).lower()
+def _is_bios_file(file_or_path):
+    """주요 에뮬레이터 및 아케이드(MAME/FBNeo) 기판 바이오스/디바이스 파일 여부 동적 및 정적 분석"""
+    fname = os.path.basename(file_or_path).lower()
     stem = os.path.splitext(fname)[0]
-    if stem in KNOWN_BIOS_STEMS or "bios" in stem:
+
+    # 1. 정적 사전 및 명시적 키워드 매칭
+    if stem in KNOWN_BIOS_STEMS or "bios" in stem or stem in ("boardrom", "bootrom", "sysrom", "firmware"):
         return True
     if fname.startswith("bios_") or fname.startswith("scph") or fname in ("disksys.rom", "syscard3.pce"):
         return True
+
+    # 2. 실제 파일 경로가 존재하는 경우 ZIP 내부 구조 동적 심층 분석
+    if os.path.isfile(file_or_path) and zipfile.is_zipfile(file_or_path):
+        try:
+            with zipfile.ZipFile(file_or_path, "r") as z:
+                valid_entries = [info for info in z.infolist() if not info.filename.startswith((".", "__MACOSX")) and not info.is_dir()]
+                if not valid_entries:
+                    return False
+
+                names = [e.filename.lower() for e in valid_entries]
+
+                # (1) ZIP 내부 파일명에 바이오스/펌웨어/기판 칩셋 시그니처가 포함된 경우
+                if any(any(k in n for k in ("bios", "boardrom", "bootrom", "firmware", "coh-1000", "coh-1001")) for n in names):
+                    return True
+
+                # (2) 단일/소수 칩 덤프이면서 콘솔 표준 헤더가 없고 크기가 극소형(64KB 이하) 단일 펌웨어인 경우
+                total_size = sum(e.file_size for e in valid_entries)
+                if len(valid_entries) <= 2 and total_size <= 65536:
+                    # 콘솔 표준 확장자가 없는 단일 펌웨어 파일인 경우 기판 바이오스로 판별
+                    has_console_ext = any(os.path.splitext(n)[1] in SUPPORTED_SYSTEMS for n in names)
+                    if not has_console_ext:
+                        return True
+        except Exception:
+            pass
+
     return False
 
 
@@ -1090,7 +1132,7 @@ def _detect_rom_info(file_path):
                     stem = os.path.splitext(clean_fname)[0].lower()
 
                     # 1. 바이오스 / MAME 기판 칩셋 디바이스는 게임 목록 등록에서 제외 (bios/ 폴더로 분류 대상)
-                    if _is_bios_file(clean_fname) or stem in KNOWN_BIOS_STEMS:
+                    if _is_bios_file(file_path) or _is_bios_file(clean_fname) or stem in KNOWN_BIOS_STEMS:
                         info["core"] = "_skip_"
                         info["platform"] = "_skip_"
                     # 2. 내장 아케이드 사전(KNOWN_ARCADE_TITLES)에 등록된 인기 타이틀
