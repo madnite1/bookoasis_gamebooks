@@ -7,6 +7,10 @@
         <h1 class="gba-title">Game Books</h1>
         <div class="gba-subtitle-wrap">
           <span class="gba-subtitle" id="gbaGameCount">0개의 게임</span>
+          <div class="gba-cover-queue-badge" id="gbaCoverQueueBadge" style="display: none;" title="백그라운드 커버 아트 다운로드 진행 중">
+            <i class="fa-solid fa-spinner fa-spin gba-queue-icon"></i>
+            <span class="gba-queue-text" id="gbaCoverQueueText">커버 다운로드 중...</span>
+          </div>
         </div>
       </div>
     </div>
@@ -62,8 +66,11 @@
         <button id="gbaHomebrewBtn" class="gba-btn gba-btn-secondary gba-admin-only" title="배포가 허용된 무료 홈브류·데모 등록" style="display: none;">
           <i class="fa-solid fa-puzzle-piece"></i> <span>홈브류 허브</span>
         </button>
-        <button id="gbaScanBtn" class="gba-btn gba-btn-secondary" title="폴더 스캔 및 새로고침">
-          <i class="fa-solid fa-arrows-rotate"></i>
+        <button id="gbaScanBtn" class="gba-btn gba-btn-secondary" title="폴더 증분 스캔 및 새로고침">
+          <i class="fa-solid fa-arrows-rotate"></i> <span>스캔</span>
+        </button>
+        <button id="gbaFullScanBtn" class="gba-btn gba-btn-secondary gba-admin-only" title="모든 롬을 처음부터 전수 정밀 재스캔 (DAT/헤더/바이오스 전체 재동기화)" style="display: none;">
+          <i class="fa-solid fa-sync fa-spin-hover"></i> <span>풀 스캔</span>
         </button>
         <button id="gbaControlsHelpBtn" class="gba-btn gba-btn-secondary" title="조작키 & 게임패드 컨트롤러 안내">
           <i class="fa-solid fa-gamepad"></i> <span>조작키</span>

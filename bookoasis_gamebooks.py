@@ -42,6 +42,124 @@ _REGISTERED_APPS = set()
 
 KST = timezone(timedelta(hours=9))
 
+_SCAN_PROGRESS = {
+    "is_running": False,
+    "current": 0,
+    "total": 0,
+    "current_file": "",
+    "status": "",
+    "updated_at": 0,
+}
+_SCAN_PROGRESS_LOCK = threading.Lock()
+
+# 백그라운드 커버 아트 다운로드 전역 큐 매니저
+_COVER_QUEUE = []
+_COVER_QUEUE_SET = set()  # 중복 등록 방지 (gid 기준)
+_COVER_QUEUE_LOCK = threading.Lock()
+_COVER_QUEUE_RUNNING = False
+_COVER_QUEUE_STATS = {
+    "is_running": False,
+    "total": 0,
+    "completed": 0,
+    "failed": 0,
+    "current_title": "",
+    "updated_at": 0,
+}
+
+
+def _enqueue_cover_downloads(provider_inst, items):
+    """(gid, core_or_plat, fname, fpath, raw_title) 튜플 리스트를 다운로드 큐에 추가하고 워커 스레드를 가동"""
+    global _COVER_QUEUE_RUNNING
+    if not items:
+        return
+    with _COVER_QUEUE_LOCK:
+        added_count = 0
+        for it in items:
+            gid = it[0]
+            if gid not in _COVER_QUEUE_SET:
+                _COVER_QUEUE_SET.add(gid)
+                _COVER_QUEUE.append(it)
+                added_count += 1
+        _COVER_QUEUE_STATS["total"] += added_count
+        _COVER_QUEUE_STATS["updated_at"] = time.time()
+
+        if not _COVER_QUEUE_RUNNING and _COVER_QUEUE:
+            _COVER_QUEUE_RUNNING = True
+            _COVER_QUEUE_STATS["is_running"] = True
+            threading.Thread(target=_cover_queue_worker, args=(provider_inst,), daemon=True).start()
+
+
+def _cover_queue_worker(provider_inst):
+    """큐에서 항목을 하나씩 꺼내어 커버 아트를 다운로드하는 백그라운드 워커 스레드"""
+    global _COVER_QUEUE_RUNNING
+    try:
+        while True:
+            item = None
+            with _COVER_QUEUE_LOCK:
+                if _COVER_QUEUE:
+                    item = _COVER_QUEUE.pop(0)
+                else:
+                    _COVER_QUEUE_RUNNING = False
+                    _COVER_QUEUE_STATS["is_running"] = False
+                    _COVER_QUEUE_STATS["current_title"] = ""
+                    _COVER_QUEUE_STATS["updated_at"] = time.time()
+                    break
+
+            if not item:
+                break
+
+            g_id, core_p, fname, fpath, raw_t = item
+            with _COVER_QUEUE_LOCK:
+                _COVER_QUEUE_STATS["current_title"] = raw_t or fname
+                _COVER_QUEUE_STATS["updated_at"] = time.time()
+
+            try:
+                res = provider_inst._auto_fetch_and_save_cover(g_id, core_p, fname, file_path=fpath, raw_title=raw_t)
+                with _COVER_QUEUE_LOCK:
+                    if res:
+                        _COVER_QUEUE_STATS["completed"] += 1
+                    else:
+                        _COVER_QUEUE_STATS["failed"] += 1
+                    _COVER_QUEUE_STATS["updated_at"] = time.time()
+            except Exception as e:
+                logger.debug(f"[{SELF_ID}] Cover queue worker item error ({fname}): {e}")
+                with _COVER_QUEUE_LOCK:
+                    _COVER_QUEUE_STATS["failed"] += 1
+                    _COVER_QUEUE_STATS["updated_at"] = time.time()
+            
+            # 외부 API 요청 간 미세 딜레이
+            time.sleep(0.05)
+    except Exception as ex:
+        logger.error(f"[{SELF_ID}] Cover queue worker global error: {ex}")
+    finally:
+        with _COVER_QUEUE_LOCK:
+            _COVER_QUEUE_RUNNING = False
+            _COVER_QUEUE_STATS["is_running"] = False
+
+
+def _get_cover_queue_status():
+    """현재 커버 큐 상태 반환"""
+    with _COVER_QUEUE_LOCK:
+        remaining = len(_COVER_QUEUE)
+        stats = dict(_COVER_QUEUE_STATS)
+        stats["remaining"] = remaining
+        return stats
+
+
+def _update_scan_progress(current=None, total=None, current_file=None, status=None, is_running=None):
+    with _SCAN_PROGRESS_LOCK:
+        if current is not None:
+            _SCAN_PROGRESS["current"] = current
+        if total is not None:
+            _SCAN_PROGRESS["total"] = total
+        if current_file is not None:
+            _SCAN_PROGRESS["current_file"] = current_file
+        if status is not None:
+            _SCAN_PROGRESS["status"] = status
+        if is_running is not None:
+            _SCAN_PROGRESS["is_running"] = is_running
+        _SCAN_PROGRESS["updated_at"] = time.time()
+
 
 def _get_kst_now_str():
     """한국 표준시(KST, UTC+9) 기준 현재 시간 포맷 문자열 반환"""
@@ -983,6 +1101,53 @@ KNOWN_KOREAN_TITLES = {
     "shiren2": "풍래의 시렌 2",
     "tsumitobatsu": "죄와 벌: 지구의 계승자",
     "conker": "컨커의 최악의 날 (Conker's Bad Fur Day)",
+
+    # 슈퍼로봇대전 / 드래곤볼 / 젤다 / 파이어 엠블렘 / 로맨싱 사가 / 풍래의 시렌 등
+    "dai 4 ji super robot taisen kai 2 ex": "제4차 슈퍼로봇대전 개2 EX",
+    "dai 4 ji super robot taisen kai 2": "제4차 슈퍼로봇대전 개2",
+    "dai 4 ji super robot taisen kai": "제4차 슈퍼로봇대전 개",
+    "dai 4 ji super robot taisen": "제4차 슈퍼로봇대전",
+    "dai 3 ji super robot taisen": "제3차 슈퍼로봇대전",
+    "super robot taisen": "슈퍼로봇대전",
+    "super robot wars": "슈퍼로봇대전",
+    "battle robot retsuden": "배틀 로봇 열전",
+    "densetsu no orge battle": "전설의 오우거 배틀",
+    "fire emblem genearaly of holy war": "파이어 엠블렘: 성전의 계보",
+    "genealogy of the holy war": "파이어 엠블렘: 성전의 계보",
+    "fire emblem": "파이어 엠블렘",
+    "furai no siren": "풍래의 시렌",
+    "fuurai no shiren": "풍래의 시렌",
+    "korean pro base ball game": "한국 프로 야구 (Korean Pro Baseball)",
+    "romancing saga 3": "로맨싱 사가 3",
+    "romancing saga 2": "로맨싱 사가 2",
+    "romancing saga": "로맨싱 사가",
+    "slyers": "슬레이어즈 (Slayers)",
+    "slayers": "슬레이어즈 (Slayers)",
+    "starwars 5": "스타워즈 에피소드 5: 제국의 역습",
+    "starwars 6": "스타워즈 에피소드 6: 제다이의 귀환",
+    "star wars": "스타워즈",
+    "choujikuu yousai macross": "초시공요새 마크로스: 스크램블드 발키리",
+    "macross scrambled valkyrie": "초시공요새 마크로스: 스크램블드 발키리",
+    "macross": "마크로스 (Macross)",
+    "clock tower": "클락 타워 (Clock Tower)",
+    "dragon ball z hyper dimension": "드래곤볼 Z: 하이퍼 디멘션",
+    "dragon ball z super butouden 2": "드래곤볼 Z: 초무투전 2",
+    "dragon ball z super butouden": "드래곤볼 Z: 초무투전",
+    "dragon ball z": "드래곤볼 Z",
+    "dragonball z": "드래곤볼 Z",
+    "dragon ball": "드래곤볼",
+    "dbzchom": "드래곤볼 Z: 초무투전",
+    "majuuou": "마수왕 (Majuuou)",
+    "sailorss": "미소녀전사 세일러문 SuperS",
+    "tmnt4a": "닌자 거북이 4: 터틀스 인 타임 (TMNT IV)",
+    "chomakai": "초마계촌 (Super Ghouls 'n Ghosts)",
+    "genocid2": "제노사이드 2",
+    "pocky2u": "기기괴괴: 월야초자 (Pocky & Rocky 2)",
+    "popntwinj": "트윈비 레인보우 벨 어드벤처",
+    "sbm2": "슈퍼 봄버맨 2",
+    "sdgungx": "SD 건담 GX",
+    "sfz2": "스트리트 파이터 제로 2",
+    "smkartu": "슈퍼 마리오 카트",
 }
 
 def _resolve_korean_game_title(filename, raw_title=""):
@@ -1046,6 +1211,9 @@ def _is_valid_header_title(text):
     # 연속된 동일 특수문자 (예: @@@@@)
     if re.search(r"([^a-zA-Z0-9\s])\1{2,}", t):
         return False
+    return True
+
+
 def _scan_cd_serial(file_path):
     """CD/디스크 이미지(.bin, .iso, .img, .chd) 앞부분 2MB를 초고속 스캔하여 PS1/Saturn 고유 시리얼 번호 추출"""
     serial_pattern = re.compile(rb"([CS][LUE][PUE][SAM][_\-][0-9]{3}[_\.][0-9]{2})|([CS][LUE][PUE][SAM][0-9]{5})")
@@ -1083,12 +1251,13 @@ def _is_bios_file(file_or_path):
 
                 names = [e.filename.lower() for e in valid_entries]
 
-                # (1) ZIP 내부 파일명에 바이오스/펌웨어/기판 칩셋 시그니처가 포함된 경우
-                if any(any(k in n for k in ("bios", "boardrom", "bootrom", "firmware", "coh-1000", "coh-1001")) for n in names):
-                    return True
+                # (1) ZIP 내부 파일명에 바이오스/펌웨어/기판 칩셋 시그니처만으로 구성된 순수 바이오스 아카이브 검사
+                total_size = sum(e.file_size for e in valid_entries)
+                if total_size <= 2 * 1024 * 1024:
+                    if any(any(k in n for k in ("bios", "boardrom", "bootrom", "firmware", "coh-1000", "coh-1001")) for n in names):
+                        return True
 
                 # (2) 단일/소수 칩 덤프이면서 콘솔 표준 헤더가 없고 크기가 극소형(64KB 이하) 단일 펌웨어인 경우
-                total_size = sum(e.file_size for e in valid_entries)
                 if len(valid_entries) <= 2 and total_size <= 65536:
                     # 콘솔 표준 확장자가 없는 단일 펌웨어 파일인 경우 기판 바이오스로 판별
                     has_console_ext = any(os.path.splitext(n)[1] in SUPPORTED_SYSTEMS for n in names)
@@ -1098,7 +1267,7 @@ def _is_bios_file(file_or_path):
             pass
 
 def _query_arcade_dat(stem, internal_crcs=None):
-    """내장된 FBNeo + MAME2003Plus 아케이드 DAT DB (arcade_dat.db) 조회"""
+    """내장된 All-In-One DAT DB (Arcade + SNES + GBA + NES + MD + PCE 등) 조회"""
     dat_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arcade_dat.db")
     if not os.path.isfile(dat_db_path):
         return None
@@ -1109,10 +1278,10 @@ def _query_arcade_dat(stem, internal_crcs=None):
 
         # 1. 파일명 stem 기반 우선 조회
         clean_stem = stem.lower().strip()
-        cursor.execute("SELECT id, name, description, romof, cloneof, system_name FROM games WHERE name = ?", (clean_stem,))
+        cursor.execute("SELECT id, name, description, romof, cloneof, system_name, platform FROM games WHERE name = ?", (clean_stem,))
         row = cursor.fetchone()
         if row:
-            gid, gname, desc, romof, cloneof, sys_name = row
+            gid, gname, desc, romof, cloneof, sys_name, plat = row
             # 해당 게임의 필수 칩 개수
             cursor.execute("SELECT COUNT(*) FROM roms WHERE game_id = ?", (gid,))
             cnt_row = cursor.fetchone()
@@ -1133,17 +1302,18 @@ def _query_arcade_dat(stem, internal_crcs=None):
                 "romof": romof,
                 "cloneof": cloneof,
                 "system_name": sys_name,
+                "platform": plat,
                 "matched_count": matched_count,
                 "total_roms": total_roms,
                 "match_rate": round(match_rate, 1),
                 "is_non_merged": (match_rate >= 75.0),
             }
 
-        # 2. 내부 CRC32 다중 매칭 조회 (파일명이 변형되었을 때 원본 롬셋 식별)
-        if internal_crcs and len(internal_crcs) >= 2:
+        # 2. 내부 CRC32 매칭 조회 (단일 롬 또는 멀티 칩 대조)
+        if internal_crcs:
             placeholders = ",".join(["?"] * len(internal_crcs))
             query = f"""
-                SELECT g.id, g.name, g.description, g.romof, g.cloneof, g.system_name, COUNT(r.id) as matched
+                SELECT g.id, g.name, g.description, g.romof, g.cloneof, g.system_name, g.platform, COUNT(r.id) as matched
                 FROM roms r
                 JOIN games g ON r.game_id = g.id
                 WHERE r.crc32 IN ({placeholders})
@@ -1153,8 +1323,8 @@ def _query_arcade_dat(stem, internal_crcs=None):
             """
             cursor.execute(query, internal_crcs)
             best = cursor.fetchone()
-            if best and best[6] >= 2:
-                gid, gname, desc, romof, cloneof, sys_name, matched_cnt = best
+            if best and best[7] >= 1:
+                gid, gname, desc, romof, cloneof, sys_name, plat, matched_cnt = best
                 cursor.execute("SELECT COUNT(*) FROM roms WHERE game_id = ?", (gid,))
                 cnt_row = cursor.fetchone()
                 total_roms = cnt_row[0] if cnt_row else 0
@@ -1166,6 +1336,7 @@ def _query_arcade_dat(stem, internal_crcs=None):
                     "romof": romof,
                     "cloneof": cloneof,
                     "system_name": sys_name,
+                    "platform": plat,
                     "matched_count": matched_cnt,
                     "total_roms": total_roms,
                     "match_rate": round(match_rate, 1),
@@ -1229,12 +1400,40 @@ def _detect_rom_info(file_path):
                         info["core"] = "_skip_"
                         info["platform"] = "_skip_"
                     else:
-                        # 2. 내장 아케이드 DAT DB (FBNeo + MAME2003Plus) 초고속 조회
+                        # 2. 내장 All-In-One DAT DB (Arcade + 콘솔 기종) 초고속 조회
                         internal_crcs = [f"{z.getinfo(n).CRC:08x}".lower() for n in z.namelist() if not n.startswith(".") and z.getinfo(n).file_size > 0]
                         dat_match = _query_arcade_dat(stem, internal_crcs)
                         if dat_match:
-                            info["core"] = "arcade"
-                            info["platform"] = "Neo-Geo" if (dat_match.get("romof") == "neogeo" or stem in KNOWN_NEOGEO_STEMS) else "Arcade"
+                            d_plat = dat_match.get("platform") or "Arcade"
+                            if d_plat == "SNES":
+                                info["core"] = "snes"
+                                info["platform"] = "SNES"
+                            elif d_plat == "Genesis":
+                                info["core"] = "segaMD"
+                                info["platform"] = "Genesis"
+                            elif d_plat == "GBA":
+                                info["core"] = "gba"
+                                info["platform"] = "GBA"
+                            elif d_plat == "NES":
+                                info["core"] = "nes"
+                                info["platform"] = "NES"
+                            elif d_plat == "PCE":
+                                info["core"] = "pce"
+                                info["platform"] = "PCE"
+                            elif d_plat == "GameGear":
+                                info["core"] = "gamegear"
+                                info["platform"] = "GameGear"
+                            elif d_plat == "SMS":
+                                info["core"] = "segaMS"
+                                info["platform"] = "SMS"
+                            elif d_plat == "NGP":
+                                info["core"] = "ngp"
+                                info["platform"] = "NGP"
+                            else:
+                                is_mame_only = (dat_match.get("system_name") == "MAME2003Plus")
+                                info["core"] = "mame2003" if is_mame_only else "arcade"
+                                info["platform"] = "Neo-Geo" if (dat_match.get("romof") == "neogeo" or stem in KNOWN_NEOGEO_STEMS) else "Arcade"
+
                             if dat_match.get("description"):
                                 info["title"] = dat_match["description"]
                             if dat_match.get("romof"):
@@ -1397,54 +1596,92 @@ def _detect_rom_info(file_path):
                         if clean_inner:
                             info["title"] = clean_inner
                     elif extracted_files:
-                        # .bin / .rom 확장자이거나 폴더명/파일명 기반 코어 분석
-                        for fname in extracted_files:
-                            full_ef = os.path.join(tmpdir, fname)
-                            with open(full_ef, "rb") as ef:
-                                header_data = ef.read(0x10000)
+                        # 1. 7z 내부 파일 CRC32 추출하여 통합 DAT DB(Arcade/Neo-Geo/MAME/Console) 우선 매칭
+                        stem = os.path.splitext(os.path.basename(file_path))[0].lower()
+                        internal_crcs = []
+                        with py7zr.SevenZipFile(file_path, mode="r") as z_crc:
+                            for zf in z_crc.list():
+                                if zf.crc32:
+                                    internal_crcs.append(f"{zf.crc32:08x}".lower())
 
-                            # 세가 메가드라이브 (SEGA / GENESIS / MEGA DRIVE 헤더)
-                            if len(header_data) >= 0x120 and (b"SEGA" in header_data[0x100:0x110] or b"GENESIS" in header_data[0x100:0x110] or b"MEGA DRIVE" in header_data[0x100:0x120]):
-                                info["core"] = "segaMD"
-                                info["platform"] = "Genesis"
-                                raw_data = header_data
-                                base_inner = os.path.splitext(os.path.basename(fname))[0]
-                                info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                                break
-                            # GBA (0x04:0x08 == b' \x00\x00\xea')
-                            elif len(header_data) >= 0xC0 and header_data[0x04:0x08] == b" \x00\x00\xea":
-                                info["core"] = "gba"
-                                info["platform"] = "GBA"
-                                raw_data = header_data
-                                base_inner = os.path.splitext(os.path.basename(fname))[0]
-                                info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                                break
-                            # N64
-                            elif len(header_data) >= 0x40 and header_data[:4] in (b"\x80\x37\x12\x40", b"\x37\x80\x40\x12", b"\x40\x12\x37\x80"):
-                                info["core"] = "n64"
-                                info["platform"] = "N64"
-                                raw_data = header_data
-                                base_inner = os.path.splitext(os.path.basename(fname))[0]
-                                info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                                break
-                            # SNES
-                            elif len(header_data) >= 0x8000 and any(len(header_data) >= off + 21 and not "".join(chr(b) for b in header_data[off:off+21] if 32 <= b <= 126).strip().startswith("???") for off in (0x7FC0, 0xFFC0)):
+                        dat_match = _query_arcade_dat(stem, internal_crcs)
+                        if dat_match:
+                            d_plat = dat_match.get("platform") or "Arcade"
+                            if d_plat == "SNES":
                                 info["core"] = "snes"
                                 info["platform"] = "SNES"
-                                raw_data = header_data
-                                base_inner = os.path.splitext(os.path.basename(fname))[0]
-                                info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
-                                break
+                            elif d_plat == "Genesis":
+                                info["core"] = "segaMD"
+                                info["platform"] = "Genesis"
+                            elif d_plat == "GBA":
+                                info["core"] = "gba"
+                                info["platform"] = "GBA"
+                            elif d_plat == "NES":
+                                info["core"] = "nes"
+                                info["platform"] = "NES"
+                            elif d_plat == "PCE":
+                                info["core"] = "pce"
+                                info["platform"] = "PCE"
+                            elif d_plat == "GameGear":
+                                info["core"] = "gamegear"
+                                info["platform"] = "GameGear"
+                            elif d_plat == "SMS":
+                                info["core"] = "segaMS"
+                                info["platform"] = "SMS"
+                            elif d_plat == "NGP":
+                                info["core"] = "ngp"
+                                info["platform"] = "NGP"
+                            else:
+                                is_mame_only = (dat_match.get("system_name") == "MAME2003Plus")
+                                info["core"] = "mame2003" if is_mame_only else "arcade"
+                                info["platform"] = "Neo-Geo" if (dat_match.get("romof") == "neogeo" or stem in KNOWN_NEOGEO_STEMS) else "Arcade"
 
-                        if info["core"] == "gba" and ("megadriv" in file_path.lower() or "genesis" in file_path.lower() or "md" in file_path.lower()):
-                            info["core"] = "segaMD"
-                            info["platform"] = "Genesis"
+                            if dat_match.get("description"):
+                                info["title"] = dat_match["description"]
+                            if dat_match.get("romof"):
+                                romof_bios = dat_match["romof"].lower()
+                                if not romof_bios.endswith(".zip") and not romof_bios.endswith(".bin"):
+                                    romof_bios += ".zip"
+                                info["needed_bios"] = romof_bios
+                        else:
+                            # 2. 콘솔 헤더 전수 분석
+                            for fname in extracted_files:
+                                full_ef = os.path.join(tmpdir, fname)
+                                with open(full_ef, "rb") as ef:
+                                    header_data = ef.read(0x10000)
 
-                    if not info["title"]:
-                        stem = os.path.splitext(os.path.basename(file_path))[0].lower()
-                        if stem in KNOWN_ARCADE_TITLES:
-                            info["core"] = "arcade"
-                            info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
+                                # 세가 메가드라이브 (SEGA / GENESIS / MEGA DRIVE 헤더)
+                                if len(header_data) >= 0x120 and (b"SEGA" in header_data[0x100:0x110] or b"GENESIS" in header_data[0x100:0x110] or b"MEGA DRIVE" in header_data[0x100:0x120]):
+                                    info["core"] = "segaMD"
+                                    info["platform"] = "Genesis"
+                                    raw_data = header_data
+                                    base_inner = os.path.splitext(os.path.basename(fname))[0]
+                                    info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                    break
+                                # GBA (0x04:0x08 == b' \x00\x00\xea')
+                                elif len(header_data) >= 0xC0 and header_data[0x04:0x08] == b" \x00\x00\xea":
+                                    info["core"] = "gba"
+                                    info["platform"] = "GBA"
+                                    raw_data = header_data
+                                    base_inner = os.path.splitext(os.path.basename(fname))[0]
+                                    info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                    break
+                                # N64
+                                elif len(header_data) >= 0x40 and header_data[:4] in (b"\x80\x37\x12\x40", b"\x37\x80\x40\x12", b"\x40\x12\x37\x80"):
+                                    info["core"] = "n64"
+                                    info["platform"] = "N64"
+                                    raw_data = header_data
+                                    base_inner = os.path.splitext(os.path.basename(fname))[0]
+                                    info["title"] = re.sub(r"[\(\[\{].*?[\)\]\}]", "", base_inner).strip()
+                                    break
+
+                            if not info["core"] or info["core"] == "gba":
+                                if stem in KNOWN_ARCADE_TITLES or stem in KNOWN_NEOGEO_STEMS:
+                                    info["core"] = "arcade"
+                                    info["platform"] = "Neo-Geo" if stem in KNOWN_NEOGEO_STEMS else "Arcade"
+                                    info["title"] = KNOWN_ARCADE_TITLES.get(stem, stem)
+                                    if stem in KNOWN_NEOGEO_STEMS:
+                                        info["needed_bios"] = "neogeo.zip"
                             info["title"] = KNOWN_ARCADE_TITLES[stem]
         except Exception as e:
             logger.debug(f"[{SELF_ID}] 7z inspect error: {e}")
@@ -1453,8 +1690,8 @@ def _detect_rom_info(file_path):
             sys_info = SUPPORTED_SYSTEMS[ext]
             info["core"] = sys_info["core"]
             info["platform"] = sys_info["platform"]
-        elif ext in (".bin", ".iso", ".img", ".chd"):
-            # CD/디스크 이미지 시리얼 스캔 (PS1 등)
+        elif ext in (".bin", ".iso", ".img", ".chd", ".pbp"):
+            # CD/디스크 이미지 시리얼 스캔 (PS1 / PBP 등)
             serial = _scan_cd_serial(file_path)
             if serial:
                 info["core"] = "psx"
@@ -1515,9 +1752,11 @@ def _detect_rom_info(file_path):
             if _is_valid_header_title(md_title):
                 info["title"] = md_title
 
-    # 최종 타이틀이 깨진 문자열이면 제거 (파일명 기반 폴백 보장)
-    if not _is_valid_header_title(info.get("title", "")):
-        info["title"] = ""
+    # 최종 타이틀 검증 (유효하지 않은 깨진 바이너리 찌꺼기만 제거)
+    if info.get("title") and not _is_valid_header_title(info.get("title", "")):
+        # 만약 한글이 포함되어 있다면 유효한 타이틀로 인정
+        if not re.search(r"[가-힣]", info.get("title", "")):
+            info["title"] = ""
 
     # 기종 및 롬셋 기반 필요 바이오스(needed_bios) 자동 동적 판별
     f_lower = os.path.basename(file_path).lower()
@@ -2000,9 +2239,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "cover_url": f"{ROUTE_BASE}/cover/{game_id}" if (cover_path and os.path.exists(cover_path)) else None,
         }
 
-    def _scan_roms(self, new_only=False):
+    def _scan_roms(self, new_only=False, force_full=False):
         """기본 roms 폴더 및 설정된 추가 경로의 ROM을 스캔하여 DB에 동기화합니다.
-        new_only가 True이면 기존에 등록된 게임의 커버 검색은 건너뛰고 새로 발견된 게임만 등록 및 커버를 검색합니다.
+        - new_only: 새로 발견된 게임만 등록 및 커버 검색
+        - force_full: 기존 캐시를 건너뛰지 않고 모든 롬의 헤더/DAT DB를 100% 처음부터 전수 재분석
         """
         self._migrate_bios_files()
 
@@ -2044,6 +2284,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                     "file_path": full_p,
                                     "size_bytes": sz,
                                     "mtime": mt,
+                                    "sdir": sdir,
                                 }
                             except Exception:
                                 pass
@@ -2056,10 +2297,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         # 병렬 분석이 필요한 파일 목록 선별
         files_to_process = []
         covers_to_fetch = []
+        new_games_added = []
+
+        total_files = len(found_files)
+        _update_scan_progress(current=0, total=total_files, current_file="스캔 준비 중...", status="scanning", is_running=True)
 
         for gid, info in found_files.items():
             existing = existing_games.get(gid)
-            if existing:
+            if existing and not force_full:
                 # 파일 크기나 수정 시간이 동일한 경우 불필요한 바이너리 재분석 0ms 스킵
                 if abs((existing.get("mtime") or 0) - info["mtime"]) < 1.0 and existing.get("size_bytes") == info["size_bytes"]:
                     # 커버만 누락된 경우 백그라운드 다운로드 큐에 추가
@@ -2076,17 +2321,28 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
             files_to_process.append(info)
 
+        processed_counter = [0]
+        total_to_process = len(files_to_process)
+
         def _process_single_rom(info):
             try:
                 gid = info["id"]
                 rom_info = _detect_rom_info(info["file_path"])
+                with _SCAN_PROGRESS_LOCK:
+                    processed_counter[0] += 1
+                    _SCAN_PROGRESS["current"] = processed_counter[0]
+                    _SCAN_PROGRESS["total"] = total_to_process
+                    _SCAN_PROGRESS["current_file"] = info["filename"]
+                    _SCAN_PROGRESS["updated_at"] = time.time()
+
                 if rom_info.get("platform") == "_skip_":
                     return None
 
                 raw_name = _strip_romm_name_prefix(os.path.splitext(info["filename"])[0])
                 header_title = rom_info.get("title") or ""
                 mapped_header = KNOWN_N64_NAMES.get(header_title.upper().replace("_", " ").replace("-", " ").strip()) or KNOWN_N64_NAMES.get(header_title.upper()) or header_title
-                clean_title = _resolve_korean_game_title(info["filename"], raw_name)
+                # DAT DB 또는 헤더에서 감지된 정식 타이틀을 1순위로 한글 매핑에 전달
+                clean_title = _resolve_korean_game_title(info["filename"], mapped_header or raw_name)
 
                 return {
                     "gid": gid,
@@ -2113,7 +2369,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 clean_title = res["clean_title"]
                 mapped_header = res["mapped_header"]
 
-                # 기종에 맞지 않는 폴더에 위치한 롬 파일 자동 정리 (올바른 코어 하위 폴더로 이동)
+                # 기종에 맞지 않는 폴더에 위치한 롬 파일 자동 정리 (올바른 코어 하위 폴더로 이동 및 ID 갱신)
                 curr_file_path = info["file_path"]
                 curr_dir = os.path.dirname(os.path.abspath(curr_file_path))
                 base_dir = os.path.dirname(curr_dir)  # 예: /mnt/gdrive/emulatorjs/roms
@@ -2121,9 +2377,49 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 target_core_folder = (rom_info.get("core") or rom_info.get("platform") or "other").lower()
                 target_core_folder = re.sub(r"[^a-zA-Z0-9_\-]", "_", target_core_folder).strip() or "other"
 
-                # 현재 위치한 폴더명이 해당 코어 이름과 다르면 올바른 코어 폴더로 이동
-                current_folder_name = os.path.basename(curr_dir).lower()
-                if current_folder_name != target_core_folder and current_folder_name not in ("roms", ""):
+                # 아케이드/네오지오 .7z 파일인 경우: 브라우저 에뮬레이터(FBNeo) 호환성을 위해 표준 .zip으로 영구 변환 및 바이오스 자동 병합
+                f_ext = os.path.splitext(info["filename"])[1].lower()
+                if f_ext == ".7z" and (rom_info.get("core") == "arcade" or rom_info.get("platform") in ("Arcade", "Neo-Geo")):
+                    try:
+                        import py7zr
+                        zip_fname = os.path.splitext(info["filename"])[0] + ".zip"
+                        ideal_dir = os.path.join(base_dir, target_core_folder)
+                        os.makedirs(ideal_dir, exist_ok=True)
+                        dest_zip_path = os.path.join(ideal_dir, zip_fname)
+                        with py7zr.SevenZipFile(curr_file_path, mode="r") as z7:
+                            with tempfile.TemporaryDirectory() as tmpdir:
+                                z7.extract(path=tmpdir)
+                                extracted_files = [x for x in os.listdir(tmpdir) if not x.startswith(".")]
+                                with zipfile.ZipFile(dest_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                                    for ef in extracted_files:
+                                        zout.write(os.path.join(tmpdir, ef), ef)
+                                    if rom_info.get("platform") == "Neo-Geo" or rom_info.get("needed_bios") == "neogeo.zip":
+                                        bios_p = os.path.join(self._get_bios_dir(), "neogeo.zip")
+                                        if os.path.exists(bios_p):
+                                            with zipfile.ZipFile(bios_p, "r") as zb:
+                                                existing = set(extracted_files)
+                                                for b_info in zb.infolist():
+                                                    if b_info.filename not in existing and not b_info.filename.startswith("."):
+                                                        zout.writestr(b_info.filename, zb.read(b_info.filename))
+                        if os.path.exists(curr_file_path):
+                            os.remove(curr_file_path)
+                        curr_file_path = dest_zip_path
+                        info["file_path"] = dest_zip_path
+                        info["filename"] = zip_fname
+                        info["size_bytes"] = os.path.getsize(dest_zip_path)
+                        info["mtime"] = os.path.getmtime(dest_zip_path)
+
+                        sdir = info.get("sdir") or base_dir
+                        rel = os.path.relpath(dest_zip_path, sdir)
+                        new_gid = _sanitize_id(f"{os.path.basename(sdir)}_{rel}")
+                        if gid in found_files:
+                            del found_files[gid]
+                        found_files[new_gid] = info
+                        gid = new_gid
+                        logger.info(f"[{SELF_ID}] Auto converted arcade 7z to official zip: {zip_fname}")
+                    except Exception as conv_ex:
+                        logger.error(f"[{SELF_ID}] Scan 7z convert error: {conv_ex}")
+                elif current_folder_name != target_core_folder and current_folder_name not in ("roms", ""):
                     try:
                         ideal_dir = os.path.join(base_dir, target_core_folder)
                         os.makedirs(ideal_dir, exist_ok=True)
@@ -2133,13 +2429,44 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             curr_file_path = dest_file_path
                             info["file_path"] = dest_file_path
                             logger.info(f"[{SELF_ID}] Relocated ROM from {current_folder_name}/ to {target_core_folder}/: {info['filename']}")
+                            
+                            # 이동된 새 경로 기준으로 gid 갱신 및 found_files 동기화
+                            sdir = info.get("sdir") or base_dir
+                            rel = os.path.relpath(dest_file_path, sdir)
+                            new_gid = _sanitize_id(f"{os.path.basename(sdir)}_{rel}")
+                            
+                            # 기존 커버 파일이 이전 gid로 존재했다면 새 new_gid로 파일명 변경
+                            covers_dir = self._get_covers_dir()
+                            for c_ext in (".png", ".jpg", ".jpeg", ".webp"):
+                                old_c = os.path.join(covers_dir, f"{gid}{c_ext}")
+                                new_c = os.path.join(covers_dir, f"{new_gid}{c_ext}")
+                                if os.path.exists(old_c) and not os.path.exists(new_c):
+                                    try:
+                                        shutil.move(old_c, new_c)
+                                    except Exception:
+                                        pass
+
+                            # found_files 맵 갱신
+                            if gid in found_files:
+                                del found_files[gid]
+                            found_files[new_gid] = info
+                            gid = new_gid
                     except Exception as move_ex:
                         logger.debug(f"[{SELF_ID}] ROM relocate error ({info['filename']}): {move_ex}")
 
+                # 기존 디스크에 커버 파일이 이미 존재하는지 검사 (확장자별)
+                covers_dir = self._get_covers_dir()
+                existing_cover_file = None
+                for c_ext in (".png", ".jpg", ".jpeg", ".webp"):
+                    cand_c = os.path.join(covers_dir, f"{gid}{c_ext}")
+                    if os.path.exists(cand_c):
+                        existing_cover_file = cand_c
+                        break
+
                 if gid not in existing_games:
                     self._db_execute(
-                        """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, needed_bios)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             gid,
                             info["filename"],
@@ -2152,23 +2479,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             info["size_bytes"],
                             info["mtime"],
                             now_str,
+                            existing_cover_file,
                             rom_info.get("needed_bios") or "",
                         ),
                     )
-                    covers_to_fetch.append((
-                        gid,
-                        rom_info.get("core") or rom_info.get("platform"),
-                        info["filename"],
-                        curr_file_path,
-                        mapped_header or clean_title
-                    ))
-                else:
-                    self._db_execute(
-                        "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ?, needed_bios = ? WHERE id = ?",
-                        (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, rom_info.get("needed_bios") or "", gid),
-                    )
-                    existing_entry = existing_games.get(gid)
-                    if not new_only and (not existing_entry or not existing_entry.get("cover_path") or not os.path.exists(existing_entry["cover_path"])):
+                    new_games_added.append(clean_title or info["filename"])
+                    if not existing_cover_file:
                         covers_to_fetch.append((
                             gid,
                             rom_info.get("core") or rom_info.get("platform"),
@@ -2176,28 +2492,52 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             curr_file_path,
                             mapped_header or clean_title
                         ))
+                else:
+                    self._db_execute(
+                        "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ?, needed_bios = ?, cover_path = COALESCE(cover_path, ?) WHERE id = ?",
+                        (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, rom_info.get("needed_bios") or "", existing_cover_file, gid),
+                    )
+                    existing_entry = existing_games.get(gid)
+                    current_cover = existing_entry.get("cover_path") if existing_entry else None
+                    if not current_cover or not os.path.exists(current_cover):
+                        if existing_cover_file:
+                            self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (existing_cover_file, gid))
+                        elif not new_only:
+                            covers_to_fetch.append((
+                                gid,
+                                rom_info.get("core") or rom_info.get("platform"),
+                                info["filename"],
+                                curr_file_path,
+                                mapped_header or clean_title
+                            ))
 
         # 삭제된 게임 정리
+        deleted_count = 0
         for gid in existing_games:
             if gid not in found_files:
                 self._db_execute("DELETE FROM games WHERE id = ?", (gid,))
                 self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (gid,))
+                deleted_count += 1
 
-        # 누락된 커버 이미지를 비동기 백그라운드 스레드에서 다운로드
+        # 누락된 커버 이미지를 전역 백그라운드 다운로드 큐에 추가
         if covers_to_fetch:
-            def _async_cover_worker(fetch_list):
-                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as cover_exec:
-                    def _fetch_one(item):
-                        g_id, core_p, fname, fpath, raw_t = item
-                        try:
-                            self._auto_fetch_and_save_cover(g_id, core_p, fname, file_path=fpath, raw_title=raw_t)
-                        except Exception:
-                            pass
-                    list(cover_exec.map(_fetch_one, fetch_list))
+            _enqueue_cover_downloads(self, covers_to_fetch)
 
-            threading.Thread(target=_async_cover_worker, args=(covers_to_fetch,), daemon=True).start()
+        _update_scan_progress(
+            current=total_files,
+            total=total_files,
+            current_file="스캔 완료",
+            status="completed",
+            is_running=False,
+        )
 
-        return True
+        return {
+            "success": True,
+            "new_count": len(new_games_added),
+            "new_games": new_games_added,
+            "deleted_count": deleted_count,
+            "total_files": total_files,
+        }
 
     def _get_setting(self, key, default=""):
         """설정값 조회: 게임북 전용 로컬 SQLite DB(settings 테이블)에서 조회합니다."""
@@ -2313,6 +2653,21 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 if os.path.isfile(full_ef):
                                     zout.write(full_ef, fname)
 
+                            # 네오지오(Neo-Geo) 기종 롬셋인 경우: bios/neogeo.zip 바이오스 칩셋 파일들을 ZIP 내부에 자동 병합하여
+                            # FBNeo 웹어셈블리 코어의 "missing files for THIS VERSION of FBNeo (Verify romsets: neogeo)" 방지
+                            rows_game = self._db_query("SELECT platform, needed_bios FROM games WHERE id = ?", (game_id,))
+                            if rows_game and (rows_game[0].get("platform") == "Neo-Geo" or rows_game[0].get("needed_bios") == "neogeo.zip"):
+                                bios_p = os.path.join(self._get_bios_dir(), "neogeo.zip")
+                                if os.path.isfile(bios_p):
+                                    try:
+                                        with zipfile.ZipFile(bios_p, "r") as zb:
+                                            existing_names = set(extracted_files)
+                                            for b_info in zb.infolist():
+                                                if b_info.filename not in existing_names and not b_info.filename.startswith("."):
+                                                    zout.writestr(b_info.filename, zb.read(b_info.filename))
+                                    except Exception as b_ex:
+                                        logger.debug(f"[{SELF_ID}] Bios merge error: {b_ex}")
+
                         zip_bytes = zip_buffer.getvalue()
                         clean_stem = os.path.splitext(actual_filename)[0]
                         zip_filename = f"{clean_stem}.zip"
@@ -2409,7 +2764,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             return Response("BIOS file not found", 404)
 
         file_size = os.path.getsize(target_path)
-        content_disposition = _build_content_disposition(os.path.basename(target_path))
+        actual_fname = os.path.basename(target_path)
+        ascii_fallback = re.sub(r"[^\x20-\x7E]", "_", actual_fname)
+        encoded_filename = urllib.parse.quote(actual_fname)
+        content_disposition = f'inline; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_filename}'
 
         range_header = request.headers.get("Range", None)
         if range_header:
@@ -2661,14 +3019,41 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             target_sub_dir = os.path.join(dest_dir, core_name)
             os.makedirs(target_sub_dir, exist_ok=True)
 
-            base_n, ext_n = os.path.splitext(safe_filename)
-            dest_path = os.path.join(target_sub_dir, safe_filename)
-            counter = 1
-            while os.path.exists(dest_path):
-                dest_path = os.path.join(target_sub_dir, f"{base_n}_{counter}{ext_n}")
-                counter += 1
+            # 아케이드/네오지오 .7z 롬인 경우: 브라우저 에뮬레이터(FBNeo) 호환성을 위해 표준 .zip으로 자동 변환 및 바이오스 병합
+            if ext == ".7z" and (rom_info.get("core") == "arcade" or rom_info.get("platform") in ("Arcade", "Neo-Geo")):
+                try:
+                    import py7zr
+                    zip_safe_filename = f"{base_n}.zip"
+                    dest_path = os.path.join(target_sub_dir, zip_safe_filename)
+                    counter = 1
+                    while os.path.exists(dest_path):
+                        dest_path = os.path.join(target_sub_dir, f"{base_n}_{counter}.zip")
+                        counter += 1
 
-            shutil.move(temp_dest, dest_path)
+                    with py7zr.SevenZipFile(temp_dest, mode="r") as z7:
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            z7.extract(path=tmpdir)
+                            extracted_files = [x for x in os.listdir(tmpdir) if not x.startswith(".")]
+                            with zipfile.ZipFile(dest_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                                for ef in extracted_files:
+                                    zout.write(os.path.join(tmpdir, ef), ef)
+                                if rom_info.get("platform") == "Neo-Geo" or rom_info.get("needed_bios") == "neogeo.zip":
+                                    bios_p = os.path.join(self._get_bios_dir(), "neogeo.zip")
+                                    if os.path.exists(bios_p):
+                                        with zipfile.ZipFile(bios_p, "r") as zb:
+                                            existing = set(extracted_files)
+                                            for b_info in zb.infolist():
+                                                if b_info.filename not in existing and not b_info.filename.startswith("."):
+                                                    zout.writestr(b_info.filename, zb.read(b_info.filename))
+                    if os.path.exists(temp_dest):
+                        os.remove(temp_dest)
+                    safe_filename = os.path.basename(dest_path)
+                except Exception as conv_ex:
+                    logger.error(f"[{SELF_ID}] Upload 7z convert error: {conv_ex}")
+                    shutil.move(temp_dest, dest_path)
+            else:
+                shutil.move(temp_dest, dest_path)
+
             self._scan_roms()
 
             # 아케이드 / 네오지오 롬 감지 시 바이오스 안내 생성
@@ -3170,12 +3555,55 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 return {"success": True, "moved_count": moved_count}
 
             elif action == "scan_new_roms":
-                self._scan_roms(new_only=True)
-                return {"success": True, "message": "새로운 ROM 파일 스캔 및 등록이 완료되었습니다."}
+                res = self._scan_roms(new_only=True)
+                new_cnt = res.get("new_count", 0) if isinstance(res, dict) else 0
+                new_sample = res.get("new_games", []) if isinstance(res, dict) else []
+                msg = f"신규 ROM {new_cnt}개가 성공적으로 등록되었습니다." if new_cnt > 0 else "새로 추가된 ROM 파일이 없습니다."
+                return {"success": True, "message": msg, "stats": res}
+
+            elif action == "scan_progress":
+                with _SCAN_PROGRESS_LOCK:
+                    prog = dict(_SCAN_PROGRESS)
+                return {
+                    "success": True,
+                    "progress": prog,
+                    "cover_queue": _get_cover_queue_status(),
+                }
+
+            elif action == "cover_queue_status":
+                return {
+                    "success": True,
+                    "cover_queue": _get_cover_queue_status(),
+                }
+
+            elif action == "fetch_missing_covers":
+                # 커버가 누락된 모든 게임을 조회하여 큐에 일괄 투입
+                rows = self._db_query("SELECT id, core, platform, filename, file_path, title FROM games WHERE cover_path IS NULL OR cover_path = ''")
+                missing_items = []
+                for r in rows:
+                    gid = r["id"]
+                    core_p = r.get("core") or r.get("platform")
+                    fname = r.get("filename") or ""
+                    fpath = r.get("file_path") or ""
+                    raw_t = r.get("title") or fname
+                    missing_items.append((gid, core_p, fname, fpath, raw_t))
+                if missing_items:
+                    _enqueue_cover_downloads(self, missing_items)
+                return {
+                    "success": True,
+                    "enqueued_count": len(missing_items),
+                    "cover_queue": _get_cover_queue_status(),
+                }
+
+            elif action == "full_scan":
+                if not _is_current_user_admin():
+                    return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
+                res = self._scan_roms(force_full=True)
+                return {"success": True, "message": "모든 ROM 파일의 전체 재스캔 및 메타데이터 동기화가 완료되었습니다.", "stats": res}
 
             elif action == "scan_roms":
-                self._scan_roms()
-                return {"success": True, "message": "ROM 디스크 스캔 및 DB 동기화가 완료되었습니다."}
+                res = self._scan_roms()
+                return {"success": True, "message": "ROM 디스크 스캔 및 DB 동기화가 완료되었습니다.", "stats": res}
 
             elif action == "homebrew_search":
                 title = request.args.get("q", "")

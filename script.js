@@ -46,6 +46,15 @@
     pageSize: 40,
     filteredGames: [],
     scrollObserver: null,
+    coverQueuePollTimer: null,
+    coverQueue: {
+      is_running: false,
+      total: 0,
+      completed: 0,
+      failed: 0,
+      remaining: 0,
+      current_title: '',
+    },
   };
 
   // DOM 헬퍼
@@ -120,6 +129,9 @@
         if ($('gbaBiosModal') && $('gbaBiosModal').style.display === 'flex') {
           renderBiosModal();
         }
+
+        // 백그라운드 커버 큐 감시 시작
+        startCoverQueueMonitor();
       } else {
         showToast('게임 목록을 불러오지 못했습니다: ' + (data.error || '알 수 없는 오류'), true);
       }
@@ -128,6 +140,59 @@
       showToast('서버와 통신 중 오류가 발생했습니다.', true);
     } finally {
       if (!silent) showLoading(false);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // 백그라운드 커버 다운로드 큐 실시간 모니터링 & UI 연동
+  // --------------------------------------------------------------------------
+  function startCoverQueueMonitor() {
+    if (state.coverQueuePollTimer) return;
+
+    const checkQueue = async () => {
+      try {
+        const res = await apiCall('cover_queue_status');
+        if (res && res.success && res.cover_queue) {
+          const q = res.cover_queue;
+          state.coverQueue = q;
+          updateCoverQueueBadge(q);
+
+          // 큐가 완료되었을 때 마지막으로 라이브러리 커버 실시간 리로드
+          if (!q.is_running && q.remaining === 0 && q.total > 0 && q.completed > 0) {
+            // 다운로드 작업이 막 끝났다면 한 번 라이브러리를 조용히 갱신
+            if (q._refreshed !== true) {
+              q._refreshed = true;
+              loadLibrary(true);
+            }
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    // 최초 1회 즉시 실행
+    checkQueue();
+    // 2초 주기로 백그라운드 큐 상태 지속 감시
+    state.coverQueuePollTimer = setInterval(checkQueue, 2000);
+  }
+
+  function updateCoverQueueBadge(q) {
+    const badge = $('gbaCoverQueueBadge');
+    const textEl = $('gbaCoverQueueText');
+    if (!badge || !textEl) return;
+
+    if (q.is_running || (q.remaining && q.remaining > 0)) {
+      badge.style.display = 'inline-flex';
+      const completed = q.completed || 0;
+      const failed = q.failed || 0;
+      const total = q.total || (completed + failed + (q.remaining || 0)) || 1;
+      const processed = Math.min(total, completed + failed || (total - (q.remaining || 0)));
+      const title = q.current_title ? ` (${q.current_title})` : '';
+      textEl.textContent = `커버 다운로드 중: ${processed}/${total}${title}`;
+      badge.title = `백그라운드 커버 다운로드 진행 중: ${processed}/${total} 처리 (${completed}개 성공, ${failed}개 미발견)\n현재: ${q.current_title || '준비 중...'}`;
+    } else {
+      badge.style.display = 'none';
     }
   }
 
@@ -951,9 +1016,9 @@
       // 아케이드 / MAME
       arcade: 'arcade',
       fbneo: 'arcade',
-      mame: 'mame2003',
-      mame2003: 'mame2003',
-      mame2003_plus: 'mame2003',
+      mame: 'mame',
+      mame2003: 'mame',
+      mame2003_plus: 'mame',
 
       // NEC / 아타리 / SNK / 코모도어 등
       pce: 'pce',
@@ -995,11 +1060,11 @@
     // 1. 코어 동적 판별
     let coreToUse = EMULATORJS_CORE_MAP[coreKey] || EMULATORJS_CORE_MAP[platformKey] || 'gba';
 
-    // 2. 아케이드 세부 라우팅
-    const isArcade = coreToUse === 'arcade' || coreToUse === 'mame2003' || platformKey === 'arcade';
+    // 2. 아케이드 세부 라우팅 (FBNeo vs MAME2003-Plus)
+    const isArcade = coreToUse === 'arcade' || coreToUse === 'mame' || platformKey === 'arcade';
     if (isArcade) {
-      if (rawStem === 'cupsoc' || rawStem === 'seibucup' || coreKey === 'mame2003' || coreKey === 'mame') {
-        coreToUse = 'mame2003';
+      if (rawStem === 'cupsoc' || rawStem === 'seibucup' || rawStem === 'danceyes' || coreKey === 'mame' || coreKey === 'mame2003' || game.core === 'mame' || game.core === 'mame2003') {
+        coreToUse = 'mame';
       } else {
         coreToUse = 'arcade';
       }
@@ -2401,10 +2466,34 @@
 
         // 2단계: 신규 추가된 ROM 파일 디스크 스캔 및 등록
         if (scanStatus) scanStatus.textContent = '새로운 ROM 파일 및 디렉터리를 스캔하는 중...';
-        if (scanProgressBar) scanProgressBar.style.width = '90%';
-        if (scanDetails) scanDetails.textContent = '신규 ROM 등록 중...';
+        if (scanProgressBar) scanProgressBar.style.width = '88%';
+        if (scanDetails) scanDetails.textContent = '신규 ROM 바이너리 및 DAT 정밀 분석 중...';
 
-        await apiCall('scan_new_roms');
+        // 실시간 신규 스캔 진행률 폴링
+        let newScanPollTimer = setInterval(async () => {
+          try {
+            const pollRes = await apiCall('scan_progress');
+            if (pollRes && pollRes.success && pollRes.progress) {
+              const p = pollRes.progress;
+              if (p.total > 0 && p.is_running) {
+                const subPercent = Math.min(88 + Math.round((p.current / p.total) * 10), 98);
+                if (scanProgressBar) scanProgressBar.style.width = `${subPercent}%`;
+                if (scanDetails) {
+                  scanDetails.textContent = `신규 ROM 등록 중: ${p.current} / ${p.total} (${p.current_file || ''})`;
+                }
+              }
+            }
+          } catch (e) {
+            // ignore
+          }
+        }, 350);
+
+        let newRomRes = null;
+        try {
+          newRomRes = await apiCall('scan_new_roms');
+        } finally {
+          if (newScanPollTimer) clearInterval(newScanPollTimer);
+        }
 
         if (scanProgressBar) scanProgressBar.style.width = '100%';
         if (scanDetails) scanDetails.textContent = '라이브러리 동기화 완료!';
@@ -2412,9 +2501,17 @@
         // 최종 전체 라이브러리 동기화
         await loadLibrary(true);
 
+        const newCount = (newRomRes && newRomRes.stats && newRomRes.stats.new_count) || 0;
         let resultMsg = '스캔 및 동기화 완료!';
-        if (coverUpdatedCount > 0 || deletedCount > 0) {
-          resultMsg += ` (커버 ${coverUpdatedCount}개 등록, 미존재 ${deletedCount}개 정리)`;
+        if (newCount > 0) {
+          resultMsg = `🎉 신규 ROM ${newCount}개 등록 완료!`;
+          if (coverUpdatedCount > 0 || deletedCount > 0) {
+            resultMsg += ` (커버 ${coverUpdatedCount}개 등록, 미존재 ${deletedCount}개 정리)`;
+          }
+        } else if (coverUpdatedCount > 0 || deletedCount > 0) {
+          resultMsg += ` (신규 롬 없음 / 커버 ${coverUpdatedCount}개 등록, 미존재 ${deletedCount}개 정리)`;
+        } else {
+          resultMsg = '스캔 완료 (새로 추가되거나 변경된 롬 파일이 없습니다)';
         }
         showToast(resultMsg);
       } catch (e) {
@@ -2430,7 +2527,75 @@
       }
     });
 
-    // 바이오스 관리 모달 이벤트
+    // 상단 풀 스캔 (Full Re-scan) 버튼
+    $('gbaFullScanBtn')?.addEventListener('click', async () => {
+      const fullScanBtn = $('gbaFullScanBtn');
+      if (fullScanBtn.classList.contains('gba-btn-scanning')) return;
+
+      if (!confirm('모든 롬 파일을 처음부터 전수 재분석(Full Re-scan)하시겠습니까?\n\n- DAT DB 및 바이너리 헤더를 100% 처음부터 다시 분석합니다.\n- 유저 세이브 파일과 즐겨찾기는 안전하게 보존됩니다.')) {
+        return;
+      }
+
+      const scanModal = $('gbaScanModal');
+      const scanStatus = $('gbaScanStatus');
+      const scanProgressBar = $('gbaScanProgressBar');
+      const scanDetails = $('gbaScanDetails');
+
+      fullScanBtn.classList.add('gba-btn-scanning');
+      fullScanBtn.title = '전체 재스캔 진행 중...';
+
+      let pollTimer = null;
+      if (scanModal) {
+        scanModal.style.display = 'flex';
+        if (scanStatus) scanStatus.textContent = '모든 롬 파일의 전수 재스캔(Full Re-scan)을 진행하는 중...';
+        if (scanProgressBar) scanProgressBar.style.width = '5%';
+        if (scanDetails) scanDetails.textContent = '통합 DAT DB 및 바이너리 헤더 전수 분석 준비 중...';
+
+        // 0.4초 간격으로 실시간 파일 단위 프로그레스 폴링
+        pollTimer = setInterval(async () => {
+          try {
+            const pollRes = await apiCall('scan_progress');
+            if (pollRes && pollRes.success && pollRes.progress) {
+              const p = pollRes.progress;
+              if (p.total > 0) {
+                const percent = Math.min(Math.round((p.current / p.total) * 90), 90);
+                if (scanProgressBar) scanProgressBar.style.width = `${percent}%`;
+                if (scanDetails) {
+                  scanDetails.textContent = `${p.current} / ${p.total} 파일 분석 중 (${percent}%) - ${p.current_file || ''}`;
+                }
+              }
+            }
+          } catch (e) {
+            // 폴링 오류 무시
+          }
+        }, 400);
+      }
+
+      try {
+        const res = await apiCall('full_scan');
+        if (pollTimer) clearInterval(pollTimer);
+
+        if (scanProgressBar) scanProgressBar.style.width = '95%';
+        if (scanDetails) scanDetails.textContent = '라이브러리 갱신 중...';
+
+        await loadLibrary(true);
+
+        if (scanProgressBar) scanProgressBar.style.width = '100%';
+        showToast(res && res.message ? res.message : '전체 재스캔 및 메타데이터 동기화가 완료되었습니다!');
+      } catch (err) {
+        if (pollTimer) clearInterval(pollTimer);
+        console.error('[GBA] Full scan error:', err);
+        showToast('전체 재스캔 중 오류가 발생했습니다.', true);
+        loadLibrary(true);
+      } finally {
+        if (pollTimer) clearInterval(pollTimer);
+        fullScanBtn.classList.remove('gba-btn-scanning');
+        fullScanBtn.title = '모든 롬을 처음부터 전수 정밀 재스캔 (DAT/헤더/바이오스 전체 재동기화)';
+        if (scanModal) {
+          scanModal.style.display = 'none';
+        }
+      }
+    });
     $('gbaBiosCloseBtn')?.addEventListener('click', closeBiosModal);
     $('gbaBiosOkBtn')?.addEventListener('click', closeBiosModal);
     $('gbaBiosModalUploadBtn')?.addEventListener('click', () => $('gbaBiosModalFileInput').click());
