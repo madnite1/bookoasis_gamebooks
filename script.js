@@ -14,6 +14,7 @@
     category: 'all',
     sort: localStorage.getItem('gba_library_sort') || 'newest',
     isFavoriteOnly: false,
+    isPassOnly: null,
     searchQuery: '',
     userId: 1,
     isAdmin: false,
@@ -21,6 +22,7 @@
       cloud_save_enabled: true,
       auto_save_interval_sec: 60,
       extra_roms_path: '',
+      show_runnable_only: false,
     },
     activeGame: null,
     autoSaveIntervalId: null,
@@ -59,6 +61,18 @@
 
   // DOM 헬퍼
   const $ = (id) => document.getElementById(id);
+
+  function syncPassOnlyFilterUI() {
+    const enabled = !!state.isPassOnly;
+    const btn = $('gbaHideIncompleteFilterBtn');
+    if (btn) {
+      btn.classList.toggle('active', enabled);
+    }
+    const settingToggle = $('gbaSettingPassOnly');
+    if (settingToggle) {
+      settingToggle.checked = enabled;
+    }
+  }
 
   // --------------------------------------------------------------------------
   // API 통신 헬퍼
@@ -102,10 +116,14 @@
         if (data.config) {
           state.config = Object.assign(state.config, data.config);
         }
+        if (state.isPassOnly === null || state.isPassOnly === undefined) {
+          state.isPassOnly = !!state.config.show_runnable_only;
+        }
 
         state.available_bios = data.available_bios || [];
 
         state.isAdmin = !!data.is_admin;
+        syncPassOnlyFilterUI();
 
         // 관리자 전용 UI 제어 (ROM 업로드, 바이오스 업로드, 홈브류 허브, 설정)
         document.querySelectorAll('.gba-admin-only').forEach((el) => {
@@ -211,6 +229,9 @@
       state.filteredGames = state.games.filter((g) => {
         // 즐겨찾기 단독 필터
         if (state.isFavoriteOnly && !g.is_favorite) return false;
+
+        // 100% 정상 구동 롬만 보기 필터
+        if (state.isPassOnly && (g.health_status === 'incomplete' || g.health_status === 'chd_required')) return false;
 
         // 기종 드롭다운 카테고리 필터
         if (state.category === 'snes' && g.core !== 'snes' && g.platform !== 'SNES') return false;
@@ -418,6 +439,8 @@
         <div class="gba-card-badges">
           <span class="gba-badge ${sysInfo.colorClass}" title="${escapeHtml(sysInfo.name)}">${escapeHtml(sysInfo.label)}</span>
           ${game.has_save ? `<span class="gba-badge gba-badge-save" title="클라우드 세이브 보관됨"><i class="fa-solid fa-floppy-disk"></i> SAVE</span>` : ''}
+          ${game.health_status === 'incomplete' ? `<span class="gba-badge" style="background: rgba(245, 158, 11, 0.9); color: #000; font-weight: 700;" title="일부 칩셋이 누락된 구형 롬셋입니다."><i class="fa-solid fa-triangle-exclamation"></i> 칩셋 누락</span>` : ''}
+          ${game.health_status === 'chd_required' ? `<span class="gba-badge" style="background: rgba(239, 68, 68, 0.9); color: #fff; font-weight: 700;" title="대용량 CHD 음원 디스크 이미지가 필요합니다."><i class="fa-solid fa-compact-disc"></i> CHD 필요</span>` : ''}
         </div>
         ${isBiosMissing ? `
           <div class="gba-card-missing-bios" title="구동 필수 바이오스 '${escapeHtml(neededBios)}' 누락됨 (바이오스 업로드 필요)">
@@ -869,6 +892,41 @@
           };
         }
       }
+    }
+
+    // 3. 롬 무결성 정밀 진단 결과 가드 (칩셋 누락 / CHD 필요)
+    if (game.health_status === 'chd_required') {
+      return {
+        type: 'chd',
+        needed: `${rawStem}.chd`,
+        systemName: '오락실 대형 체감형 기판',
+        title: '대용량 CHD 디스크 이미지 필요',
+        reason: `이 게임은 오락실 CD-ROM/HDD 음원 디스크 이미지(<code>.chd</code>)가 필수적인 시스템(비트매니아, DDR 등)입니다.<br>단독 롬셋 파일만으로는 브라우저 에뮬레이터에서 <strong>Romset is unknown</strong> 또는 메인메뉴로 진입하게 됩니다.`,
+        notice: `현재 웹 에뮬레이터에서는 단독 기판 아케이드 게임 플레이를 권장합니다.`,
+        btnText: `확인`,
+        isOptional: false,
+      };
+    } else if (game.health_status === 'incomplete') {
+      let sampleMissing = '';
+      try {
+        const parsed = JSON.parse(game.missing_roms || '[]');
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          sampleMissing = parsed.slice(0, 3).join(', ');
+        }
+      } catch (e) {
+        sampleMissing = game.missing_roms || '';
+      }
+
+      return {
+        type: 'incomplete',
+        needed: sampleMissing || '최신 Non-Merged 롬셋',
+        systemName: '구형/불완전 아케이드 롬셋',
+        title: '롬셋 칩셋 누락 (구형 덤프)',
+        reason: `이 게임 롬셋은 구형 버전 덤프 파일로, 최신 FBNeo 코어가 요구하는 필수 칩셋(<code>${escapeHtml(sampleMissing || '일부 칩셋')}</code>)이 누락되어 있습니다.<br>최신 Non-Merged 롬 파일로 교체하시면 정상 구동됩니다.`,
+        notice: `실행 시 <strong>Missing files for THIS VERSION of FBNeo</strong> 오류가 발생할 수 있습니다.`,
+        btnText: `롬 파일 교체 업로드`,
+        isOptional: false,
+      };
     }
 
     return null;
@@ -2356,6 +2414,12 @@
       renderGames();
     });
 
+    $('gbaHideIncompleteFilterBtn')?.addEventListener('click', () => {
+      state.isPassOnly = !state.isPassOnly;
+      syncPassOnlyFilterUI();
+      renderGames();
+    });
+
     // 무료 홈브류 모달 바인딩
     $('gbaHomebrewBtn')?.addEventListener('click', openHomebrewModal);
     $('gbaEmptyHomebrewBtn')?.addEventListener('click', openHomebrewModal);
@@ -2633,6 +2697,113 @@
         }
       }
     });
+    
+    // --------------------------------------------------------------------------
+    // ROM 라이브러리 전수 무결성 진단 (Health Check)
+    // --------------------------------------------------------------------------
+    let healthData = null;
+    let activeHealthTab = 'incomplete';
+
+    function renderHealthTable() {
+      const tbody = $('gbaHealthTableBody');
+      if (!tbody || !healthData) return;
+
+      const q = ($('gbaHealthSearchInput')?.value || '').trim().toLowerCase();
+      const list = activeHealthTab === 'incomplete' ? (healthData.incomplete_list || []) : (healthData.chd_list || []);
+      
+      const filtered = list.filter((item) => {
+        if (!q) return true;
+        return (item.title || '').toLowerCase().includes(q) || (item.filename || '').toLowerCase().includes(q) || (item.reason || '').toLowerCase().includes(q);
+      });
+
+      if (filtered.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="3" style="text-align: center; padding: 24px; color: var(--gba-text-muted);">
+              ${q ? '검색된 항목이 없습니다.' : (activeHealthTab === 'incomplete' ? '🎉 누락된 칩셋이 있는 불완전 롬셋이 없습니다! (모두 100% 정상)' : '🎉 CHD 디스크 이미지가 필요한 게임이 없습니다.')}
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      tbody.innerHTML = filtered.map((item) => {
+        const isInc = activeHealthTab === 'incomplete';
+        const badgeColor = isInc ? 'background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);' : 'background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);';
+        return `
+          <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
+            <td style="padding: 10px; font-weight: 600; color: var(--gba-text-main);">
+              ${escapeHtml(item.title)}
+            </td>
+            <td style="padding: 10px; color: var(--gba-text-muted); font-family: monospace; font-size: 0.8rem;">
+              ${escapeHtml(item.filename)}
+            </td>
+            <td style="padding: 10px;">
+              <span style="display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; ${badgeColor}">
+                ${escapeHtml(item.reason)}
+              </span>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    $('gbaHealthCheckBtn')?.addEventListener('click', async () => {
+      const modal = $('gbaHealthCheckModal');
+      const loading = $('gbaHealthCheckLoading');
+      const result = $('gbaHealthCheckResult');
+
+      if (!modal) return;
+      modal.style.display = 'flex';
+      if (loading) loading.style.display = 'block';
+      if (result) result.style.display = 'none';
+
+      try {
+        const res = await apiCall('health_check');
+        if (!res || !res.success) {
+          throw new Error(res && res.error ? res.error : '무결성 진단 실패');
+        }
+
+        healthData = res;
+
+        if ($('gbaHealthPassCount')) $('gbaHealthPassCount').textContent = res.summary.pass;
+        if ($('gbaHealthIncompleteCount')) $('gbaHealthIncompleteCount').textContent = res.summary.incomplete;
+        if ($('gbaHealthChdCount')) $('gbaHealthChdCount').textContent = res.summary.chd;
+
+        if ($('gbaHealthIncompleteTabCount')) $('gbaHealthIncompleteTabCount').textContent = res.summary.incomplete;
+        if ($('gbaHealthChdTabCount')) $('gbaHealthChdTabCount').textContent = res.summary.chd;
+
+        if (loading) loading.style.display = 'none';
+        if (result) result.style.display = 'block';
+
+        renderHealthTable();
+      } catch (err) {
+        console.error('[GBA] Health check error:', err);
+        showToast('무결성 진단 중 오류가 발생했습니다: ' + (err.message || err), true);
+        modal.style.display = 'none';
+      }
+    });
+
+    $('gbaHealthCheckCloseBtn')?.addEventListener('click', () => {
+      $('gbaHealthCheckModal').style.display = 'none';
+    });
+    $('gbaHealthCheckOkBtn')?.addEventListener('click', () => {
+      $('gbaHealthCheckModal').style.display = 'none';
+    });
+
+    document.querySelectorAll('.gba-health-tab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.gba-health-tab-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeHealthTab = btn.dataset.tab;
+        renderHealthTable();
+      });
+    });
+
+    $('gbaHealthSearchInput')?.addEventListener('input', () => {
+      renderHealthTable();
+    });
+
     $('gbaBiosCloseBtn')?.addEventListener('click', closeBiosModal);
     $('gbaBiosOkBtn')?.addEventListener('click', closeBiosModal);
     $('gbaBiosModalUploadBtn')?.addEventListener('click', () => $('gbaBiosModalFileInput').click());
@@ -2742,6 +2913,7 @@
     // 설정 모달 열기 & 저장
     $('gbaSettingsBtn').addEventListener('click', () => {
       $('gbaSettingCloudSave').checked = state.config.cloud_save_enabled;
+      $('gbaSettingPassOnly').checked = !!state.isPassOnly;
       $('gbaSettingInterval').value = state.config.auto_save_interval_sec;
       $('gbaSettingExtraPath').value = state.config.extra_roms_path || '';
       $('gbaSettingCoversPath').value = state.config.covers_path || '';
@@ -2761,6 +2933,7 @@
       const coversPath = $('gbaSettingCoversPath').value.trim();
       const biosPath = $('gbaSettingBiosPath').value.trim();
       const cloudSave = $('gbaSettingCloudSave').checked ? '1' : '0';
+      const showRunnableOnly = $('gbaSettingPassOnly').checked ? '1' : '0';
       const interval = $('gbaSettingInterval').value.trim();
       const saveBtn = $('gbaSettingsSaveBtn');
 
@@ -2849,6 +3022,7 @@
           covers_path: coversPath,
           bios_path: biosPath,
           cloud_save_enabled: cloudSave,
+          show_runnable_only: showRunnableOnly,
           auto_save_interval_sec: interval,
         });
 
@@ -2857,7 +3031,11 @@
           state.config.covers_path = coversPath;
           state.config.bios_path = biosPath;
           state.config.cloud_save_enabled = cloudSave === '1';
+          state.config.show_runnable_only = showRunnableOnly === '1';
+          state.isPassOnly = state.config.show_runnable_only;
           state.config.auto_save_interval_sec = parseInt(interval, 10) || 60;
+          syncPassOnlyFilterUI();
+          renderGames();
           $('gbaSettingsModal').style.display = 'none';
 
           if (scanProgressBar) scanProgressBar.style.width = '100%';
