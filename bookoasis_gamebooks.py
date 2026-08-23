@@ -2675,24 +2675,34 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 )
 
                 user_saves_dir = self._get_user_saves_dir(user_id)
+                existing_saves = set()
+                if os.path.exists(user_saves_dir):
+                    try:
+                        for sf in os.listdir(user_saves_dir):
+                            if not sf.startswith("."):
+                                full_sf = os.path.join(user_saves_dir, sf)
+                                try:
+                                    if os.path.getsize(full_sf) > 0:
+                                        existing_saves.add(sf)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
                 for g in games:
-                    save_path = os.path.join(user_saves_dir, f"{g['id']}.sav")
-                    state_path = os.path.join(user_saves_dir, f"{g['id']}.state")
-                    state_slot1 = os.path.join(user_saves_dir, f"{g['id']}_slot1.state")
-
-                    has_sav = os.path.exists(save_path) and os.path.getsize(save_path) > 0
-                    has_state = (os.path.exists(state_path) and os.path.getsize(state_path) > 0) or (os.path.exists(state_slot1) and os.path.getsize(state_slot1) > 0)
+                    gid = g["id"]
+                    has_sav = f"{gid}.sav" in existing_saves
+                    has_state = f"{gid}.state" in existing_saves or f"{gid}_slot1.state" in existing_saves
 
                     g["has_save"] = 1 if (has_sav or has_state) else 0
                     g["has_state"] = 1 if has_state else 0
                     url_fname = g["filename"]
                     if url_fname.lower().endswith(".7z"):
                         url_fname = os.path.splitext(url_fname)[0] + ".zip"
-                    g["rom_url"] = f"{ROUTE_BASE}/rom/{g['id']}/{urllib.parse.quote(url_fname)}"
-                    g["save_url"] = f"{ROUTE_BASE}/save/{g['id']}?user_id={user_id}"
-                    g["state_url"] = f"{ROUTE_BASE}/state/{g['id']}?user_id={user_id}"
-                    g["cover_url"] = f"{ROUTE_BASE}/cover/{g['id']}"
+                    g["rom_url"] = f"{ROUTE_BASE}/rom/{gid}/{urllib.parse.quote(url_fname)}"
+                    g["save_url"] = f"{ROUTE_BASE}/save/{gid}?user_id={user_id}"
+                    g["state_url"] = f"{ROUTE_BASE}/state/{gid}?user_id={user_id}"
+                    g["cover_url"] = f"{ROUTE_BASE}/cover/{gid}"
 
                 available_bios = []
                 bios_dir = self._get_bios_dir()
