@@ -2904,6 +2904,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         files_to_process = []
         covers_to_fetch = []
         new_games_added = []
+        deleted_count = 0
 
         total_files = len(found_files)
         _update_scan_progress(current=0, total=total_files, current_file="스캔 준비 중...", status="scanning", is_running=True)
@@ -3231,7 +3232,6 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     logger.warning(f"[{SELF_ID}] Game DB update error ({gid}): {dbe}")
 
             # 삭제된 게임 정리
-            deleted_count = 0
             for gid in existing_games:
                 if gid not in found_files:
                     try:
