@@ -2502,8 +2502,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
     def __init__(self):
         super().__init__()
         self._migrate_old_plugin_data()
-        self._migrate_bios_files()
         self._init_db()
+        self._migrate_bios_files()
 
     def _migrate_bios_files(self):
         """roms/ 폴더에 혼재된 바이오스 및 MAME 기판/디바이스 파일을 bios/ 폴더로 자동 분류 이동"""
@@ -3263,7 +3263,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
     def _get_setting(self, key, default=""):
         """설정값 조회: 게임북 전용 로컬 SQLite DB(settings 테이블)에서 조회합니다."""
-        rows = self._db_query("SELECT value FROM settings WHERE key = ?", (key,))
+        try:
+            rows = self._db_query("SELECT value FROM settings WHERE key = ?", (key,))
+        except sqlite3.OperationalError as e:
+            if "no such table: settings" in str(e).lower():
+                logger.warning(f"[{SELF_ID}] settings table missing during _get_setting({key}); returning default")
+                return default
+            raise
         if rows:
             return rows[0]["value"]
         return default
