@@ -2895,13 +2895,9 @@
       });
     }
 
-    // 조작키 기종별 탭 클릭
-    document.querySelectorAll('.gba-sys-tab').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.gba-sys-tab').forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
-        renderControlsTable(btn.dataset.sys);
-      });
+    // 조작키 기종별 드롭다운 선택
+    $('gbaControlsSysSelect')?.addEventListener('change', (e) => {
+      renderControlsTable(e.target.value || 'snes');
     });
 
     // 조작키 안내 모달
@@ -2916,10 +2912,10 @@
       }
       const padStatusEl = $('gbaGamepadStatus');
       if (foundPad) {
-        padStatusEl.innerHTML = `<i class="fa-solid fa-gamepad"></i> <span>연결된 컨트롤러: <strong>${escapeHtml(foundPad.id)}</strong></span>`;
+        padStatusEl.innerHTML = `<i class="fa-solid fa-gamepad"></i> <span>연결된 컨트롤러: <strong>${escapeHtml(foundPad.id)}</strong> · 아래 표 기준 자동 매핑 적용</span>`;
         padStatusEl.style.color = 'var(--gba-success)';
       } else {
-        padStatusEl.innerHTML = `<i class="fa-solid fa-gamepad"></i> <span>컨트롤러 연결 대기 중 (패드의 아무 버튼이나 1회 누르세요)</span>`;
+        padStatusEl.innerHTML = `<i class="fa-solid fa-gamepad"></i> <span>컨트롤러 연결 시 아래 표 기준으로 자동 매핑됩니다.</span>`;
         padStatusEl.style.color = 'var(--gba-text-muted)';
       }
 
@@ -2942,9 +2938,8 @@
         else targetSys = 'snes';
       }
 
-      document.querySelectorAll('.gba-sys-tab').forEach((b) => {
-        b.classList.toggle('active', b.dataset.sys === targetSys);
-      });
+      const controlsSysSelect = $('gbaControlsSysSelect');
+      if (controlsSysSelect) controlsSysSelect.value = targetSys;
       renderControlsTable(targetSys);
 
       $('gbaControlsModal').style.display = 'flex';

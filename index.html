@@ -324,23 +324,26 @@
       </div>
       <div class="gba-modal-body">
         <div class="gba-gamepad-status-card" id="gbaGamepadStatus">
-          <i class="fa-solid fa-gamepad"></i> <span>컨트롤러 연결 대기 중 (패드의 아무 버튼이나 누르세요)</span>
+          <i class="fa-solid fa-gamepad"></i> <span>컨트롤러 연결 시 아래 표 기준으로 자동 매핑됩니다.</span>
         </div>
 
-        <!-- 플랫폼별 조작키 탭 -->
-        <div class="gba-controls-sys-tabs" id="gbaControlsSysTabs">
-          <button class="gba-sys-tab active" data-sys="snes">SFC (슈퍼패미컴)</button>
-          <button class="gba-sys-tab" data-sys="gba">GBA</button>
-          <button class="gba-sys-tab" data-sys="nes">FC / NES / GB</button>
-          <button class="gba-sys-tab" data-sys="n64">N64</button>
-          <button class="gba-sys-tab" data-sys="genesis">MD (메가드라이브)</button>
-          <button class="gba-sys-tab" data-sys="arcade">오락실 (Arcade/MAME)</button>
-          <button class="gba-sys-tab" data-sys="neogeo">네오지오 (Neo-Geo)</button>
-          <button class="gba-sys-tab" data-sys="psx">PS1</button>
-          <button class="gba-sys-tab" data-sys="psp">PSP</button>
-          <button class="gba-sys-tab" data-sys="nds">NDS</button>
-          <button class="gba-sys-tab" data-sys="saturn">세가 새턴</button>
-          <button class="gba-sys-tab" data-sys="pce">PC엔진</button>
+        <!-- 플랫폼별 조작키 드롭다운 -->
+        <div class="gba-select-wrapper" id="gbaControlsSysSelectWrap" style="margin-bottom: 14px; max-width: 320px;">
+          <i class="fa-solid fa-list gba-select-icon"></i>
+          <select id="gbaControlsSysSelect" class="gba-select gba-sort-select" title="기종별 조작키 선택">
+            <option value="snes">SFC (슈퍼패미컴)</option>
+            <option value="gba">GBA</option>
+            <option value="nes">FC / NES / GB</option>
+            <option value="n64">N64</option>
+            <option value="genesis">MD (메가드라이브)</option>
+            <option value="arcade">오락실 (Arcade/MAME)</option>
+            <option value="neogeo">네오지오 (Neo-Geo)</option>
+            <option value="psx">PS1</option>
+            <option value="psp">PSP</option>
+            <option value="nds">NDS</option>
+            <option value="saturn">세가 새턴</option>
+            <option value="pce">PC엔진</option>
+          </select>
         </div>
 
         <div class="gba-controls-table-wrap" id="gbaControlsTableWrap"></div>
@@ -349,7 +352,6 @@
         <div class="gba-controls-special-wrap">
           <h4><i class="fa-solid fa-bolt"></i> 공통 기능 & 자동 세이브 안내</h4>
           <div class="gba-special-grid">
-            <div><kbd>ESC</kbd> <span>모달 닫기 / 게임 나가기</span></div>
             <div><kbd>우클릭</kbd> <span>커버 캡처 메뉴</span></div>
             <div><i class="fa-solid fa-cloud-arrow-up" style="color:var(--gba-success);"></i> <span>플레이 중 및 종료 시 자동 저장 & 즉시 이어하기</span></div>
           </div>
@@ -403,7 +405,7 @@
         <button class="gba-player-btn" id="gbaBtnFullscreen" title="전체화면 전환">
           <i class="fa-solid fa-expand"></i>
         </button>
-        <button class="gba-player-btn gba-btn-danger" id="gbaBtnExit" title="게임 종료 (ESC)">
+        <button class="gba-player-btn gba-btn-danger" id="gbaBtnExit" title="게임 종료">
           <i class="fa-solid fa-xmark"></i>
         </button>
       </div>
