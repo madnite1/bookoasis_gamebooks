@@ -584,13 +584,49 @@ def _collect_identity_fields(file_path, rom_info, clean_title="", size_bytes=0):
     }
 
 
-def _fetch_screenscraper_artwork(file_path, platform_or_core, filename, sc_config):
-    """ScreenScraper API를 질의하여 롬 아트워크 다운로드 (Key 설정 시에만 동작)"""
+def _pick_preferred_dict_text(value, preferred_keys=None):
+    preferred_keys = preferred_keys or ("korean", "kr", "ko", "jp", "ja", "us", "en", "wor", "ss")
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        lowered = {str(k).lower(): v for k, v in value.items()}
+        for key in preferred_keys:
+            if key in lowered:
+                picked = _pick_preferred_dict_text(lowered.get(key), preferred_keys)
+                if picked:
+                    return picked
+        for sub in lowered.values():
+            picked = _pick_preferred_dict_text(sub, preferred_keys)
+            if picked:
+                return picked
+    if isinstance(value, list):
+        for item in value:
+            picked = _pick_preferred_dict_text(item, preferred_keys)
+            if picked:
+                return picked
+    return ""
+
+
+def _ss_extract_text(value):
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return _pick_preferred_dict_text(value)
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            text = _ss_extract_text(item)
+            if text:
+                parts.append(text)
+        return ", ".join(dict.fromkeys(parts))
+    return ""
+
+
+def _fetch_screenscraper_gameinfo(file_path, platform_or_core, filename, sc_config):
     devid = sc_config.get("ss_devid")
     devpassword = sc_config.get("ss_devpassword")
     if not devid or not devpassword:
         return None
-
     if not file_path or not os.path.exists(file_path):
         return None
 
@@ -600,7 +636,6 @@ def _fetch_screenscraper_artwork(file_path, platform_or_core, filename, sc_confi
     plat_key = str(platform_or_core or "").lower().strip()
     system_id = SS_SYSTEM_MAP.get(plat_key, "")
 
-    base_url = "https://www.screenscraper.fr/api2/jeuInfos.php"
     params = {
         "devid": devid,
         "devpassword": devpassword,
@@ -624,28 +659,95 @@ def _fetch_screenscraper_artwork(file_path, platform_or_core, filename, sc_confi
 
     try:
         query_str = urllib.parse.urlencode(params)
-        req_url = f"{base_url}?{query_str}"
+        req_url = f"https://www.screenscraper.fr/api2/jeuInfos.php?{query_str}"
         req = urllib.request.Request(req_url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
         with urllib.request.urlopen(req, timeout=12) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
-                medias = data.get("response", {}).get("jeu", {}).get("medias", [])
-                for m in medias:
-                    # 2d boxart 또는 3d boxart 또는 screenshot 탐색
-                    mtype = str(m.get("type") or "").lower()
-                    if mtype in ("box-2d", "box-3d", "wheel", "screenshot"):
-                        img_url = m.get("url")
-                        if img_url:
-                            img_req = urllib.request.Request(img_url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
-                            with urllib.request.urlopen(img_req, timeout=15) as img_resp:
-                                if img_resp.status == 200:
-                                    img_data = img_resp.read()
-                                    if img_data and len(img_data) > 512:
-                                        return img_data
+                return data.get("response", {}).get("jeu") or None
     except Exception as e:
         logger.debug(f"[{SELF_ID}] ScreenScraper query error: {e}")
-
     return None
+
+
+def _extract_screenscraper_artwork(game_payload):
+    medias = []
+    if isinstance(game_payload, dict):
+        medias = game_payload.get("medias", []) or []
+    for media in medias:
+        if not isinstance(media, dict):
+            continue
+        mtype = str(media.get("type") or "").lower()
+        if mtype in ("box-2d", "box-3d", "wheel", "screenshot"):
+            img_url = media.get("url")
+            if img_url:
+                try:
+                    img_req = urllib.request.Request(img_url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
+                    with urllib.request.urlopen(img_req, timeout=15) as img_resp:
+                        if img_resp.status == 200:
+                            img_data = img_resp.read()
+                            if img_data and len(img_data) > 512:
+                                return img_data
+                except Exception as e:
+                    logger.debug(f"[{SELF_ID}] ScreenScraper artwork fetch error: {e}")
+    return None
+
+
+def _extract_screenscraper_metadata(game_payload):
+    if not isinstance(game_payload, dict):
+        return {}
+    titles = game_payload.get("noms") or game_payload.get("names") or game_payload.get("nom") or ""
+    canonical_title = _ss_extract_text(titles)
+    synopsis = game_payload.get("synopsis") or game_payload.get("synopsys") or game_payload.get("description") or ""
+    genre = _ss_extract_text(game_payload.get("genres") or game_payload.get("genre") or "")
+    developer = _ss_extract_text(game_payload.get("developpeur") or game_payload.get("developer") or "")
+    publisher = _ss_extract_text(game_payload.get("editeur") or game_payload.get("publisher") or "")
+    region = _ss_extract_text(game_payload.get("regions") or game_payload.get("region") or "")
+    players_raw = _ss_extract_text(game_payload.get("joueurs") or game_payload.get("players") or "")
+    release_year = _ss_extract_text(game_payload.get("dates") or game_payload.get("date") or game_payload.get("annee") or "")
+    if release_year:
+        year_match = re.search(r"(19|20)\d{2}", release_year)
+        release_year = year_match.group(0) if year_match else release_year[:10]
+    players = 0
+    if players_raw:
+        players_match = re.search(r"\d+", players_raw)
+        if players_match:
+            players = int(players_match.group(0))
+    alt_titles = []
+    if isinstance(titles, dict):
+        for value in titles.values():
+            text = _ss_extract_text(value)
+            if text and text != canonical_title:
+                alt_titles.append(text)
+    alt_titles = list(dict.fromkeys(alt_titles))
+    return {
+        "canonical_title": canonical_title,
+        "region": region,
+        "genre": genre,
+        "developer": developer,
+        "publisher": publisher,
+        "release_year": release_year,
+        "players": players,
+        "description": _ss_extract_text(synopsis),
+        "alt_titles": json.dumps(alt_titles, ensure_ascii=False) if alt_titles else "",
+        "metadata_source": "screenscraper",
+        "metadata_confidence": 90 if canonical_title else 70,
+    }
+
+
+def _fetch_screenscraper_metadata(file_path, platform_or_core, filename, sc_config):
+    game_payload = _fetch_screenscraper_gameinfo(file_path, platform_or_core, filename, sc_config)
+    if not game_payload:
+        return {}
+    return _extract_screenscraper_metadata(game_payload)
+
+
+def _fetch_screenscraper_artwork(file_path, platform_or_core, filename, sc_config):
+    """ScreenScraper API를 질의하여 롬 아트워크 다운로드 (Key 설정 시에만 동작)"""
+    game_payload = _fetch_screenscraper_gameinfo(file_path, platform_or_core, filename, sc_config)
+    if not game_payload:
+        return None
+    return _extract_screenscraper_artwork(game_payload)
 
 
 _IGDB_ACCESS_TOKEN = None
@@ -2266,6 +2368,15 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     ("source_system", "TEXT DEFAULT ''"),
                     ("metadata_source", "TEXT DEFAULT ''"),
                     ("metadata_confidence", "INTEGER DEFAULT 0"),
+                    ("canonical_title", "TEXT DEFAULT ''"),
+                    ("alt_titles", "TEXT DEFAULT ''"),
+                    ("region", "TEXT DEFAULT ''"),
+                    ("genre", "TEXT DEFAULT ''"),
+                    ("developer", "TEXT DEFAULT ''"),
+                    ("publisher", "TEXT DEFAULT ''"),
+                    ("release_year", "TEXT DEFAULT ''"),
+                    ("players", "INTEGER DEFAULT 0"),
+                    ("description", "TEXT DEFAULT ''"),
                 ):
                     try:
                         conn.execute(f"ALTER TABLE games ADD COLUMN {col} {ctype}")
@@ -2362,6 +2473,26 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "ss_user": self._get_setting("SS_USER", "").strip(),
                     "ss_password": self._get_setting("SS_PASSWORD", "").strip(),
                 }
+                metadata_payload = _fetch_screenscraper_metadata(file_path, platform_or_core, filename, sc_conf)
+                if metadata_payload:
+                    self._db_execute(
+                        "UPDATE games SET canonical_title = COALESCE(NULLIF(canonical_title, ''), ?), alt_titles = COALESCE(NULLIF(alt_titles, ''), ?), region = COALESCE(NULLIF(region, ''), ?), genre = COALESCE(NULLIF(genre, ''), ?), developer = COALESCE(NULLIF(developer, ''), ?), publisher = COALESCE(NULLIF(publisher, ''), ?), release_year = COALESCE(NULLIF(release_year, ''), ?), players = CASE WHEN players IS NULL OR players = 0 THEN ? ELSE players END, description = COALESCE(NULLIF(description, ''), ?), metadata_source = ?, metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence < ? THEN ? ELSE metadata_confidence END WHERE id = ?",
+                        (
+                            metadata_payload.get("canonical_title") or "",
+                            metadata_payload.get("alt_titles") or "",
+                            metadata_payload.get("region") or "",
+                            metadata_payload.get("genre") or "",
+                            metadata_payload.get("developer") or "",
+                            metadata_payload.get("publisher") or "",
+                            metadata_payload.get("release_year") or "",
+                            metadata_payload.get("players") or 0,
+                            metadata_payload.get("description") or "",
+                            metadata_payload.get("metadata_source") or "screenscraper",
+                            metadata_payload.get("metadata_confidence") or 0,
+                            metadata_payload.get("metadata_confidence") or 0,
+                            game_id,
+                        ),
+                    )
                 art_bytes = _fetch_screenscraper_artwork(file_path, platform_or_core, filename, sc_conf)
                 if art_bytes:
                     save_cover_path = os.path.join(covers_dir, f"{game_id}.png")
@@ -3671,6 +3802,15 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                               COALESCE(g.source_system, '') AS source_system,
                               COALESCE(g.metadata_source, '') AS metadata_source,
                               COALESCE(g.metadata_confidence, 0) AS metadata_confidence,
+                              COALESCE(g.canonical_title, '') AS canonical_title,
+                              COALESCE(g.alt_titles, '') AS alt_titles,
+                              COALESCE(g.region, '') AS region,
+                              COALESCE(g.genre, '') AS genre,
+                              COALESCE(g.developer, '') AS developer,
+                              COALESCE(g.publisher, '') AS publisher,
+                              COALESCE(g.release_year, '') AS release_year,
+                              COALESCE(g.players, 0) AS players,
+                              COALESCE(g.description, '') AS description,
                               COALESCE(u.is_favorite, 0) AS is_favorite,
                               u.last_played_at,
                               COALESCE(u.play_count, 0) AS play_count
