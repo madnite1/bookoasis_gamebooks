@@ -543,15 +543,56 @@ def _calc_sha1(file_path):
         return None
 
 
-def _basic_normalize_title(text):
+def _analyze_title_tokens(text):
     raw = str(text or "").strip()
     if not raw:
-        return ""
+        return {
+            "normalized_title": "",
+            "region_tag": "",
+            "revision_tag": "",
+            "disc_number": 0,
+            "content_flags": "",
+        }
+
+    region_tags = []
+    revision_tags = []
+    content_flags = []
+    disc_number = 0
+
+    tag_pattern = re.compile(r"[\(\[\{]([^\)\]\}]+)[\)\]\}]")
+    for match in tag_pattern.findall(raw):
+        token = str(match).strip()
+        lower = token.lower()
+        if lower in ("usa", "us", "u", "japan", "jp", "j", "europe", "eu", "pal", "korea", "kr", "world"):
+            region_tags.append(token)
+        elif re.search(r"\brev(?:ision)?\b|v\d+(?:\.\d+)?|proto|beta", lower):
+            revision_tags.append(token)
+        elif re.search(r"\bdisc\s*([0-9]+)|\bcd\s*([0-9]+)", lower):
+            m = re.search(r"([0-9]+)", lower)
+            if m:
+                disc_number = max(disc_number, int(m.group(1)))
+        elif "translation" in lower or "trans" in lower:
+            content_flags.append("translation")
+        elif "hack" in lower or "patch" in lower:
+            content_flags.append("hack")
+        elif "homebrew" in lower or "demo" in lower:
+            content_flags.append("homebrew")
+
     clean = re.sub(r"[\(\[\{].*?[\)\]\}]", " ", raw)
     clean = clean.replace("_", " ").replace("-", " ")
     clean = re.sub(r"[^0-9A-Za-z가-힣:!'&+,./\s]", " ", clean)
     clean = re.sub(r"\s+", " ", clean).strip()
-    return clean.lower()
+    return {
+        "normalized_title": clean.lower(),
+        "region_tag": ", ".join(dict.fromkeys(region_tags)),
+        "revision_tag": ", ".join(dict.fromkeys(revision_tags)),
+        "disc_number": disc_number,
+        "content_flags": ",".join(dict.fromkeys(content_flags)),
+    }
+
+
+def _basic_normalize_title(text):
+    return _analyze_title_tokens(text).get("normalized_title", "")
 
 
 def _collect_identity_fields(file_path, rom_info, clean_title="", size_bytes=0):
@@ -570,14 +611,18 @@ def _collect_identity_fields(file_path, rom_info, clean_title="", size_bytes=0):
         rom_md5 = _calc_md5(file_path) or ""
         rom_sha1 = _calc_sha1(file_path) or ""
 
-    normalized_title = _basic_normalize_title(clean_title or rom_info.get("title") or os.path.basename(file_path))
+    title_analysis = _analyze_title_tokens(clean_title or rom_info.get("title") or os.path.basename(file_path))
     source_system = str(rom_info.get("source_system") or "filename").strip() or "filename"
     return {
         "rom_crc32": rom_crc32,
         "rom_md5": rom_md5,
         "rom_sha1": rom_sha1,
         "serial_code": serial_code,
-        "normalized_title": normalized_title,
+        "normalized_title": title_analysis.get("normalized_title") or "",
+        "region_tag": title_analysis.get("region_tag") or "",
+        "revision_tag": title_analysis.get("revision_tag") or "",
+        "disc_number": int(title_analysis.get("disc_number") or 0),
+        "content_flags": title_analysis.get("content_flags") or "",
         "source_system": source_system,
         "metadata_source": str(rom_info.get("metadata_source") or "").strip(),
         "metadata_confidence": int(rom_info.get("metadata_confidence") or 0),
@@ -2567,6 +2612,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     ("release_year", "TEXT DEFAULT ''"),
                     ("players", "INTEGER DEFAULT 0"),
                     ("description", "TEXT DEFAULT ''"),
+                    ("region_tag", "TEXT DEFAULT ''"),
+                    ("revision_tag", "TEXT DEFAULT ''"),
+                    ("disc_number", "INTEGER DEFAULT 0"),
+                    ("content_flags", "TEXT DEFAULT ''"),
                 ):
                     try:
                         conn.execute(f"ALTER TABLE games ADD COLUMN {col} {ctype}")
@@ -3119,8 +3168,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 try:
                     if gid not in existing_games:
                         self._db_execute(
-                            """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence, region_tag, revision_tag, disc_number, content_flags)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 gid,
                                 info["filename"],
@@ -3145,6 +3194,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 identity_info.get("source_system") or "",
                                 identity_info.get("metadata_source") or "",
                                 identity_info.get("metadata_confidence") or 0,
+                                identity_info.get("region_tag") or "",
+                                identity_info.get("revision_tag") or "",
+                                identity_info.get("disc_number") or 0,
+                                identity_info.get("content_flags") or "",
                             ),
                         )
                         new_games_added.append(clean_title or info["filename"])
@@ -3158,8 +3211,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             ))
                     else:
                         self._db_execute(
-                            "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ?, game_code = ?, needed_bios = ?, health_status = ?, missing_roms = ?, rom_crc32 = ?, rom_md5 = ?, rom_sha1 = ?, serial_code = ?, normalized_title = ?, source_system = ?, metadata_source = COALESCE(NULLIF(metadata_source, ''), ?), metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence = 0 THEN ? ELSE metadata_confidence END, cover_path = COALESCE(cover_path, ?) WHERE id = ?",
-                            (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, rom_info["game_code"], rom_info.get("needed_bios") or "", health_status, missing_roms_str, identity_info.get("rom_crc32") or "", identity_info.get("rom_md5") or "", identity_info.get("rom_sha1") or "", identity_info.get("serial_code") or "", identity_info.get("normalized_title") or "", identity_info.get("source_system") or "", identity_info.get("metadata_source") or "", identity_info.get("metadata_confidence") or 0, existing_cover_file, gid),
+                            "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ?, game_code = ?, needed_bios = ?, health_status = ?, missing_roms = ?, rom_crc32 = ?, rom_md5 = ?, rom_sha1 = ?, serial_code = ?, normalized_title = ?, source_system = ?, metadata_source = COALESCE(NULLIF(metadata_source, ''), ?), metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence = 0 THEN ? ELSE metadata_confidence END, region_tag = ?, revision_tag = ?, disc_number = ?, content_flags = ?, cover_path = COALESCE(cover_path, ?) WHERE id = ?",
+                            (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, rom_info["game_code"], rom_info.get("needed_bios") or "", health_status, missing_roms_str, identity_info.get("rom_crc32") or "", identity_info.get("rom_md5") or "", identity_info.get("rom_sha1") or "", identity_info.get("serial_code") or "", identity_info.get("normalized_title") or "", identity_info.get("source_system") or "", identity_info.get("metadata_source") or "", identity_info.get("metadata_confidence") or 0, identity_info.get("region_tag") or "", identity_info.get("revision_tag") or "", identity_info.get("disc_number") or 0, identity_info.get("content_flags") or "", existing_cover_file, gid),
                         )
                         existing_entry = existing_games.get(gid)
                         current_cover = existing_entry.get("cover_path") if existing_entry else None
@@ -4032,6 +4085,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                               COALESCE(g.release_year, '') AS release_year,
                               COALESCE(g.players, 0) AS players,
                               COALESCE(g.description, '') AS description,
+                              COALESCE(g.region_tag, '') AS region_tag,
+                              COALESCE(g.revision_tag, '') AS revision_tag,
+                              COALESCE(g.disc_number, 0) AS disc_number,
+                              COALESCE(g.content_flags, '') AS content_flags,
                               COALESCE(u.is_favorite, 0) AS is_favorite,
                               u.last_played_at,
                               COALESCE(u.play_count, 0) AS play_count
@@ -4349,6 +4406,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             "filename": fname,
                             "core": core,
                             "platform": plat,
+                            "metadata_source": g.get("metadata_source") or "",
+                            "metadata_confidence": g.get("metadata_confidence") or 0,
+                            "source_system": g.get("source_system") or "",
                             "reason": "대용량 CD-ROM/음원 디스크 이미지(.chd)가 필요한 기판 롬셋입니다."
                         })
                         continue
@@ -4381,6 +4441,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "platform": plat,
                         "health_status": health_status,
                         "missing_samples": missing_samples,
+                        "metadata_source": g.get("metadata_source") or "",
+                        "metadata_confidence": g.get("metadata_confidence") or 0,
+                        "source_system": g.get("source_system") or "",
                         "reason": reason,
                     })
 

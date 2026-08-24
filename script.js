@@ -15,6 +15,7 @@
     sort: localStorage.getItem('gba_library_sort') || 'newest',
     isFavoriteOnly: false,
     isPassOnly: null,
+    statusFilter: 'all',
     searchQuery: '',
     userId: 1,
     isAdmin: false,
@@ -234,6 +235,7 @@
 
         // 100% 정상 구동 롬만 보기 필터
         if (state.isPassOnly && g.health_status !== 'pass') return false;
+        if (state.statusFilter !== 'all' && (g.health_status || 'pass') !== state.statusFilter) return false;
 
         // 기종 드롭다운 카테고리 필터
         if (state.category === 'snes' && g.core !== 'snes' && g.platform !== 'SNES') return false;
@@ -395,6 +397,14 @@
     };
   }
 
+  function metadataConfidenceLabel(score) {
+    const n = Number(score || 0);
+    if (n >= 85) return '높음';
+    if (n >= 60) return '중간';
+    if (n > 0) return '낮음';
+    return '';
+  }
+
   function createGameCard(game) {
     const card = document.createElement('div');
     card.className = 'gba-card';
@@ -405,6 +415,10 @@
     const lastPlayed = formatRelativeTime(game.last_played_at);
     const hasCover = !!game.cover_path;
     const sysInfo = getSystemInfo(game);
+    const metaConfidence = Number(game.metadata_confidence || 0);
+    const metaConfidenceLabel = metadataConfidenceLabel(metaConfidence);
+    const sourceSystem = game.source_system || '';
+    const metaSource = game.metadata_source || '';
 
     // 커버 영역 (브라우저 디스크 캐시 즉시 활용)
     let coverHtml = '';
@@ -446,6 +460,7 @@
           ${game.health_status === 'parent_required' ? `<span class="gba-badge" style="background: rgba(234, 88, 12, 0.92); color: #fff; font-weight: 700;" title="필수 부모 롬(Parent ROM)이 누락되었습니다."><i class="fa-solid fa-folder-tree"></i> Parent 필요</span>` : ''}
           ${game.health_status === 'bad_dump_or_unknown' ? `<span class="gba-badge" style="background: rgba(107, 114, 128, 0.95); color: #fff; font-weight: 700;" title="손상되었거나 DAT와 일치하지 않는 롬셋일 수 있습니다."><i class="fa-solid fa-circle-question"></i> 재확인 필요</span>` : ''}
           ${game.health_status === 'chd_required' ? `<span class="gba-badge" style="background: rgba(239, 68, 68, 0.9); color: #fff; font-weight: 700;" title="대용량 CHD 음원 디스크 이미지가 필요합니다."><i class="fa-solid fa-compact-disc"></i> CHD 필요</span>` : ''}
+          ${metaConfidenceLabel ? `<span class="gba-badge" style="background: rgba(59, 130, 246, 0.16); color: #bfdbfe; border: 1px solid rgba(96, 165, 250, 0.3);" title="메타 출처: ${escapeHtml(metaSource || '미확인')} / 신뢰도: ${metaConfidence}"><i class="fa-solid fa-database"></i> 메타 ${escapeHtml(metaConfidenceLabel)}</span>` : ''}
         </div>
         ${isBiosMissing ? `
           <div class="gba-card-missing-bios" title="구동 필수 바이오스 '${escapeHtml(neededBios)}' 누락됨 (바이오스 업로드 필요)">
@@ -462,7 +477,17 @@
         <h3 class="gba-card-title" title="${escapeHtml(game.title)}">${escapeHtml(game.title)}</h3>
         <div class="gba-card-meta">
           <span title="최근 플레이: ${game.last_played_at || '기록 없음'}">${lastPlayed}</span>
+          ${game.region_tag ? `<span title="지역 태그">${escapeHtml(game.region_tag)}</span>` : ''}
+          ${game.disc_number ? `<span title="디스크 번호">Disc ${escapeHtml(String(game.disc_number))}</span>` : ''}
         </div>
+        ${state.isAdmin ? `
+          <div class="gba-card-meta" style="margin-top: 6px; flex-wrap: wrap; gap: 6px;">
+            ${metaSource ? `<span title="메타 출처">출처: ${escapeHtml(metaSource)}</span>` : ''}
+            ${sourceSystem ? `<span title="판정 근거">근거: ${escapeHtml(sourceSystem)}</span>` : ''}
+            ${game.revision_tag ? `<span title="리비전 태그">Rev: ${escapeHtml(game.revision_tag)}</span>` : ''}
+            ${game.content_flags ? `<span title="콘텐츠 플래그">${escapeHtml(game.content_flags)}</span>` : ''}
+          </div>
+        ` : ''}
       </div>
 
       <div class="gba-card-footer">
@@ -2441,6 +2466,11 @@
       });
     }
 
+    $('gbaStatusFilterSelect')?.addEventListener('change', (e) => {
+      state.statusFilter = e.target.value || 'all';
+      renderGames();
+    });
+
     // 즐겨찾기 필터 토글 버튼
     $('gbaFavoriteFilterBtn')?.addEventListener('click', () => {
       state.isFavoriteOnly = !state.isFavoriteOnly;
@@ -2755,6 +2785,7 @@
 
       const q = ($('gbaHealthSearchInput')?.value || '').trim().toLowerCase();
       const list = activeHealthTab === 'incomplete' ? (healthData.incomplete_list || []) : (healthData.chd_list || []);
+      const confidenceLabel = (score) => metadataConfidenceLabel(score || 0);
       
       const filtered = list.filter((item) => {
         if (!q) return true;
@@ -2775,6 +2806,10 @@
       tbody.innerHTML = filtered.map((item) => {
         const isInc = activeHealthTab === 'incomplete';
         const badgeColor = isInc ? 'background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);' : 'background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);';
+        const metaInfo = [];
+        if (item.metadata_source) metaInfo.push(`출처: ${item.metadata_source}`);
+        if (item.metadata_confidence) metaInfo.push(`신뢰도: ${confidenceLabel(item.metadata_confidence)} (${item.metadata_confidence})`);
+        if (item.source_system) metaInfo.push(`근거: ${item.source_system}`);
         return `
           <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
             <td style="padding: 10px; font-weight: 600; color: var(--gba-text-main);">
@@ -2787,6 +2822,7 @@
               <span style="display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; ${badgeColor}">
                 ${escapeHtml(item.reason)}
               </span>
+              ${metaInfo.length ? `<div style="margin-top: 6px; font-size: 0.78rem; color: var(--gba-text-muted);">${escapeHtml(metaInfo.join(' · '))}</div>` : ''}
             </td>
           </tr>
         `;

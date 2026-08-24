@@ -53,6 +53,15 @@
         <button id="gbaFavoriteFilterBtn" class="gba-btn gba-btn-secondary gba-fav-filter-btn" title="즐겨찾기 게임만 보기">
           <i class="fa-regular fa-star"></i> <span>즐겨찾기</span>
         </button>
+        <select id="gbaStatusFilterSelect" class="gba-select gba-sort-select" title="상태 필터">
+          <option value="all">상태 전체</option>
+          <option value="pass">정상만</option>
+          <option value="bios_required">BIOS 필요</option>
+          <option value="parent_required">Parent 필요</option>
+          <option value="chd_required">CHD 필요</option>
+          <option value="incomplete">불완전</option>
+          <option value="bad_dump_or_unknown">재확인 필요</option>
+        </select>
         <button id="gbaHideIncompleteFilterBtn" class="gba-btn gba-btn-secondary" title="구동 가능한 100% 정상 게임만 보기 (불완전/CHD 롬 숨김)">
           <i class="fa-solid fa-circle-check"></i> <span>정상 롬만</span>
         </button>
