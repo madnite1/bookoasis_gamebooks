@@ -783,25 +783,73 @@ def _get_igdb_token(client_id, client_secret):
     return None
 
 
-def _fetch_igdb_artwork(raw_title, igdb_config):
-    """IGDB API를 질의하여 고화질 커버 아트 다운로드 (Key 설정 시에만 동작)"""
+def _build_igdb_search_title(raw_title):
+    clean_t = re.sub(r"[\(\[\{].*?[\)\]\}]", " ", str(raw_title or "")).strip()
+    clean_t = clean_t.replace("_", " ").replace("-", " ")
+    clean_t = re.sub(r"\b(rev|proto|beta|translation|hack|disc|disk)\b.*$", "", clean_t, flags=re.IGNORECASE).strip()
+    clean_t = re.sub(r"\s+", " ", clean_t).strip()
+    return clean_t or str(raw_title or "").strip()
+
+
+def _igdb_platform_tokens(platform_or_core):
+    key = str(platform_or_core or "").lower().strip()
+    mapping = {
+        "gba": {"game boy advance", "gba"},
+        "gb": {"game boy", "gb"},
+        "gbc": {"game boy color", "gbc"},
+        "snes": {"super nintendo", "snes", "super famicom"},
+        "nes": {"nes", "famicom"},
+        "n64": {"n64", "nintendo 64"},
+        "psx": {"ps1", "psx", "playstation"},
+        "ps1": {"ps1", "playstation"},
+        "psp": {"psp", "playstation portable"},
+        "nds": {"nds", "nintendo ds"},
+        "segamd": {"genesis", "mega drive"},
+        "genesis": {"genesis", "mega drive"},
+        "arcade": {"arcade"},
+        "mame2003": {"arcade"},
+        "neogeo": {"neo geo", "arcade"},
+        "neo-geo": {"neo geo", "arcade"},
+        "pce": {"pc engine", "turbografx"},
+        "saturn": {"saturn", "sega saturn"},
+    }
+    return mapping.get(key, {key} if key else set())
+
+
+def _score_igdb_candidate(candidate, platform_or_core):
+    score = 0
+    platforms = candidate.get("platforms") or []
+    tokens = _igdb_platform_tokens(platform_or_core)
+    if tokens:
+        for plat in platforms:
+            name = str(plat.get("name") or "").lower()
+            abbr = str(plat.get("abbreviation") or "").lower()
+            if any(token in name or token == abbr for token in tokens):
+                score += 20
+                break
+    if candidate.get("summary"):
+        score += 5
+    if candidate.get("genres"):
+        score += 5
+    return score
+
+
+def _fetch_igdb_game(raw_title, platform_or_core, igdb_config):
     client_id = igdb_config.get("igdb_client_id")
     client_secret = igdb_config.get("igdb_client_secret")
     if not client_id or not client_secret or not raw_title:
         return None
-
     token = _get_igdb_token(client_id, client_secret)
     if not token:
         return None
 
-    clean_t = re.sub(r"[\(\[\{].*?[\)\]\}]", "", raw_title).strip()
-    if not clean_t:
-        clean_t = raw_title
-
-    # IGDB Apicalypse 쿼리
+    clean_t = _build_igdb_search_title(raw_title)
     escaped_title = clean_t.replace('"', '\\"')
-    query_body = f'search "{escaped_title}"; fields name, cover.image_id, cover.url; limit 1;'
-
+    query_body = (
+        f'search "{escaped_title}"; '
+        'fields name,summary,genres.name,first_release_date,involved_companies.company.name,franchises.name,cover.image_id,cover.url,platforms.name,platforms.abbreviation; '
+        'limit 5;'
+    )
     try:
         req = urllib.request.Request(
             "https://api.igdb.com/v4/games",
@@ -817,25 +865,73 @@ def _fetch_igdb_artwork(raw_title, igdb_config):
             if resp.status == 200:
                 results = json.loads(resp.read().decode("utf-8"))
                 if results and isinstance(results, list):
-                    cover = results[0].get("cover")
-                    if cover:
-                        img_id = cover.get("image_id")
-                        if img_id:
-                            img_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{img_id}.jpg"
-                        else:
-                            raw_url = cover.get("url", "")
-                            img_url = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
-
-                        if img_url:
-                            img_req = urllib.request.Request(img_url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
-                            with urllib.request.urlopen(img_req, timeout=12) as img_resp:
-                                if img_resp.status == 200:
-                                    img_data = img_resp.read()
-                                    if img_data and len(img_data) > 512:
-                                        return img_data
+                    ranked = sorted(results, key=lambda item: _score_igdb_candidate(item, platform_or_core), reverse=True)
+                    return ranked[0]
     except Exception as e:
         logger.debug(f"[{SELF_ID}] IGDB query error: {e}")
+    return None
 
+
+def _fetch_igdb_metadata(raw_title, platform_or_core, igdb_config):
+    game = _fetch_igdb_game(raw_title, platform_or_core, igdb_config)
+    if not game:
+        return {}
+    genres = ", ".join(g.get("name", "") for g in (game.get("genres") or []) if g.get("name"))
+    companies = []
+    for item in game.get("involved_companies") or []:
+        comp = item.get("company") or {}
+        name = comp.get("name")
+        if name:
+            companies.append(name)
+    franchise = ""
+    franchises = game.get("franchises") or []
+    if franchises:
+        franchise = str(franchises[0].get("name") or "").strip()
+    release_year = ""
+    ts = game.get("first_release_date")
+    if ts:
+        try:
+            release_year = datetime.utcfromtimestamp(int(ts)).strftime("%Y")
+        except Exception:
+            release_year = ""
+    return {
+        "canonical_title": str(game.get("name") or "").strip(),
+        "genre": genres,
+        "developer": ", ".join(dict.fromkeys(companies)),
+        "publisher": ", ".join(dict.fromkeys(companies[:1])),
+        "description": str(game.get("summary") or "").strip(),
+        "release_year": release_year,
+        "franchise": franchise,
+        "metadata_source": "igdb",
+        "metadata_confidence": 55,
+    }
+
+
+def _fetch_igdb_artwork(raw_title, igdb_config):
+    """IGDB API를 질의하여 고화질 커버 아트 다운로드 (Key 설정 시에만 동작)"""
+    game = _fetch_igdb_game(raw_title, "", igdb_config)
+    if not game:
+        return None
+    cover = game.get("cover")
+    if not cover:
+        return None
+    img_id = cover.get("image_id")
+    if img_id:
+        img_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{img_id}.jpg"
+    else:
+        raw_url = cover.get("url", "")
+        img_url = ("https:" + raw_url) if raw_url.startswith("//") else raw_url
+    if not img_url:
+        return None
+    try:
+        img_req = urllib.request.Request(img_url, headers={"User-Agent": "BookOasis-GameBooks/1.2"})
+        with urllib.request.urlopen(img_req, timeout=12) as img_resp:
+            if img_resp.status == 200:
+                img_data = img_resp.read()
+                if img_data and len(img_data) > 512:
+                    return img_data
+    except Exception as e:
+        logger.debug(f"[{SELF_ID}] IGDB artwork error: {e}")
     return None
 
 
@@ -2511,6 +2607,22 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "igdb_client_secret": igdb_sec,
                 }
                 search_title = raw_title or os.path.splitext(filename)[0]
+                igdb_meta = _fetch_igdb_metadata(search_title, platform_or_core, igdb_conf)
+                if igdb_meta:
+                    self._db_execute(
+                        "UPDATE games SET genre = COALESCE(NULLIF(genre, ''), ?), developer = COALESCE(NULLIF(developer, ''), ?), publisher = COALESCE(NULLIF(publisher, ''), ?), description = COALESCE(NULLIF(description, ''), ?), release_year = COALESCE(NULLIF(release_year, ''), ?), metadata_source = COALESCE(NULLIF(metadata_source, ''), ?), metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence < ? THEN ? ELSE metadata_confidence END WHERE id = ?",
+                        (
+                            igdb_meta.get("genre") or "",
+                            igdb_meta.get("developer") or "",
+                            igdb_meta.get("publisher") or "",
+                            igdb_meta.get("description") or "",
+                            igdb_meta.get("release_year") or "",
+                            igdb_meta.get("metadata_source") or "igdb",
+                            igdb_meta.get("metadata_confidence") or 0,
+                            igdb_meta.get("metadata_confidence") or 0,
+                            game_id,
+                        ),
+                    )
                 art_bytes = _fetch_igdb_artwork(search_title, igdb_conf)
                 if art_bytes:
                     save_cover_path = os.path.join(covers_dir, f"{game_id}.jpg")
