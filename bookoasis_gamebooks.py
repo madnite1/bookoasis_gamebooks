@@ -531,6 +531,59 @@ def _calc_md5(file_path):
         return None
 
 
+def _calc_sha1(file_path):
+    """파일 SHA1 계산"""
+    try:
+        h = hashlib.sha1()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest().lower()
+    except Exception:
+        return None
+
+
+def _basic_normalize_title(text):
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    clean = re.sub(r"[\(\[\{].*?[\)\]\}]", " ", raw)
+    clean = clean.replace("_", " ").replace("-", " ")
+    clean = re.sub(r"[^0-9A-Za-z가-힣:!'&+,./\s]", " ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean.lower()
+
+
+def _collect_identity_fields(file_path, rom_info, clean_title="", size_bytes=0):
+    ext = os.path.splitext(str(file_path or ""))[1].lower()
+    serial_code = str(rom_info.get("serial_code") or rom_info.get("game_code") or "").strip()
+    if ext in (".cue", ".bin", ".iso", ".img", ".chd", ".pbp", ".gdi") and not serial_code:
+        serial_code = _scan_cd_serial(file_path) or ""
+
+    rom_crc32 = ""
+    rom_md5 = ""
+    rom_sha1 = ""
+    size_bytes = int(size_bytes or 0)
+    should_hash = size_bytes > 0 and size_bytes <= 64 * 1024 * 1024 and os.path.isfile(file_path)
+    if should_hash:
+        rom_crc32 = _calc_crc32(file_path) or ""
+        rom_md5 = _calc_md5(file_path) or ""
+        rom_sha1 = _calc_sha1(file_path) or ""
+
+    normalized_title = _basic_normalize_title(clean_title or rom_info.get("title") or os.path.basename(file_path))
+    source_system = str(rom_info.get("source_system") or "filename").strip() or "filename"
+    return {
+        "rom_crc32": rom_crc32,
+        "rom_md5": rom_md5,
+        "rom_sha1": rom_sha1,
+        "serial_code": serial_code,
+        "normalized_title": normalized_title,
+        "source_system": source_system,
+        "metadata_source": str(rom_info.get("metadata_source") or "").strip(),
+        "metadata_confidence": int(rom_info.get("metadata_confidence") or 0),
+    }
+
+
 def _fetch_screenscraper_artwork(file_path, platform_or_core, filename, sc_config):
     """ScreenScraper API를 질의하여 롬 아트워크 다운로드 (Key 설정 시에만 동작)"""
     devid = sc_config.get("ss_devid")
@@ -1467,6 +1520,10 @@ def _detect_rom_info(file_path):
         "matched_count": 0,
         "total_roms": 0,
         "match_rate": 0.0,
+        "serial_code": "",
+        "source_system": "filename",
+        "metadata_source": "",
+        "metadata_confidence": 0,
     }
     ext = os.path.splitext(file_path)[1].lower()
     raw_data = None
@@ -1818,6 +1875,8 @@ def _detect_rom_info(file_path):
                 info["core"] = "psx"
                 info["platform"] = "PS1"
                 info["game_code"] = serial
+                info["serial_code"] = serial
+                info["source_system"] = "serial"
         try:
             with open(file_path, "rb") as f:
                 raw_data = f.read(0x10000)
@@ -2199,6 +2258,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     ("needed_bios", "TEXT"),
                     ("health_status", "TEXT DEFAULT 'pass'"),
                     ("missing_roms", "TEXT DEFAULT ''"),
+                    ("rom_crc32", "TEXT DEFAULT ''"),
+                    ("rom_md5", "TEXT DEFAULT ''"),
+                    ("rom_sha1", "TEXT DEFAULT ''"),
+                    ("serial_code", "TEXT DEFAULT ''"),
+                    ("normalized_title", "TEXT DEFAULT ''"),
+                    ("source_system", "TEXT DEFAULT ''"),
+                    ("metadata_source", "TEXT DEFAULT ''"),
+                    ("metadata_confidence", "INTEGER DEFAULT 0"),
                 ):
                     try:
                         conn.execute(f"ALTER TABLE games ADD COLUMN {col} {ctype}")
@@ -2504,6 +2571,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     target_for_kor = mapped_header or raw_name
 
                 clean_title = _resolve_korean_game_title(info["filename"], target_for_kor)
+                identity_info = _collect_identity_fields(info["file_path"], rom_info, clean_title, info["size_bytes"])
 
                 return {
                     "gid": gid,
@@ -2511,6 +2579,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "rom_info": rom_info,
                     "clean_title": clean_title,
                     "mapped_header": mapped_header,
+                    "identity_info": identity_info,
                 }
             except Exception as ex:
                 logger.debug(f"[{SELF_ID}] Process single rom error ({info.get('filename')}): {ex}")
@@ -2533,6 +2602,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 rom_info = res["rom_info"]
                 clean_title = res["clean_title"]
                 mapped_header = res["mapped_header"]
+                identity_info = res.get("identity_info") or {}
 
                 curr_file_path = info["file_path"]
                 curr_dir = os.path.dirname(os.path.abspath(curr_file_path))
@@ -2705,8 +2775,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 try:
                     if gid not in existing_games:
                         self._db_execute(
-                            """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 gid,
                                 info["filename"],
@@ -2723,6 +2793,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 rom_info.get("needed_bios") or "",
                                 health_status,
                                 missing_roms_str,
+                                identity_info.get("rom_crc32") or "",
+                                identity_info.get("rom_md5") or "",
+                                identity_info.get("rom_sha1") or "",
+                                identity_info.get("serial_code") or "",
+                                identity_info.get("normalized_title") or "",
+                                identity_info.get("source_system") or "",
+                                identity_info.get("metadata_source") or "",
+                                identity_info.get("metadata_confidence") or 0,
                             ),
                         )
                         new_games_added.append(clean_title or info["filename"])
@@ -2736,8 +2814,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             ))
                     else:
                         self._db_execute(
-                            "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ?, game_code = ?, needed_bios = ?, health_status = ?, missing_roms = ?, cover_path = COALESCE(cover_path, ?) WHERE id = ?",
-                            (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, rom_info["game_code"], rom_info.get("needed_bios") or "", health_status, missing_roms_str, existing_cover_file, gid),
+                            "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ?, game_code = ?, needed_bios = ?, health_status = ?, missing_roms = ?, rom_crc32 = ?, rom_md5 = ?, rom_sha1 = ?, serial_code = ?, normalized_title = ?, source_system = ?, metadata_source = COALESCE(NULLIF(metadata_source, ''), ?), metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence = 0 THEN ? ELSE metadata_confidence END, cover_path = COALESCE(cover_path, ?) WHERE id = ?",
+                            (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, rom_info["game_code"], rom_info.get("needed_bios") or "", health_status, missing_roms_str, identity_info.get("rom_crc32") or "", identity_info.get("rom_md5") or "", identity_info.get("rom_sha1") or "", identity_info.get("serial_code") or "", identity_info.get("normalized_title") or "", identity_info.get("source_system") or "", identity_info.get("metadata_source") or "", identity_info.get("metadata_confidence") or 0, existing_cover_file, gid),
                         )
                         existing_entry = existing_games.get(gid)
                         current_cover = existing_entry.get("cover_path") if existing_entry else None
@@ -3585,6 +3663,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                               g.size_bytes, g.added_at, g.cover_path, g.core, g.platform, g.needed_bios,
                               COALESCE(g.health_status, 'pass') AS health_status,
                               COALESCE(g.missing_roms, '') AS missing_roms,
+                              COALESCE(g.rom_crc32, '') AS rom_crc32,
+                              COALESCE(g.rom_md5, '') AS rom_md5,
+                              COALESCE(g.rom_sha1, '') AS rom_sha1,
+                              COALESCE(g.serial_code, '') AS serial_code,
+                              COALESCE(g.normalized_title, '') AS normalized_title,
+                              COALESCE(g.source_system, '') AS source_system,
+                              COALESCE(g.metadata_source, '') AS metadata_source,
+                              COALESCE(g.metadata_confidence, 0) AS metadata_confidence,
                               COALESCE(u.is_favorite, 0) AS is_favorite,
                               u.last_played_at,
                               COALESCE(u.play_count, 0) AS play_count
