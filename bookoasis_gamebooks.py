@@ -1295,6 +1295,74 @@ def _is_optional_runtime_bios(name):
     req = _normalize_required_archive(name)
     return req.startswith("scph")
 
+
+def _guess_arcade_required_chd(game_name, description=""):
+    stem = re.sub(r"[^a-z0-9_\-]", "", str(game_name or "").strip().lower())
+    desc = str(description or "").lower()
+    if not stem:
+        return ""
+    chd_prefixes = ("bm", "ddr", "popn", "gfdm", "jubeat")
+    chd_keywords = ("beatmania", "dance dance revolution", "guitar freaks", "drummania", "jubeat", "pop'n music")
+    if stem.startswith(chd_prefixes) or any(k in desc for k in chd_keywords):
+        return f"{stem}.chd"
+    return ""
+
+
+def _build_arcade_dat_result(gname, desc, romof, cloneof, sys_name, plat, matched_count, total_roms):
+    total_roms = int(total_roms or 0)
+    matched_count = int(matched_count or 0)
+    match_rate = round((matched_count / total_roms * 100), 1) if total_roms > 0 else 100.0
+    romof_name = _normalize_required_archive(romof)
+    cloneof_name = _normalize_required_archive(cloneof)
+    required_parent = cloneof_name or ""
+    if not required_parent and romof_name and romof_name != f"{str(gname or '').strip().lower()}.zip" and not _looks_like_bios_requirement(romof_name):
+        required_parent = romof_name
+    required_bios = romof_name if _looks_like_bios_requirement(romof_name) else ""
+    return {
+        "name": gname,
+        "description": desc,
+        "romof": romof,
+        "cloneof": cloneof,
+        "system_name": sys_name,
+        "platform": plat,
+        "matched_count": matched_count,
+        "total_roms": total_roms,
+        "match_rate": match_rate,
+        "is_non_merged": (match_rate >= 75.0),
+        "required_parent": required_parent,
+        "clone_of": cloneof_name,
+        "required_bios": required_bios,
+        "required_chd": _guess_arcade_required_chd(gname, desc),
+        "missing_required_roms": [],
+    }
+
+
+def _has_valid_zip_payload(file_path, min_entries=1, min_total_bytes=1024):
+    if not file_path or not os.path.exists(file_path):
+        return False
+    if not zipfile.is_zipfile(file_path):
+        return False
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            entries = [i for i in zf.infolist() if not i.is_dir() and not i.filename.startswith((".", "__MACOSX"))]
+            if len(entries) < min_entries:
+                return False
+            return sum(max(0, i.file_size) for i in entries) >= min_total_bytes
+    except Exception:
+        return False
+
+
+def _is_required_bios_available(required_bios, available_bios_names, bios_dir):
+    req = _normalize_required_archive(required_bios)
+    if not req or _is_optional_runtime_bios(req):
+        return True
+    available = {str(x or "").lower() for x in (available_bios_names or [])}
+    if req not in available:
+        return False
+    if req not in {"neogeo.zip", "pgm.zip", "acpsx.zip"}:
+        return True
+    return _has_valid_zip_payload(os.path.join(bios_dir, req), min_entries=1, min_total_bytes=1024)
+
 def _query_arcade_dat(stem, internal_crcs=None):
     """내장된 All-In-One DAT DB (Arcade + SNES + GBA + NES + MD + PCE 등) 조회"""
     dat_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arcade_dat.db")
@@ -1326,18 +1394,7 @@ def _query_arcade_dat(stem, internal_crcs=None):
             if exact_best:
                 gid, gname, desc, romof, cloneof, sys_name, plat, matched_cnt, total_roms = exact_best
                 conn.close()
-                return {
-                    "name": gname,
-                    "description": desc,
-                    "romof": romof,
-                    "cloneof": cloneof,
-                    "system_name": sys_name,
-                    "platform": plat,
-                    "matched_count": matched_cnt,
-                    "total_roms": total_roms,
-                    "match_rate": 100.0,
-                    "is_non_merged": True,
-                }
+                return _build_arcade_dat_result(gname, desc, romof, cloneof, sys_name, plat, matched_cnt, total_roms)
 
         # 2. 파일명 stem 기반 조회 (단, internal_crcs가 제공된 경우 최소 1개 이상 CRC가 일치해야 채택)
         if internal_crcs:
@@ -1357,38 +1414,15 @@ def _query_arcade_dat(stem, internal_crcs=None):
                 cursor.execute("SELECT COUNT(*) FROM roms WHERE game_id = ?", (gid,))
                 cnt_row = cursor.fetchone()
                 total_roms = cnt_row[0] if cnt_row else 0
-                match_rate = (matched_count / total_roms * 100) if total_roms > 0 else 100
                 conn.close()
-                return {
-                    "name": gname,
-                    "description": desc,
-                    "romof": romof,
-                    "cloneof": cloneof,
-                    "system_name": sys_name,
-                    "platform": plat,
-                    "matched_count": matched_count,
-                    "total_roms": total_roms,
-                    "match_rate": round(match_rate, 1),
-                    "is_non_merged": (match_rate >= 75.0),
-                }
+                return _build_arcade_dat_result(gname, desc, romof, cloneof, sys_name, plat, matched_count, total_roms)
         else:
             cursor.execute("SELECT id, name, description, romof, cloneof, system_name, platform FROM games WHERE name = ?", (clean_stem,))
             row = cursor.fetchone()
             if row:
                 gid, gname, desc, romof, cloneof, sys_name, plat = row
                 conn.close()
-                return {
-                    "name": gname,
-                    "description": desc,
-                    "romof": romof,
-                    "cloneof": cloneof,
-                    "system_name": sys_name,
-                    "platform": plat,
-                    "matched_count": 0,
-                    "total_roms": 1,
-                    "match_rate": 100.0,
-                    "is_non_merged": True,
-                }
+                return _build_arcade_dat_result(gname, desc, romof, cloneof, sys_name, plat, 0, 1)
 
         # 3. 내부 CRC32 부분 매칭 조회 (단일 롬 또는 멀티 칩 대조)
         if internal_crcs:
@@ -1409,20 +1443,8 @@ def _query_arcade_dat(stem, internal_crcs=None):
                 cursor.execute("SELECT COUNT(*) FROM roms WHERE game_id = ?", (gid,))
                 cnt_row = cursor.fetchone()
                 total_roms = cnt_row[0] if cnt_row else 0
-                match_rate = (matched_cnt / total_roms * 100) if total_roms > 0 else 0
                 conn.close()
-                return {
-                    "name": gname,
-                    "description": desc,
-                    "romof": romof,
-                    "cloneof": cloneof,
-                    "system_name": sys_name,
-                    "platform": plat,
-                    "matched_count": matched_cnt,
-                    "total_roms": total_roms,
-                    "match_rate": round(match_rate, 1),
-                    "is_non_merged": (match_rate >= 75.0),
-                }
+                return _build_arcade_dat_result(gname, desc, romof, cloneof, sys_name, plat, matched_cnt, total_roms)
 
         conn.close()
     except Exception as e:
@@ -1441,6 +1463,10 @@ def _detect_rom_info(file_path):
         "maker_code": "",
         "needed_bios": "",
         "parent_hint": "",
+        "required_chd": "",
+        "matched_count": 0,
+        "total_roms": 0,
+        "match_rate": 0.0,
     }
     ext = os.path.splitext(file_path)[1].lower()
     raw_data = None
@@ -1520,14 +1546,12 @@ def _detect_rom_info(file_path):
                                 info["game_code"] = dat_match["name"]
                             if dat_match.get("description"):
                                 info["title"] = dat_match["description"]
-                            romof_name = _normalize_required_archive(dat_match.get("romof"))
-                            cloneof_name = _normalize_required_archive(dat_match.get("cloneof"))
-                            if cloneof_name:
-                                info["parent_hint"] = cloneof_name
-                            elif romof_name and romof_name != f"{stem}.zip" and not _looks_like_bios_requirement(romof_name):
-                                info["parent_hint"] = romof_name
-                            if romof_name and _looks_like_bios_requirement(romof_name):
-                                info["needed_bios"] = romof_name
+                            info["parent_hint"] = dat_match.get("required_parent") or ""
+                            info["needed_bios"] = dat_match.get("required_bios") or ""
+                            info["required_chd"] = dat_match.get("required_chd") or ""
+                            info["matched_count"] = int(dat_match.get("matched_count") or 0)
+                            info["total_roms"] = int(dat_match.get("total_roms") or 0)
+                            info["match_rate"] = float(dat_match.get("match_rate") or 0.0)
                         # 3. 내장 아케이드 정적 사전(KNOWN_ARCADE_TITLES) 보조 대조
                         elif stem in KNOWN_ARCADE_TITLES:
                             info["core"] = "arcade"
@@ -1734,14 +1758,12 @@ def _detect_rom_info(file_path):
 
                             if dat_match.get("description"):
                                 info["title"] = dat_match["description"]
-                            romof_name = _normalize_required_archive(dat_match.get("romof"))
-                            cloneof_name = _normalize_required_archive(dat_match.get("cloneof"))
-                            if cloneof_name:
-                                info["parent_hint"] = cloneof_name
-                            elif romof_name and romof_name != f"{stem}.zip" and not _looks_like_bios_requirement(romof_name):
-                                info["parent_hint"] = romof_name
-                            if romof_name and _looks_like_bios_requirement(romof_name):
-                                info["needed_bios"] = romof_name
+                            info["parent_hint"] = dat_match.get("required_parent") or ""
+                            info["needed_bios"] = dat_match.get("required_bios") or ""
+                            info["required_chd"] = dat_match.get("required_chd") or ""
+                            info["matched_count"] = int(dat_match.get("matched_count") or 0)
+                            info["total_roms"] = int(dat_match.get("total_roms") or 0)
+                            info["match_rate"] = float(dat_match.get("match_rate") or 0.0)
                         else:
                             # 2. 콘솔 헤더 전수 분석
                             for fname in extracted_files:
@@ -1781,7 +1803,7 @@ def _detect_rom_info(file_path):
                                     info["title"] = KNOWN_ARCADE_TITLES.get(stem, stem)
                                     if stem in KNOWN_NEOGEO_STEMS:
                                         info["needed_bios"] = "neogeo.zip"
-                            info["title"] = KNOWN_ARCADE_TITLES[stem]
+                            info["title"] = KNOWN_ARCADE_TITLES.get(stem, info.get("title") or stem)
         except Exception as e:
             logger.debug(f"[{SELF_ID}] 7z inspect error: {e}")
     else:
@@ -2632,15 +2654,17 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 gcode = rom_info.get("game_code") or ""
                 required_bios = _normalize_required_archive(rom_info.get("needed_bios") or "")
                 required_parent = _normalize_required_archive(rom_info.get("parent_hint") or "")
+                required_chd = rom_info.get("required_chd") or ""
                 is_arcade = (r_core in ("arcade", "mame2003") or r_plat in ("Arcade", "Neo-Geo"))
+                bios_ready = _is_required_bios_available(required_bios, available_bios_names, bios_dir)
 
-                if is_arcade and stem.startswith(("bm", "ddr", "popn", "gfdm", "jubeat")):
+                if required_chd:
                     health_status = "chd_required"
-                    missing_roms_str = "CHD 디스크 이미지 필요"
+                    missing_roms_str = required_chd
                 elif required_parent and required_parent not in available_rom_names:
                     health_status = "parent_required"
                     missing_roms_str = required_parent
-                elif required_bios and not _is_optional_runtime_bios(required_bios) and required_bios not in available_bios_names:
+                elif required_bios and not bios_ready:
                     health_status = "bios_required"
                     missing_roms_str = required_bios
                 elif is_arcade and curr_file_path.endswith(".zip"):
