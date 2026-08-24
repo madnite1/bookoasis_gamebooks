@@ -1046,6 +1046,8 @@ SUPPORTED_SYSTEMS = {
     ".d64": {"core": "c64", "platform": "C64", "name": "Commodore 64"},
 }
 
+DISK_IMAGE_EXTS = {".bin", ".iso", ".img", ".chd", ".pbp", ".cue", ".gdi"}
+
 KNOWN_BIOS_STEMS = {
     "22vp931", "3dobios", "acpsx", "airlbios", "aleck64", "alg_bios", "allied", "ar_bios",
     "aristmk5", "aristmk6", "atarisy1", "atluspsx", "atpsx", "awbios", "bios_cd_e", "bios_cd_j",
@@ -1486,6 +1488,78 @@ def _scan_cd_serial(file_path):
     return None
 
 
+def _parse_cue_tracks(file_path):
+    tracks = []
+    current_file = ""
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                file_match = re.match(r'^FILE\s+"([^"]+)"\s+.+$', line, re.IGNORECASE)
+                if file_match:
+                    current_file = file_match.group(1).strip()
+                    continue
+                track_match = re.match(r'^TRACK\s+(\d+)\s+(.+)$', line, re.IGNORECASE)
+                if track_match:
+                    tracks.append({
+                        "track": int(track_match.group(1)),
+                        "mode": track_match.group(2).strip(),
+                        "file": current_file,
+                    })
+    except Exception:
+        return []
+    return tracks
+
+
+def _resolve_disk_sidecars(file_path):
+    ext = os.path.splitext(str(file_path or ""))[1].lower()
+    base_dir = os.path.dirname(os.path.abspath(file_path)) if file_path else ""
+    missing = []
+    details = {"missing_files": [], "serial_code": "", "disc_count": 1}
+    if ext == ".cue":
+        tracks = _parse_cue_tracks(file_path)
+        details["disc_count"] = max(1, len(tracks))
+        for track in tracks:
+            rel_name = str(track.get("file") or "").strip()
+            if not rel_name:
+                continue
+            if not os.path.exists(os.path.join(base_dir, rel_name)):
+                missing.append(rel_name)
+        details["missing_files"] = missing
+        return details
+    if ext == ".gdi":
+        details["disc_count"] = 0
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = [line.strip() for line in f if line.strip()]
+            if lines:
+                try:
+                    details["disc_count"] = int(lines[0])
+                except Exception:
+                    details["disc_count"] = max(1, len(lines) - 1)
+            for line in lines[1:]:
+                parts = line.split()
+                if len(parts) >= 5:
+                    rel_name = parts[4].strip('"')
+                    if not os.path.exists(os.path.join(base_dir, rel_name)):
+                        missing.append(rel_name)
+        except Exception:
+            pass
+        details["disc_count"] = max(1, details["disc_count"])
+        details["missing_files"] = missing
+        return details
+    if ext in (".bin", ".img"):
+        cue_candidate = os.path.splitext(file_path)[0] + ".cue"
+        if os.path.exists(cue_candidate):
+            cue_details = _resolve_disk_sidecars(cue_candidate)
+            cue_details["serial_code"] = cue_details.get("serial_code") or _scan_cd_serial(file_path) or ""
+            return cue_details
+    details["serial_code"] = _scan_cd_serial(file_path) or ""
+    return details
+
+
 def _is_bios_file(file_or_path):
     """주요 에뮬레이터 및 아케이드(MAME/FBNeo) 기판 바이오스/디바이스 파일 여부 동적 및 정적 분석"""
     fname = os.path.basename(file_or_path).lower()
@@ -1722,6 +1796,8 @@ def _detect_rom_info(file_path):
         "source_system": "filename",
         "metadata_source": "",
         "metadata_confidence": 0,
+        "disk_missing_files": [],
+        "disc_count": 1,
     }
     ext = os.path.splitext(file_path)[1].lower()
     raw_data = None
@@ -2066,15 +2142,33 @@ def _detect_rom_info(file_path):
             sys_info = SUPPORTED_SYSTEMS[ext]
             info["core"] = sys_info["core"]
             info["platform"] = sys_info["platform"]
-        elif ext in (".bin", ".iso", ".img", ".chd", ".pbp"):
+        elif ext in DISK_IMAGE_EXTS:
+            disk_details = _resolve_disk_sidecars(file_path)
+            info["disk_missing_files"] = disk_details.get("missing_files") or []
+            info["disc_count"] = int(disk_details.get("disc_count") or 1)
             # CD/디스크 이미지 시리얼 스캔 (PS1 / PBP 등)
-            serial = _scan_cd_serial(file_path)
+            serial = disk_details.get("serial_code") or _scan_cd_serial(file_path)
             if serial:
-                info["core"] = "psx"
-                info["platform"] = "PS1"
+                serial_upper = serial.upper()
+                if serial_upper.startswith(("MK", "GS", "T-", "GS-")) or "T-" in serial_upper:
+                    info["core"] = "saturn"
+                    info["platform"] = "Saturn"
+                    info["needed_bios"] = "saturn_bios.bin"
+                elif ext == ".chd" and any(tok in os.path.basename(file_path).lower() for tok in ("pce", "tg16", "supercd", "pcengine")):
+                    info["core"] = "pce"
+                    info["platform"] = "PCECD"
+                    info["needed_bios"] = "syscard3.pce"
+                else:
+                    info["core"] = "psx"
+                    info["platform"] = "PS1"
+                    info["needed_bios"] = "scph5501.bin"
                 info["game_code"] = serial
                 info["serial_code"] = serial
                 info["source_system"] = "serial"
+            elif ext == ".gdi":
+                info["core"] = "dreamcast"
+                info["platform"] = "Dreamcast"
+                info["source_system"] = "sidecar"
         try:
             with open(file_path, "rb") as f:
                 raw_data = f.read(0x10000)
@@ -2710,7 +2804,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         bios_dir = os.path.abspath(self._get_bios_dir())
         covers_dir = os.path.abspath(self._get_covers_dir())
 
-        allowed_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z"}
+        allowed_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z", ".cue", ".gdi"}
         found_files = {}
 
         for sdir in scan_dirs:
@@ -2814,6 +2908,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     target_for_kor = mapped_header or raw_name
 
                 clean_title = _resolve_korean_game_title(info["filename"], target_for_kor)
+                disk_missing_files = rom_info.get("disk_missing_files") or []
+                if disk_missing_files:
+                    rom_info["source_system"] = rom_info.get("source_system") or "sidecar"
                 identity_info = _collect_identity_fields(info["file_path"], rom_info, clean_title, info["size_bytes"])
 
                 return {
@@ -2971,7 +3068,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 is_arcade = (r_core in ("arcade", "mame2003") or r_plat in ("Arcade", "Neo-Geo"))
                 bios_ready = _is_required_bios_available(required_bios, available_bios_names, bios_dir)
 
-                if required_chd:
+                disk_missing_files = rom_info.get("disk_missing_files") or []
+                if disk_missing_files:
+                    health_status = "incomplete"
+                    missing_roms_str = json.dumps(disk_missing_files[:6], ensure_ascii=False)
+                elif required_chd:
                     health_status = "chd_required"
                     missing_roms_str = required_chd
                 elif required_parent and required_parent not in available_rom_names:
@@ -3533,7 +3634,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         safe_filename = re.sub(r"[^\w\.\-\(\) ]", "_", raw_filename)
         ext = os.path.splitext(safe_filename)[1].lower()
 
-        allowed_rom_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z", ".bin", ".rom"}
+        allowed_rom_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z", ".bin", ".rom", ".cue", ".gdi", ".iso", ".img", ".chd"}
         allowed_img_exts = {".png", ".jpg", ".jpeg", ".webp"}
 
         if upload_type == "bios":
@@ -3708,10 +3809,18 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         # MD / Genesis
         elif ext in (".md", ".gen", ".smd"):
             detected_platform = "Genesis"
-        # PS1 / Saturn
-        elif ext in (".iso", ".chd", ".cue", ".pbp"):
-            detected_platform = "PS1"
-            needed_bios = "scph5501.bin"
+        # PS1 / Saturn / Dreamcast / PCE-CD
+        elif ext in (".iso", ".chd", ".cue", ".pbp", ".gdi"):
+            if ext == ".gdi":
+                detected_platform = "Dreamcast"
+            elif ext == ".cue":
+                detected_platform = "PS1/Saturn (serial 확인 권장)"
+            elif ext == ".chd" and any(tok in stem for tok in ("pce", "tg16", "supercd", "pcengine")):
+                detected_platform = "PCECD"
+                needed_bios = "syscard3.pce"
+            else:
+                detected_platform = "PS1"
+                needed_bios = "scph5501.bin"
         elif ext == ".zip":
             # 아케이드 롬셋 DAT DB 사전 정밀 분석
             dat_match = _query_arcade_dat(stem)
