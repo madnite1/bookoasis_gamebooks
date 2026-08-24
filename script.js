@@ -14,7 +14,6 @@
     category: 'all',
     sort: localStorage.getItem('gba_library_sort') || 'newest',
     isFavoriteOnly: false,
-    isPassOnly: null,
     statusFilter: 'all',
     searchQuery: '',
     userId: 1,
@@ -23,7 +22,6 @@
       cloud_save_enabled: true,
       auto_save_interval_sec: 60,
       extra_roms_path: '',
-      show_runnable_only: false,
     },
     activeGame: null,
     autoSaveIntervalId: null,
@@ -63,18 +61,6 @@
 
   // DOM 헬퍼
   const $ = (id) => document.getElementById(id);
-
-  function syncPassOnlyFilterUI() {
-    const enabled = !!state.isPassOnly;
-    const btn = $('gbaHideIncompleteFilterBtn');
-    if (btn) {
-      btn.classList.toggle('active', enabled);
-    }
-    const settingToggle = $('gbaSettingPassOnly');
-    if (settingToggle) {
-      settingToggle.checked = enabled;
-    }
-  }
 
   // --------------------------------------------------------------------------
   // API 통신 헬퍼
@@ -118,14 +104,10 @@
         if (data.config) {
           state.config = Object.assign(state.config, data.config);
         }
-        if (state.isPassOnly === null || state.isPassOnly === undefined) {
-          state.isPassOnly = !!state.config.show_runnable_only;
-        }
 
         state.available_bios = data.available_bios || [];
 
         state.isAdmin = !!data.is_admin;
-        syncPassOnlyFilterUI();
 
         // 관리자 전용 UI 제어 (ROM 업로드, 바이오스 업로드, 홈브류 허브, 설정)
         document.querySelectorAll('.gba-admin-only').forEach((el) => {
@@ -233,8 +215,6 @@
         // 즐겨찾기 단독 필터
         if (state.isFavoriteOnly && !g.is_favorite) return false;
 
-        // 100% 정상 구동 롬만 보기 필터
-        if (state.isPassOnly && g.health_status !== 'pass') return false;
         if (state.statusFilter !== 'all' && (g.health_status || 'pass') !== state.statusFilter) return false;
 
         // 기종 드롭다운 카테고리 필터
@@ -2489,12 +2469,6 @@
       renderGames();
     });
 
-    $('gbaHideIncompleteFilterBtn')?.addEventListener('click', () => {
-      state.isPassOnly = !state.isPassOnly;
-      syncPassOnlyFilterUI();
-      renderGames();
-    });
-
     // 무료 홈브류 모달 바인딩
     $('gbaHomebrewBtn')?.addEventListener('click', openHomebrewModal);
     $('gbaEmptyHomebrewBtn')?.addEventListener('click', openHomebrewModal);
@@ -2994,7 +2968,6 @@
     // 설정 모달 열기 & 저장
     $('gbaSettingsBtn').addEventListener('click', () => {
       $('gbaSettingCloudSave').checked = state.config.cloud_save_enabled;
-      $('gbaSettingPassOnly').checked = !!state.isPassOnly;
       $('gbaSettingInterval').value = state.config.auto_save_interval_sec;
       $('gbaSettingExtraPath').value = state.config.extra_roms_path || '';
       $('gbaSettingCoversPath').value = state.config.covers_path || '';
@@ -3014,7 +2987,6 @@
       const coversPath = $('gbaSettingCoversPath').value.trim();
       const biosPath = $('gbaSettingBiosPath').value.trim();
       const cloudSave = $('gbaSettingCloudSave').checked ? '1' : '0';
-      const showRunnableOnly = $('gbaSettingPassOnly').checked ? '1' : '0';
       const interval = $('gbaSettingInterval').value.trim();
       const saveBtn = $('gbaSettingsSaveBtn');
 
@@ -3103,7 +3075,6 @@
           covers_path: coversPath,
           bios_path: biosPath,
           cloud_save_enabled: cloudSave,
-          show_runnable_only: showRunnableOnly,
           auto_save_interval_sec: interval,
         });
 
@@ -3112,10 +3083,7 @@
           state.config.covers_path = coversPath;
           state.config.bios_path = biosPath;
           state.config.cloud_save_enabled = cloudSave === '1';
-          state.config.show_runnable_only = showRunnableOnly === '1';
-          state.isPassOnly = state.config.show_runnable_only;
           state.config.auto_save_interval_sec = parseInt(interval, 10) || 60;
-          syncPassOnlyFilterUI();
           renderGames();
           $('gbaSettingsModal').style.display = 'none';
 

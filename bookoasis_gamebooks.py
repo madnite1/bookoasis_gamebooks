@@ -4147,7 +4147,6 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "is_admin": _is_current_user_admin(),
                     "config": {
                         "cloud_save_enabled": str(self._get_setting("CLOUD_SAVE_ENABLED", "1")).lower() in ("1", "true", "yes", "on"),
-                        "show_runnable_only": str(self._get_setting("SHOW_RUNNABLE_ONLY", "0")).lower() in ("1", "true", "yes", "on"),
                         "auto_save_interval_sec": int(self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")),
                         "extra_roms_path": str(self._get_setting("EXTRA_ROMS_PATH", "") or "").strip(),
                         "covers_path": str(self._get_setting("COVERS_PATH", "") or "").strip(),
@@ -4574,7 +4573,6 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 covers_path = str(_get_val("covers_path", "")).strip()
                 bios_path = str(_get_val("bios_path", "")).strip()
                 cloud_save_raw = _get_val("cloud_save_enabled", "1")
-                show_runnable_only_raw = _get_val("show_runnable_only", "0")
                 interval_raw = _get_val("auto_save_interval_sec", "60")
 
                 ss_devid = str(_get_val("ss_devid", "")).strip()
@@ -4585,7 +4583,6 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 igdb_client_secret = str(_get_val("igdb_client_secret", "")).strip()
 
                 cloud_save = True if str(cloud_save_raw).lower() in ("1", "true", "yes", "on") else False
-                show_runnable_only = True if str(show_runnable_only_raw).lower() in ("1", "true", "yes", "on") else False
                 try:
                     interval = int(interval_raw)
                 except Exception:
@@ -4598,7 +4595,6 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 self._set_setting("COVERS_PATH", covers_path)
                 self._set_setting("BIOS_PATH", bios_path)
                 self._set_setting("CLOUD_SAVE_ENABLED", cloud_save)
-                self._set_setting("SHOW_RUNNABLE_ONLY", show_runnable_only)
                 self._set_setting("AUTO_SAVE_INTERVAL_SEC", interval)
                 self._set_setting("SS_DEVID", ss_devid)
                 self._set_setting("SS_DEVPASSWORD", ss_devpassword)

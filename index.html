@@ -62,9 +62,6 @@
           <option value="incomplete">불완전</option>
           <option value="bad_dump_or_unknown">재확인 필요</option>
         </select>
-        <button id="gbaHideIncompleteFilterBtn" class="gba-btn gba-btn-secondary" title="구동 가능한 100% 정상 게임만 보기 (불완전/CHD 롬 숨김)">
-          <i class="fa-solid fa-circle-check"></i> <span>정상 롬만</span>
-        </button>
       </div>
 
       <!-- 액션 버튼들 -->
@@ -218,15 +215,6 @@
             <span class="gba-slider"></span>
           </label>
           <small class="gba-help-text">게임 플레이 중 세이브(.sav / .state)를 서버(plugins/data/bookoasis_gamebooks/saves/user_{id}/)에 유저별로 실시간 보관합니다.</small>
-        </div>
-
-        <div class="gba-form-group">
-          <label class="gba-label">무결성 진단에서 정상 구동 가능한 것들만 표시</label>
-          <label class="gba-toggle-switch">
-            <input type="checkbox" id="gbaSettingPassOnly">
-            <span class="gba-slider"></span>
-          </label>
-          <small class="gba-help-text">켜면 라이브러리 목록에서 칩셋 누락 / CHD 필요 항목을 기본으로 숨깁니다.</small>
         </div>
 
         <div class="gba-form-group">
