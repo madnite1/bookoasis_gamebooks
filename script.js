@@ -3170,9 +3170,18 @@
     $('gbaSettingsBtn').addEventListener('click', () => {
       $('gbaSettingCloudSave').checked = state.config.cloud_save_enabled;
       $('gbaSettingInterval').value = state.config.auto_save_interval_sec;
-      $('gbaSettingExtraPath').value = state.config.extra_roms_path || '';
-      $('gbaSettingCoversPath').value = state.config.covers_path || '';
-      $('gbaSettingBiosPath').value = state.config.bios_path || '';
+      if ($('gbaSettingEmulatorjsRoot')) {
+        $('gbaSettingEmulatorjsRoot').value = state.config.emulatorjs_root || '/mnt/gdrive/emulatorjs';
+      }
+      if ($('gbaSettingExtraPath')) {
+        $('gbaSettingExtraPath').value = state.config.extra_roms_path || '';
+      }
+      if ($('gbaSettingCoversPath')) {
+        $('gbaSettingCoversPath').value = state.config.covers_path || '';
+      }
+      if ($('gbaSettingBiosPath')) {
+        $('gbaSettingBiosPath').value = state.config.bios_path || '';
+      }
 
       // rclone 설정 필드 채우기
       if ($('gbaSettingRcloneRemote')) {
@@ -3196,9 +3205,10 @@
     });
 
     $('gbaSettingsSaveBtn').addEventListener('click', async () => {
-      const extraPath = $('gbaSettingExtraPath').value.trim();
-      const coversPath = $('gbaSettingCoversPath').value.trim();
-      const biosPath = $('gbaSettingBiosPath').value.trim();
+      const emulatorjsRoot = $('gbaSettingEmulatorjsRoot') ? $('gbaSettingEmulatorjsRoot').value.trim() : '';
+      const extraPath = $('gbaSettingExtraPath') ? $('gbaSettingExtraPath').value.trim() : '';
+      const coversPath = $('gbaSettingCoversPath') ? $('gbaSettingCoversPath').value.trim() : '';
+      const biosPath = $('gbaSettingBiosPath') ? $('gbaSettingBiosPath').value.trim() : '';
       const rcloneRemote = $('gbaSettingRcloneRemote') ? $('gbaSettingRcloneRemote').value.trim() : '';
       const rcloneMountBase = $('gbaSettingRcloneMountBase') ? $('gbaSettingRcloneMountBase').value.trim() : '';
       const rcloneConfigContent = $('gbaSettingRcloneConfigContent') ? $('gbaSettingRcloneConfigContent').value.trim() : '';
@@ -3287,6 +3297,7 @@
         }
 
         const res = await apiCall('save_settings', {
+          emulatorjs_root: emulatorjsRoot,
           extra_roms_path: extraPath,
           covers_path: coversPath,
           bios_path: biosPath,
@@ -3298,6 +3309,7 @@
         });
 
         if (res && res.success) {
+          state.config.emulatorjs_root = emulatorjsRoot;
           state.config.extra_roms_path = extraPath;
           state.config.covers_path = coversPath;
           state.config.bios_path = biosPath;

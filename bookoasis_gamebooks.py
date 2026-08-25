@@ -2795,15 +2795,37 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             pass
         return data_dir
 
+    def _is_romm_migrated(self):
+        """RomM 마이그레이션이 완료되어 표준 구조를 전담 사용하는 상태인지 확인"""
+        return self._get_setting("ROMM_MIGRATION_STATE", "").strip() == "completed"
+
+    def _get_emulatorjs_root(self):
+        """통합 에뮬레이터 라이브러리 루트 디렉터리 (EMULATORJS_ROOT 또는 기본 /mnt/gdrive/emulatorjs)"""
+        custom_root = self._get_setting("EMULATORJS_ROOT", "").strip()
+        if custom_root:
+            return custom_root
+        # 레거시 EXTRA_ROMS_PATH 등에서 상위 루트 유추
+        extra_p = self._get_setting("EXTRA_ROMS_PATH", "").strip()
+        if extra_p and "/roms" in extra_p:
+            cand = extra_p.split("/roms")[0]
+            if os.path.isdir(cand):
+                return cand
+        if os.path.isdir("/mnt/gdrive/emulatorjs"):
+            return "/mnt/gdrive/emulatorjs"
+        return self._get_data_dir()
+
     def _get_roms_dir(self):
-        """기본 롬 파일 디렉터리 (../../data/bookoasis_gamebooks/roms/) - 전체 유저 공유"""
+        """기본 롬 파일 디렉터리 (마이그레이션 미완료 시 사용)"""
         roms_dir = os.path.join(self._get_data_dir(), "roms")
         os.makedirs(roms_dir, exist_ok=True)
         return roms_dir
 
     def _get_romm_library_dir(self):
-        """RomM 표준 library 디렉터리 탐색 (/mnt/gdrive/emulatorjs/romm_library 또는 ../../data/bookoasis_gamebooks/romm_library)"""
+        """RomM 표준 library 디렉터리 (/mnt/gdrive/emulatorjs/romm_library/library 또는 {EMULATORJS_ROOT}/romm_library/library)"""
+        root = self._get_emulatorjs_root()
         candidates = [
+            os.path.join(root, "romm_library", "library"),
+            os.path.join(root, "romm_library"),
             "/mnt/gdrive/emulatorjs/romm_library/library",
             "/mnt/gdrive/emulatorjs/romm_library",
             os.path.join(self._get_data_dir(), "romm_library", "library"),
@@ -2823,7 +2845,17 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return saves_dir
 
     def _get_covers_dir(self):
-        """커버 아트 이미지 디렉터리 (설정된 COVERS_PATH 또는 기본 ../../data/bookoasis_gamebooks/covers/)"""
+        """커버 아트 이미지 디렉터리"""
+        if self._is_romm_migrated():
+            # 마이그레이션 완료 시: RomM resources 또는 assets 디렉터리 우선 (레거시 covers 단독 경로 제외)
+            root = self._get_emulatorjs_root()
+            romm_res = os.path.join(root, "romm_library", "resources", "roms")
+            if os.path.isdir(romm_res):
+                return romm_res
+            romm_covers = os.path.join(root, "romm_library", "assets", "covers")
+            if os.path.isdir(romm_covers):
+                return romm_covers
+            return os.path.join(root, "covers")
         custom_path = self._get_setting("COVERS_PATH", "").strip()
         if custom_path:
             try:
@@ -2896,7 +2928,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return moved_count
 
     def _get_bios_dir(self):
-        """시스템 바이오스 파일 디렉터리 (설정된 BIOS_PATH 또는 기본 ../../data/bookoasis_gamebooks/bios/)"""
+        """시스템 바이오스 파일 디렉터리"""
+        if self._is_romm_migrated():
+            root = self._get_emulatorjs_root()
+            romm_bios = os.path.join(root, "romm_library", "bios")
+            if os.path.isdir(romm_bios):
+                return romm_bios
+            return os.path.join(root, "bios")
         custom_path = self._get_setting("BIOS_PATH", "").strip()
         if custom_path:
             try:
@@ -2962,12 +3000,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             except Exception:
                 pass
 
-        search_dirs.append(self._get_bios_dir())
-        search_dirs.append(self._get_roms_dir())
-
-        extra_p = self._get_setting("EXTRA_ROMS_PATH", "").strip()
-        if extra_p and os.path.isdir(extra_p):
-            search_dirs.append(extra_p)
+        if not self._is_romm_migrated():
+            search_dirs.append(self._get_bios_dir())
+            search_dirs.append(self._get_roms_dir())
+            extra_p = self._get_setting("EXTRA_ROMS_PATH", "").strip()
+            if extra_p and os.path.isdir(extra_p):
+                search_dirs.append(extra_p)
 
         seen = set()
         for sdir in search_dirs:
@@ -3156,6 +3194,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         details=f"ROM {res.get('copied_rom_files', 0)}개, BIOS {res.get('copied_bios_files', 0)}개, Cover {res.get('copied_cover_files', 0)}개 복사 완료",
                     )
                     self._set_setting("ROMM_MIGRATION_STATE", "completed")
+                    # 마이그레이션 완료 후: 단일 라이브러리 루트 설정(/mnt/gdrive/emulatorjs) 자동 정착 및 개별 경로 정리
+                    emulatorjs_root = self._get_emulatorjs_root()
+                    self._set_setting("EMULATORJS_ROOT", emulatorjs_root)
+                    self._set_setting("EXTRA_ROMS_PATH", "")
+                    self._set_setting("COVERS_PATH", "")
+                    self._set_setting("BIOS_PATH", "")
                     # 새 romm_library 경로 기준으로 전체 재스캔 1회 자동 가동
                     try:
                         logger.info(f"[{SELF_ID}] Auto triggering full scan after RomM migration...")
@@ -3527,16 +3571,16 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         self._migrate_bios_files()
 
         scan_dirs = []
-        # RomM 마이그레이션이 완료된 경우 romm_library/library를 최우선 스캔
-        romm_lib_dir = self._get_romm_library_dir()
-        if romm_lib_dir and os.path.isdir(romm_lib_dir):
-            scan_dirs.append(romm_lib_dir)
-
-        scan_dirs.append(self._get_roms_dir())
-
-        extra_path = self._get_setting("EXTRA_ROMS_PATH", "").strip()
-        if extra_path and os.path.isdir(extra_path) and extra_path not in scan_dirs:
-            scan_dirs.append(extra_path)
+        # RomM 마이그레이션이 완료된 경우 romm_library/library 단일 전담 스캔 (레거시 폴더 스캔 원천 배제)
+        if self._is_romm_migrated():
+            romm_lib_dir = self._get_romm_library_dir()
+            if romm_lib_dir and os.path.isdir(romm_lib_dir):
+                scan_dirs.append(romm_lib_dir)
+        else:
+            scan_dirs.append(self._get_roms_dir())
+            extra_path = self._get_setting("EXTRA_ROMS_PATH", "").strip()
+            if extra_path and os.path.isdir(extra_path) and extra_path not in scan_dirs:
+                scan_dirs.append(extra_path)
 
         bios_dir = os.path.abspath(self._get_bios_dir())
         covers_dir = os.path.abspath(self._get_covers_dir())
@@ -4479,12 +4523,15 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "type": "bios",
                 })
 
-            # 사용자 설정 추가 ROM 경로(EXTRA_ROMS_PATH)가 있으면 해당 폴더에 우선 업로드
-            custom_roms_path = self._get_setting("EXTRA_ROMS_PATH", "").strip()
-            if custom_roms_path and os.path.isdir(custom_roms_path):
-                dest_dir = custom_roms_path
+            # 마이그레이션 완료 시 RomM 라이브러리 루트 사용, 미완료 시 레거시 경로 사용
+            if self._is_romm_migrated():
+                dest_dir = self._get_romm_library_dir() or self._get_roms_dir()
             else:
-                dest_dir = self._get_roms_dir()
+                custom_roms_path = self._get_setting("EXTRA_ROMS_PATH", "").strip()
+                if custom_roms_path and os.path.isdir(custom_roms_path):
+                    dest_dir = custom_roms_path
+                else:
+                    dest_dir = self._get_roms_dir()
 
             temp_dest = os.path.join(dest_dir, f".temp_upload_{safe_filename}")
             file.save(temp_dest)
@@ -4948,6 +4995,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "config": {
                         "cloud_save_enabled": str(self._get_setting("CLOUD_SAVE_ENABLED", "1")).lower() in ("1", "true", "yes", "on"),
                         "auto_save_interval_sec": int(self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")),
+                        "emulatorjs_root": str(self._get_setting("EMULATORJS_ROOT", "") or self._get_emulatorjs_root() or "").strip(),
                         "extra_roms_path": str(self._get_setting("EXTRA_ROMS_PATH", "") or "").strip(),
                         "covers_path": str(self._get_setting("COVERS_PATH", "") or "").strip(),
                         "bios_path": str(self._get_setting("BIOS_PATH", "") or "").strip(),
@@ -5398,6 +5446,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 extra_path = str(_get_val("extra_roms_path", "")).strip()
                 covers_path = str(_get_val("covers_path", "")).strip()
                 bios_path = str(_get_val("bios_path", "")).strip()
+                emulatorjs_root = str(_get_val("emulatorjs_root", "")).strip()
                 cloud_save_raw = _get_val("cloud_save_enabled", "1")
                 interval_raw = _get_val("auto_save_interval_sec", "60")
 
@@ -5420,6 +5469,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 prev_covers_path = str(self._get_setting("COVERS_PATH", "")).strip()
                 prev_bios_path = str(self._get_setting("BIOS_PATH", "")).strip()
 
+                if emulatorjs_root:
+                    self._set_setting("EMULATORJS_ROOT", emulatorjs_root)
                 self._set_setting("EXTRA_ROMS_PATH", extra_path)
                 self._set_setting("COVERS_PATH", covers_path)
                 self._set_setting("BIOS_PATH", bios_path)
