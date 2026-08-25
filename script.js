@@ -43,6 +43,14 @@
     biosPageSize: 10,
     biosSearch: '',
     biosFilter: 'all',
+    launchProgress: {
+      visible: false,
+      phase: 'idle',
+      title: '',
+      desc: '',
+      meta: '',
+      percent: null,
+    },
     renderedCount: 40,
     pageSize: 40,
     filteredGames: [],
@@ -57,6 +65,8 @@
       remaining: 0,
       current_title: '',
     },
+    migrationPollTimer: null,
+    isMigrating: false,
   };
 
   // DOM 헬퍼
@@ -134,6 +144,11 @@
 
         // 백그라운드 커버 큐 감시 시작
         startCoverQueueMonitor();
+
+        // RomM 마이그레이션 진행 상태 감시
+        if (data.migration) {
+          handleMigrationState(data.migration);
+        }
       } else {
         showToast('게임 목록을 불러오지 못했습니다: ' + (data.error || '알 수 없는 오류'), true);
       }
@@ -143,6 +158,89 @@
     } finally {
       if (!silent) showLoading(false);
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // RomM 자동 마이그레이션 실시간 모니터링 & UI 연동
+  // --------------------------------------------------------------------------
+  function handleMigrationState(mig) {
+    if (!mig) return;
+    const modal = $('gbaMigrationModal');
+    const statusEl = $('gbaMigrationStatus');
+    const progressBar = $('gbaMigrationProgressBar');
+    const detailsEl = $('gbaMigrationDetails');
+    const subDetailsEl = $('gbaMigrationSubDetails');
+
+    const isRunning = mig.is_running || mig.state === 'running';
+
+    if (isRunning) {
+      state.isMigrating = true;
+      if (modal) modal.style.display = 'flex';
+
+      const pct = Math.max(0, Math.min(100, mig.percent || 0));
+      if (progressBar) progressBar.style.width = `${pct}%`;
+
+      if (statusEl) {
+        statusEl.innerHTML = `<i class="fa-solid fa-layer-group fa-spin"></i> ${mig.current_item || 'RomM 표준 구조로 변환 중...'}`;
+      }
+
+      if (detailsEl) {
+        if (mig.details) {
+          detailsEl.textContent = `${mig.details} (${pct}%)`;
+        } else if (mig.total > 0) {
+          detailsEl.textContent = `${mig.current || 0} / ${mig.total} 항목 처리 중 (${pct}%)`;
+        } else {
+          detailsEl.textContent = `계획 생성 및 검증 중... (${pct}%)`;
+        }
+      }
+
+      if (subDetailsEl) {
+        subDetailsEl.textContent = `ROM ${mig.copied_rom_files || 0}개 / BIOS ${mig.copied_bios_files || 0}개 / 커버 ${mig.copied_cover_files || 0}개 완료 (Copy-first 보존)`;
+      }
+
+      startMigrationMonitor();
+    } else {
+      if (state.isMigrating) {
+        state.isMigrating = false;
+        if (state.migrationPollTimer) {
+          clearInterval(state.migrationPollTimer);
+          state.migrationPollTimer = null;
+        }
+
+        if (mig.state === 'completed') {
+          if (progressBar) progressBar.style.width = '100%';
+          if (statusEl) statusEl.textContent = '🎉 RomM 마이그레이션이 성공적으로 완료되었습니다!';
+          if (detailsEl) detailsEl.textContent = mig.details || '새로운 라이브러리 목록을 불러옵니다.';
+          setTimeout(() => {
+            if (modal) modal.style.display = 'none';
+            loadLibrary(false);
+          }, 1200);
+        } else if (mig.state === 'failed') {
+          if (statusEl) statusEl.textContent = '❌ RomM 마이그레이션 실패';
+          if (detailsEl) detailsEl.textContent = mig.error || '마이그레이션 도중 오류가 발생했습니다.';
+          setTimeout(() => {
+            if (modal) modal.style.display = 'none';
+          }, 4000);
+        } else {
+          if (modal) modal.style.display = 'none';
+        }
+      }
+    }
+  }
+
+  function startMigrationMonitor() {
+    if (state.migrationPollTimer) return;
+
+    state.migrationPollTimer = setInterval(async () => {
+      try {
+        const res = await apiCall('migration_status');
+        if (res && res.success && res.migration) {
+          handleMigrationState(res.migration);
+        }
+      } catch (err) {
+        console.error('[GBA] Migration status poll error:', err);
+      }
+    }, 1000);
   }
 
   // --------------------------------------------------------------------------
@@ -748,6 +846,7 @@
 
   function checkMissingBios(game) {
     const biosList = (state.available_bios || []).map((b) => b.toLowerCase());
+    const hasNeededBios = !!game.has_needed_bios;
     const filename = (game.filename || '').toLowerCase();
     const title = (game.title || '').toLowerCase();
     const platform = (game.platform || '').toUpperCase();
@@ -761,7 +860,7 @@
       'strhoop', 'tws96', 'zedblade', 'matrim', 'gururin', 'breakers'
     ];
     if (platform === 'NEOGEO' || neoGeoKeywords.some((k) => filename.includes(k) || title.includes(k))) {
-      if (!biosList.includes('neogeo.zip')) {
+      if (!(hasNeededBios || biosList.includes('neogeo.zip'))) {
         return {
           type: 'bios',
           needed: 'neogeo.zip',
@@ -778,7 +877,7 @@
     // 2. IGS PGM games
     const pgmKeywords = ['orlegend', 'kov', 'martmast', 'theglad', 'demonfr', 'drgw', 'oldsplus'];
     if (pgmKeywords.some((k) => filename.includes(k) || title.includes(k))) {
-      if (!biosList.includes('pgm.zip')) {
+      if (!(hasNeededBios || biosList.includes('pgm.zip'))) {
         return {
           type: 'bios',
           needed: 'pgm.zip',
@@ -794,7 +893,7 @@
 
     // 3. FDS games
     if (platform === 'FDS' || filename.endsWith('.fds')) {
-      if (!biosList.includes('disksys.rom')) {
+      if (!(hasNeededBios || biosList.includes('disksys.rom'))) {
         return {
           type: 'bios',
           needed: 'disksys.rom',
@@ -810,7 +909,7 @@
 
     // 4. PCE-CD
     if (platform === 'PCECD' || (platform === 'PCE' && filename.endsWith('.chd'))) {
-      if (!biosList.includes('syscard3.pce')) {
+      if (!(hasNeededBios || biosList.includes('syscard3.pce'))) {
         return {
           type: 'bios',
           needed: 'syscard3.pce',
@@ -826,7 +925,7 @@
 
     // 5. PlayStation 1 (권장 안내)
     if (platform === 'PS1' || core === 'psx') {
-      const hasPsxBios = biosList.some((b) => b.startsWith('scph'));
+      const hasPsxBios = hasNeededBios || biosList.some((b) => b.startsWith('scph'));
       if (!hasPsxBios) {
         return {
           type: 'bios',
@@ -918,6 +1017,7 @@
         isOptional: false,
       };
     } else if (game.health_status === 'bios_required') {
+      if (hasNeededBios) return null;
       const requiredBios = (game.needed_bios || game.missing_roms || '').trim() || '필수 BIOS';
       return {
         type: 'bios',
@@ -1053,6 +1153,8 @@
     state.isPaused = false;
     state.currentSpeed = 1;
     state.isMuted = false;
+    hideLaunchProgress();
+    setLaunchProgress('prepare', '에뮬레이터 준비 중...', '플레이어를 초기화하고 있습니다.', '대용량 ROM은 다운로드와 압축 해제에 시간이 걸릴 수 있습니다.');
 
     if ($('gbaCurrentGameTitle')) {
       $('gbaCurrentGameTitle').textContent = game.title;
@@ -1184,7 +1286,7 @@
     const biosList = (state.available_bios || []).map((b) => b.toLowerCase());
     let neededBiosFile = null;
 
-    if (game.needed_bios && biosList.includes(game.needed_bios.toLowerCase())) {
+    if (game.needed_bios) {
       neededBiosFile = game.needed_bios;
     } else {
       // 폴백: DB에 바이오스가 미기록된 레거시 롬 동적 보정
@@ -1215,7 +1317,7 @@
       }
     }
 
-    const biosUrl = neededBiosFile ? `${window.location.origin}/api/webhook/bookoasis_gamebooks/bios/${encodeURIComponent(neededBiosFile)}` : null;
+    const biosUrl = neededBiosFile ? `${window.location.origin}/api/webhook/bookoasis_gamebooks/bios/${encodeURIComponent(neededBiosFile)}?game_id=${encodeURIComponent(game.id)}` : null;
     const gameUrl = window.location.origin + game.rom_url;
     const gameName = isArcade ? (game.game_code || rawStem) : game.title;
     const loadStateUrl = game.has_state ? window.location.origin + game.state_url : null;
@@ -1246,6 +1348,77 @@
 <body>
   <div id="game"></div>
   <script>
+    const __GBA_PROGRESS__ = {
+      lastLoaded: 0,
+      lastTotal: 0,
+      emit(payload) {
+        try {
+          if (window.parent && typeof window.parent.__GBA_ON_LAUNCH_PROGRESS__ === 'function') {
+            window.parent.__GBA_ON_LAUNCH_PROGRESS__(payload || {});
+          }
+        } catch (e) {}
+      },
+      updateDownload(phase, loaded, total) {
+        this.lastLoaded = Number(loaded || 0);
+        this.lastTotal = Number(total || 0);
+        this.emit({ phase, loaded: this.lastLoaded, total: this.lastTotal });
+      }
+    };
+
+    __GBA_PROGRESS__.emit({ phase: 'boot' });
+    ${biosUrl ? `__GBA_PROGRESS__.emit({ phase: 'bios-check' });` : `__GBA_PROGRESS__.emit({ phase: 'rom-fetch' });`}
+
+    try {
+      const origFetch = window.fetch ? window.fetch.bind(window) : null;
+      if (origFetch) {
+        window.fetch = async function(input, init) {
+          const url = typeof input === 'string' ? input : ((input && input.url) || '');
+          const response = await origFetch(input, init);
+          if (url === ${JSON.stringify(biosUrl || '')}) {
+            __GBA_PROGRESS__.emit({ phase: 'bios-ready' });
+          }
+          return response;
+        };
+      }
+    } catch (e) {}
+
+    try {
+      const OrigXHR = window.XMLHttpRequest;
+      function ProgressXHR() {
+        const xhr = new OrigXHR();
+        let trackedUrl = '';
+        const origOpen = xhr.open;
+        xhr.open = function(method, url) {
+          trackedUrl = String(url || '');
+          return origOpen.apply(xhr, arguments);
+        };
+        xhr.addEventListener('loadstart', function() {
+          if (trackedUrl === ${JSON.stringify(gameUrl)}) {
+            __GBA_PROGRESS__.emit({ phase: 'rom-fetch', loaded: 0, total: 0 });
+          } else if (trackedUrl === ${JSON.stringify(biosUrl || '')}) {
+            __GBA_PROGRESS__.emit({ phase: 'bios-download', loaded: 0, total: 0 });
+          }
+        });
+        xhr.addEventListener('progress', function(e) {
+          if (trackedUrl === ${JSON.stringify(gameUrl)}) {
+            __GBA_PROGRESS__.updateDownload('rom-fetch', e.loaded, e.lengthComputable ? e.total : 0);
+          } else if (trackedUrl === ${JSON.stringify(biosUrl || '')}) {
+            __GBA_PROGRESS__.updateDownload('bios-download', e.loaded, e.lengthComputable ? e.total : 0);
+          }
+        });
+        xhr.addEventListener('load', function() {
+          if (trackedUrl === ${JSON.stringify(gameUrl)}) {
+            __GBA_PROGRESS__.emit({ phase: 'rom-unpack', loaded: __GBA_PROGRESS__.lastLoaded, total: __GBA_PROGRESS__.lastTotal });
+          } else if (trackedUrl === ${JSON.stringify(biosUrl || '')}) {
+            __GBA_PROGRESS__.emit({ phase: 'bios-ready' });
+          }
+        });
+        return xhr;
+      }
+      ProgressXHR.prototype = OrigXHR.prototype;
+      window.XMLHttpRequest = ProgressXHR;
+    } catch (e) {}
+
     window.EJS_player = '#game';
     window.EJS_core = ${JSON.stringify(coreToUse)};
     window.EJS_gameName = ${JSON.stringify(gameName)};
@@ -1294,6 +1467,9 @@
     } catch(e) {}
 
     window.EJS_onGameStart = function() {
+      if (window.parent && typeof window.parent.__GBA_ON_LAUNCH_PROGRESS__ === 'function') {
+        window.parent.__GBA_ON_LAUNCH_PROGRESS__({ phase: 'starting' });
+      }
       if (window.parent && window.parent.__GBA_ON_GAME_START__) {
         window.parent.__GBA_ON_GAME_START__();
       }
@@ -1317,13 +1493,41 @@
 </html>`;
 
     // 부모-자식 프레임 브릿지 콜백 등록
+    window.__GBA_ON_LAUNCH_PROGRESS__ = (payload = {}) => {
+      const phase = String(payload.phase || 'loading');
+      const loaded = Number(payload.loaded || 0);
+      const total = Number(payload.total || 0);
+      if (phase === 'boot') {
+        setLaunchProgress('boot', '에뮬레이터 준비 중...', '런처를 불러오고 있습니다.', '초기 스크립트와 코어를 준비하고 있습니다.');
+      } else if (phase === 'bios-check') {
+        setLaunchProgress('bios-check', '바이오스 확인 중...', '필수 바이오스를 확인하고 있습니다.', 'PS1 BIOS 확인 단계입니다.');
+      } else if (phase === 'bios-download') {
+        const meta = total > 0 ? `${formatBytes(loaded)} / ${formatBytes(total)}` : `${formatBytes(loaded)} 다운로드`;
+        const percent = total > 0 ? Math.round((loaded / total) * 100) : null;
+        setLaunchProgress('bios-download', '바이오스 다운로드 중...', '필수 바이오스를 불러오고 있습니다.', meta, percent);
+      } else if (phase === 'bios-ready') {
+        setLaunchProgress('bios-ready', '바이오스 준비 완료', '이제 게임 데이터를 불러옵니다.', '다음 단계에서 대용량 ROM 다운로드가 시작됩니다.', 100);
+      } else if (phase === 'rom-fetch') {
+        const meta = total > 0 ? `${formatBytes(loaded)} / ${formatBytes(total)}` : (loaded > 0 ? `${formatBytes(loaded)} 다운로드` : 'ROM 다운로드를 시작하는 중입니다.');
+        const percent = total > 0 ? Math.round((loaded / total) * 100) : null;
+        setLaunchProgress('rom-fetch', '게임 ZIP 다운로드 중...', '대용량 ROM 데이터를 가져오고 있습니다.', meta, percent);
+      } else if (phase === 'rom-unpack') {
+        const meta = total > 0 ? `다운로드 완료: ${formatBytes(total)}` : (loaded > 0 ? `다운로드 완료: ${formatBytes(loaded)}` : '다운로드 완료');
+        setLaunchProgress('rom-unpack', '압축 해제 중...', '브라우저에서 ZIP을 풀고 있습니다.', meta, null);
+      } else if (phase === 'starting') {
+        setLaunchProgress('starting', '에뮬레이터 시작 중...', '코어 초기화와 첫 화면 구성을 마무리하고 있습니다.', '거의 완료되었습니다.', null);
+      }
+    };
+
     window.__GBA_ON_GAME_START__ = () => {
+      setLaunchProgress('started', '게임 시작 완료', '첫 화면 진입을 마무리합니다.', '잠시 후 오버레이가 사라집니다.', 100);
       focusEmulator();
       setTimeout(() => {
         applyGraphicsSettings();
         focusEmulator();
       }, 200);
       setTimeout(focusEmulator, 800);
+      setTimeout(() => hideLaunchProgress(), 350);
     };
 
     window.__GBA_ON_CONTEXT_MENU__ = (clientX, clientY) => {
@@ -1657,7 +1861,9 @@
       container.innerHTML = '';
     }
     window.__GBA_ON_GAME_START__ = null;
+    window.__GBA_ON_LAUNCH_PROGRESS__ = null;
     window.EJS_emulator = null;
+    hideLaunchProgress();
     $('gbaPlayerModal').style.display = 'none';
     state.activeGame = null;
     renderGames();
@@ -2967,6 +3173,18 @@
       $('gbaSettingExtraPath').value = state.config.extra_roms_path || '';
       $('gbaSettingCoversPath').value = state.config.covers_path || '';
       $('gbaSettingBiosPath').value = state.config.bios_path || '';
+
+      // rclone 설정 필드 채우기
+      if ($('gbaSettingRcloneRemote')) {
+        $('gbaSettingRcloneRemote').value = state.config.rclone_remote || 'google_drive';
+      }
+      if ($('gbaSettingRcloneMountBase')) {
+        $('gbaSettingRcloneMountBase').value = state.config.rclone_mount_base || '/mnt/gdrive';
+      }
+      if ($('gbaSettingRcloneConfigContent')) {
+        $('gbaSettingRcloneConfigContent').value = state.config.rclone_config_content || '';
+      }
+
       $('gbaSettingsModal').style.display = 'flex';
     });
 
@@ -2981,6 +3199,9 @@
       const extraPath = $('gbaSettingExtraPath').value.trim();
       const coversPath = $('gbaSettingCoversPath').value.trim();
       const biosPath = $('gbaSettingBiosPath').value.trim();
+      const rcloneRemote = $('gbaSettingRcloneRemote') ? $('gbaSettingRcloneRemote').value.trim() : '';
+      const rcloneMountBase = $('gbaSettingRcloneMountBase') ? $('gbaSettingRcloneMountBase').value.trim() : '';
+      const rcloneConfigContent = $('gbaSettingRcloneConfigContent') ? $('gbaSettingRcloneConfigContent').value.trim() : '';
       const cloudSave = $('gbaSettingCloudSave').checked ? '1' : '0';
       const interval = $('gbaSettingInterval').value.trim();
       const saveBtn = $('gbaSettingsSaveBtn');
@@ -3069,6 +3290,9 @@
           extra_roms_path: extraPath,
           covers_path: coversPath,
           bios_path: biosPath,
+          rclone_remote: rcloneRemote,
+          rclone_mount_base: rcloneMountBase,
+          rclone_config_content: rcloneConfigContent,
           cloud_save_enabled: cloudSave,
           auto_save_interval_sec: interval,
         });
@@ -3077,6 +3301,9 @@
           state.config.extra_roms_path = extraPath;
           state.config.covers_path = coversPath;
           state.config.bios_path = biosPath;
+          state.config.rclone_remote = rcloneRemote;
+          state.config.rclone_mount_base = rcloneMountBase;
+          state.config.rclone_config_content = rcloneConfigContent;
           state.config.cloud_save_enabled = cloudSave === '1';
           state.config.auto_save_interval_sec = parseInt(interval, 10) || 60;
           renderGames();
@@ -3579,6 +3806,64 @@
   function showLoading(show) {
     const loading = $('gbaLoading');
     if (loading) loading.style.display = show ? 'flex' : 'none';
+  }
+
+  function formatBytes(bytes) {
+    const num = Number(bytes || 0);
+    if (!Number.isFinite(num) || num <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let value = num;
+    let idx = 0;
+    while (value >= 1024 && idx < units.length - 1) {
+      value /= 1024;
+      idx += 1;
+    }
+    const digits = value >= 100 || idx === 0 ? 0 : 1;
+    return `${value.toFixed(digits)} ${units[idx]}`;
+  }
+
+  function setLaunchProgress(phase, title, desc = '', meta = '', percent = null) {
+    state.launchProgress = {
+      visible: true,
+      phase: phase || 'loading',
+      title: title || '에뮬레이터 준비 중...',
+      desc: desc || '잠시만 기다려 주세요.',
+      meta: meta || '',
+      percent: Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null,
+    };
+
+    const overlay = $('gbaLaunchOverlay');
+    const titleEl = $('gbaLaunchTitle');
+    const descEl = $('gbaLaunchDesc');
+    const metaEl = $('gbaLaunchMeta');
+    const barEl = $('gbaLaunchProgressBar');
+    if (!overlay || !titleEl || !descEl || !metaEl || !barEl) return;
+
+    overlay.style.display = 'flex';
+    titleEl.textContent = state.launchProgress.title;
+    descEl.textContent = state.launchProgress.desc;
+    metaEl.textContent = state.launchProgress.meta || '대용량 ROM은 다운로드와 압축 해제에 시간이 걸릴 수 있습니다.';
+
+    if (state.launchProgress.percent === null) {
+      barEl.classList.add('indeterminate');
+      barEl.style.width = '';
+    } else {
+      barEl.classList.remove('indeterminate');
+      barEl.style.width = `${state.launchProgress.percent}%`;
+    }
+  }
+
+  function hideLaunchProgress() {
+    state.launchProgress.visible = false;
+    state.launchProgress.phase = 'idle';
+    state.launchProgress.percent = null;
+    const overlay = $('gbaLaunchOverlay');
+    const barEl = $('gbaLaunchProgressBar');
+    if (overlay) overlay.style.display = 'none';
+    if (barEl) {
+      barEl.classList.add('indeterminate');
+      barEl.style.width = '';
+    }
   }
 
   function showToast(msg, isError = false) {

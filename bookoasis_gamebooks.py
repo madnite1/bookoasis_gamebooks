@@ -52,6 +52,25 @@ _SCAN_PROGRESS = {
 }
 _SCAN_PROGRESS_LOCK = threading.Lock()
 
+# RomM 자동 마이그레이션 전역 상태 매니저
+_ROMM_MIGRATION_PROGRESS = {
+    "is_running": False,
+    "state": "not_started",  # not_started | running | completed | failed
+    "phase": "idle",
+    "percent": 0,
+    "current": 0,
+    "total": 0,
+    "current_item": "",
+    "details": "",
+    "copied_rom_files": 0,
+    "copied_bios_files": 0,
+    "copied_cover_files": 0,
+    "failed_count": 0,
+    "error": "",
+    "updated_at": 0,
+}
+_ROMM_MIGRATION_LOCK = threading.Lock()
+
 # 백그라운드 커버 아트 다운로드 전역 큐 매니저
 _COVER_QUEUE = []
 _COVER_QUEUE_SET = set()  # 중복 등록 방지 (gid 기준)
@@ -159,6 +178,72 @@ def _update_scan_progress(current=None, total=None, current_file=None, status=No
         if is_running is not None:
             _SCAN_PROGRESS["is_running"] = is_running
         _SCAN_PROGRESS["updated_at"] = time.time()
+
+
+_ROMM_STATUS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", ".romm_migration_status.json")
+
+
+def _update_romm_migration_progress(
+    is_running=None,
+    state=None,
+    phase=None,
+    percent=None,
+    current=None,
+    total=None,
+    current_item=None,
+    details=None,
+    copied_rom_files=None,
+    copied_bios_files=None,
+    copied_cover_files=None,
+    failed_count=None,
+    error=None,
+):
+    with _ROMM_MIGRATION_LOCK:
+        if is_running is not None:
+            _ROMM_MIGRATION_PROGRESS["is_running"] = is_running
+        if state is not None:
+            _ROMM_MIGRATION_PROGRESS["state"] = state
+        if phase is not None:
+            _ROMM_MIGRATION_PROGRESS["phase"] = phase
+        if percent is not None:
+            _ROMM_MIGRATION_PROGRESS["percent"] = percent
+        if current is not None:
+            _ROMM_MIGRATION_PROGRESS["current"] = current
+        if total is not None:
+            _ROMM_MIGRATION_PROGRESS["total"] = total
+        if current_item is not None:
+            _ROMM_MIGRATION_PROGRESS["current_item"] = current_item
+        if details is not None:
+            _ROMM_MIGRATION_PROGRESS["details"] = details
+        if copied_rom_files is not None:
+            _ROMM_MIGRATION_PROGRESS["copied_rom_files"] = copied_rom_files
+        if copied_bios_files is not None:
+            _ROMM_MIGRATION_PROGRESS["copied_bios_files"] = copied_bios_files
+        if copied_cover_files is not None:
+            _ROMM_MIGRATION_PROGRESS["copied_cover_files"] = copied_cover_files
+        if failed_count is not None:
+            _ROMM_MIGRATION_PROGRESS["failed_count"] = failed_count
+        if error is not None:
+            _ROMM_MIGRATION_PROGRESS["error"] = error
+        _ROMM_MIGRATION_PROGRESS["updated_at"] = time.time()
+        try:
+            with open(_ROMM_STATUS_FILE, "w", encoding="utf-8") as sf:
+                json.dump(_ROMM_MIGRATION_PROGRESS, sf)
+        except Exception:
+            pass
+
+
+def _get_romm_migration_status():
+    with _ROMM_MIGRATION_LOCK:
+        if os.path.isfile(_ROMM_STATUS_FILE):
+            try:
+                with open(_ROMM_STATUS_FILE, "r", encoding="utf-8") as sf:
+                    disk_st = json.load(sf)
+                    if disk_st and isinstance(disk_st, dict):
+                        _ROMM_MIGRATION_PROGRESS.update(disk_st)
+            except Exception:
+                pass
+        return dict(_ROMM_MIGRATION_PROGRESS)
 
 
 def _get_kst_now_str():
@@ -598,8 +683,15 @@ def _basic_normalize_title(text):
 def _collect_identity_fields(file_path, rom_info, clean_title="", size_bytes=0):
     ext = os.path.splitext(str(file_path or ""))[1].lower()
     serial_code = str(rom_info.get("serial_code") or rom_info.get("game_code") or "").strip()
-    if ext in (".cue", ".bin", ".iso", ".img", ".chd", ".pbp", ".gdi") and not serial_code:
-        serial_code = _scan_cd_serial(file_path) or ""
+    resolved_disk_files = [p for p in (rom_info.get("resolved_disk_files") or []) if p]
+    if not serial_code:
+        if ext in (".cue", ".gdi") and resolved_disk_files:
+            for resolved_path in resolved_disk_files:
+                serial_code = _scan_cd_serial(resolved_path) or ""
+                if serial_code:
+                    break
+        elif ext in (".bin", ".iso", ".img", ".chd", ".pbp"):
+            serial_code = _scan_cd_serial(file_path) or ""
 
     rom_crc32 = ""
     rom_md5 = ""
@@ -1558,23 +1650,124 @@ def _parse_cue_tracks(file_path):
     return tracks
 
 
+def _iter_disk_related_dirs(file_path):
+    base_dir = os.path.dirname(os.path.abspath(str(file_path or "")))
+    if not base_dir:
+        return []
+
+    parent_dir = os.path.dirname(base_dir)
+    related_dirs = [base_dir]
+    sibling_dirs = []
+
+    if parent_dir and os.path.isdir(parent_dir):
+        try:
+            for entry in sorted(os.listdir(parent_dir)):
+                if entry.startswith("."):
+                    continue
+                cand_dir = os.path.join(parent_dir, entry)
+                if os.path.isdir(cand_dir):
+                    sibling_dirs.append(cand_dir)
+        except Exception:
+            sibling_dirs = []
+
+    isos_dir = os.path.join(parent_dir, "isos") if parent_dir else ""
+    if isos_dir and os.path.isdir(isos_dir):
+        related_dirs.append(isos_dir)
+
+    for cand_dir in sibling_dirs:
+        normalized = os.path.abspath(cand_dir)
+        if normalized == base_dir:
+            continue
+        if isos_dir and normalized == os.path.abspath(isos_dir):
+            continue
+        related_dirs.append(normalized)
+
+    unique = []
+    seen = set()
+    for cand_dir in related_dirs:
+        normalized = os.path.abspath(str(cand_dir or ""))
+        if not normalized or normalized in seen or not os.path.isdir(normalized):
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
+
+
+def _resolve_disk_track_path(file_path, rel_name):
+    rel_name = str(rel_name or "").strip().strip('"')
+    if not file_path or not rel_name:
+        return ""
+    if os.path.isabs(rel_name):
+        return rel_name if os.path.exists(rel_name) else ""
+
+    rel_path = os.path.normpath(rel_name.replace("\\", os.sep).replace("/", os.sep))
+    rel_base = os.path.basename(rel_path)
+    base_dir = os.path.dirname(os.path.abspath(file_path))
+    parent_dir = os.path.dirname(base_dir)
+    candidates = [os.path.join(base_dir, rel_path)]
+
+    if parent_dir:
+        candidates.append(os.path.join(parent_dir, rel_path))
+
+    for search_dir in _iter_disk_related_dirs(file_path):
+        if rel_base:
+            candidates.append(os.path.join(search_dir, rel_base))
+        if rel_path and rel_path != rel_base:
+            candidates.append(os.path.join(search_dir, rel_path))
+
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.abspath(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.exists(normalized):
+            return normalized
+
+    # Linux 대소문자 불일치 fallback (예: .cue 내부는 .BIN인데 실제 파일은 .bin인 경우)
+    for search_dir in [base_dir] + (([parent_dir] if parent_dir else [])) + _iter_disk_related_dirs(file_path):
+        if not search_dir or not os.path.isdir(search_dir):
+            continue
+        try:
+            target_lower = rel_base.lower()
+            for entry_name in os.listdir(search_dir):
+                if entry_name.lower() == target_lower:
+                    matched = os.path.join(search_dir, entry_name)
+                    if os.path.exists(matched):
+                        return os.path.abspath(matched)
+        except Exception:
+            continue
+
+    return ""
+
+
 def _resolve_disk_sidecars(file_path):
     ext = os.path.splitext(str(file_path or ""))[1].lower()
-    base_dir = os.path.dirname(os.path.abspath(file_path)) if file_path else ""
     missing = []
-    details = {"missing_files": [], "serial_code": "", "disc_count": 1}
+    details = {"missing_files": [], "resolved_files": [], "serial_code": "", "disc_count": 1}
     if ext == ".cue":
         tracks = _parse_cue_tracks(file_path)
+        resolved_files = []
         details["disc_count"] = max(1, len(tracks))
         for track in tracks:
             rel_name = str(track.get("file") or "").strip()
             if not rel_name:
                 continue
-            if not os.path.exists(os.path.join(base_dir, rel_name)):
+            resolved_path = _resolve_disk_track_path(file_path, rel_name)
+            if resolved_path:
+                resolved_files.append(resolved_path)
+            else:
                 missing.append(rel_name)
+        details["resolved_files"] = resolved_files
+        for resolved_path in resolved_files:
+            serial = _scan_cd_serial(resolved_path)
+            if serial:
+                details["serial_code"] = serial
+                break
         details["missing_files"] = missing
         return details
     if ext == ".gdi":
+        resolved_files = []
         details["disc_count"] = 0
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -1588,11 +1781,20 @@ def _resolve_disk_sidecars(file_path):
                 parts = line.split()
                 if len(parts) >= 5:
                     rel_name = parts[4].strip('"')
-                    if not os.path.exists(os.path.join(base_dir, rel_name)):
+                    resolved_path = _resolve_disk_track_path(file_path, rel_name)
+                    if resolved_path:
+                        resolved_files.append(resolved_path)
+                    else:
                         missing.append(rel_name)
         except Exception:
             pass
         details["disc_count"] = max(1, details["disc_count"])
+        details["resolved_files"] = resolved_files
+        for resolved_path in resolved_files:
+            serial = _scan_cd_serial(resolved_path)
+            if serial:
+                details["serial_code"] = serial
+                break
         details["missing_files"] = missing
         return details
     if ext in (".bin", ".img"):
@@ -1603,6 +1805,224 @@ def _resolve_disk_sidecars(file_path):
             return cue_details
     details["serial_code"] = _scan_cd_serial(file_path) or ""
     return details
+
+
+def _disk_bundle_partner_paths(file_path):
+    partners = []
+    abs_path = os.path.abspath(str(file_path or ""))
+    stem = os.path.splitext(abs_path)[0]
+    parent_dir = os.path.dirname(os.path.dirname(abs_path))
+    candidate_stems = [stem]
+
+    base_name = os.path.basename(stem)
+    if parent_dir and base_name:
+        for search_dir in _iter_disk_related_dirs(file_path):
+            candidate_stems.append(os.path.join(search_dir, base_name))
+
+    seen = set()
+    for candidate_stem in candidate_stems:
+        normalized_stem = os.path.abspath(str(candidate_stem or ""))
+        if not normalized_stem or normalized_stem in seen:
+            continue
+        seen.add(normalized_stem)
+        for ext in (".cue", ".gdi", ".bin", ".img", ".ccd", ".sub", ".mds", ".iso"):
+            candidate = normalized_stem + ext
+            if candidate != abs_path and os.path.exists(candidate):
+                partners.append(candidate)
+    return partners
+
+
+def _find_disk_manifest_for_sidecar(file_path):
+    abs_path = os.path.abspath(str(file_path or ""))
+    stem = os.path.splitext(abs_path)[0]
+    parent_dir = os.path.dirname(os.path.dirname(abs_path))
+    candidate_stems = [stem]
+    base_name = os.path.basename(stem)
+
+    if parent_dir and base_name:
+        for search_dir in _iter_disk_related_dirs(file_path):
+            candidate_stems.append(os.path.join(search_dir, base_name))
+
+    seen = set()
+    for candidate_stem in candidate_stems:
+        normalized_stem = os.path.abspath(str(candidate_stem or ""))
+        if not normalized_stem or normalized_stem in seen:
+            continue
+        seen.add(normalized_stem)
+        for ext in (".cue", ".gdi"):
+            candidate = normalized_stem + ext
+            if os.path.exists(candidate):
+                return candidate
+    return ""
+
+
+def _collect_disk_bundle_paths(file_path):
+    file_path = os.path.abspath(str(file_path or ""))
+    if not file_path or not os.path.exists(file_path):
+        return []
+
+    bundle = []
+    seen = set()
+
+    def _add(path):
+        normalized = os.path.abspath(str(path or ""))
+        if normalized and os.path.exists(normalized) and normalized not in seen:
+            seen.add(normalized)
+            bundle.append(normalized)
+
+    ext = os.path.splitext(file_path)[1].lower()
+    _add(file_path)
+
+    if ext in (".cue", ".gdi"):
+        details = _resolve_disk_sidecars(file_path)
+        for resolved_path in details.get("resolved_files") or []:
+            _add(resolved_path)
+        for existing_path in list(bundle):
+            for partner_path in _disk_bundle_partner_paths(existing_path):
+                _add(partner_path)
+        return bundle
+
+    if ext in (".bin", ".img", ".ccd", ".sub", ".mds", ".iso"):
+        for partner_path in _disk_bundle_partner_paths(file_path):
+            _add(partner_path)
+        manifest_path = _find_disk_manifest_for_sidecar(file_path)
+        if manifest_path:
+            for related_path in _collect_disk_bundle_paths(manifest_path):
+                _add(related_path)
+        return bundle
+
+    return bundle
+
+
+def _build_disk_file_url_map(game_id, file_path, primary_filename=None):
+    file_path = os.path.abspath(str(file_path or ""))
+    if not game_id or not file_path or not os.path.exists(file_path):
+        return {}
+
+    primary_name = os.path.basename(str(primary_filename or file_path))
+    disk_urls = {}
+    for bundle_path in _collect_disk_bundle_paths(file_path):
+        bundle_name = os.path.basename(bundle_path)
+        if not bundle_name or bundle_name == primary_name:
+            continue
+        disk_urls[bundle_name] = f"{ROUTE_BASE}/rom/{game_id}/{urllib.parse.quote(bundle_name)}"
+    return disk_urls
+
+
+def _generate_m3u_content_for_paths(file_paths):
+    """멀티파일 ROM용 .m3u 플레이리스트 내용 생성 (cue가 있으면 cue만, 없으면 전체 목록)"""
+    if not file_paths:
+        return b""
+    cue_names = [os.path.basename(p) for p in file_paths if os.path.splitext(p)[1].lower() == ".cue"]
+    if cue_names:
+        m3u_entries = sorted(cue_names)
+    else:
+        m3u_entries = sorted([os.path.basename(p) for p in file_paths if os.path.isfile(p)])
+    return ("\n".join(m3u_entries) + "\n").encode("utf-8")
+
+
+def _rewrite_disk_manifest_to_local_paths(file_path):
+    file_path = os.path.abspath(str(file_path or ""))
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in (".cue", ".gdi") or not os.path.exists(file_path):
+        return False
+
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except Exception:
+        return False
+
+    changed = False
+    rewritten = []
+    for raw_line in lines:
+        line = raw_line.rstrip("\n")
+        newline = "\n" if raw_line.endswith("\n") else ""
+
+        if ext == ".cue":
+            match = re.match(r'^(\s*FILE\s+")([^"]+)("\s+.+)$', line, re.IGNORECASE)
+            if match:
+                rel_name = os.path.basename(match.group(2).strip())
+                new_line = f'{match.group(1)}{rel_name}{match.group(3)}'
+                changed = changed or (new_line != line)
+                rewritten.append(new_line + newline)
+                continue
+        elif ext == ".gdi":
+            match = re.match(r'^(\s*\d+\s+\d+\s+\d+\s+\d+\s+)("[^"]+"|\S+)(\s+\d+\s*)$', line)
+            if match:
+                token = match.group(2).strip()
+                quoted = token.startswith('"') and token.endswith('"')
+                rel_name = os.path.basename(token.strip('"'))
+                new_token = f'"{rel_name}"' if quoted else rel_name
+                new_line = f'{match.group(1)}{new_token}{match.group(3)}'
+                changed = changed or (new_line != line)
+                rewritten.append(new_line + newline)
+                continue
+
+        rewritten.append(raw_line)
+
+    if not changed:
+        return False
+
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.writelines(rewritten)
+        return True
+    except Exception:
+        return False
+
+
+def _move_disk_bundle(file_path, target_dir, related_infos=None):
+    file_path = os.path.abspath(str(file_path or ""))
+    target_dir = os.path.abspath(str(target_dir or ""))
+    bundle_paths = _collect_disk_bundle_paths(file_path)
+    if not file_path or not target_dir or not bundle_paths:
+        return {"moved": False, "primary_path": file_path, "move_map": {}, "conflict": ""}
+
+    move_map = {}
+    for src_path in bundle_paths:
+        dest_path = os.path.join(target_dir, os.path.basename(src_path))
+        if os.path.abspath(dest_path) == src_path:
+            continue
+        if os.path.exists(dest_path):
+            return {"moved": False, "primary_path": file_path, "move_map": {}, "conflict": dest_path}
+        move_map[src_path] = dest_path
+
+    os.makedirs(target_dir, exist_ok=True)
+    manifest_exts = {".cue", ".gdi"}
+    move_order = [p for p in bundle_paths if os.path.splitext(p)[1].lower() not in manifest_exts]
+    move_order += [p for p in bundle_paths if os.path.splitext(p)[1].lower() in manifest_exts]
+
+    for src_path in move_order:
+        dest_path = move_map.get(src_path)
+        if not dest_path:
+            continue
+        shutil.move(src_path, dest_path)
+
+    for path in bundle_paths:
+        final_path = move_map.get(path, path)
+        if os.path.splitext(final_path)[1].lower() in manifest_exts:
+            _rewrite_disk_manifest_to_local_paths(final_path)
+
+    if related_infos:
+        for info in related_infos:
+            old_path = os.path.abspath(str(info.get("file_path") or ""))
+            if old_path in move_map:
+                new_path = move_map[old_path]
+                info["file_path"] = new_path
+                info["filename"] = os.path.basename(new_path)
+                try:
+                    info["size_bytes"] = os.path.getsize(new_path)
+                    info["mtime"] = os.path.getmtime(new_path)
+                except Exception:
+                    pass
+
+    return {
+        "moved": bool(move_map),
+        "primary_path": move_map.get(file_path, file_path),
+        "move_map": move_map,
+        "conflict": "",
+    }
 
 
 def _is_bios_file(file_or_path):
@@ -1826,8 +2246,8 @@ def _query_arcade_dat(stem, internal_crcs=None):
 def _detect_rom_info(file_path):
     """ROM 파일의 코어(core), 플랫폼(platform), 타이틀(title), 게임코드 등을 자동 감지합니다."""
     info = {
-        "core": "gba",
-        "platform": "GBA",
+        "core": "",
+        "platform": "",
         "title": "",
         "game_code": "",
         "maker_code": "",
@@ -1842,6 +2262,7 @@ def _detect_rom_info(file_path):
         "metadata_source": "",
         "metadata_confidence": 0,
         "disk_missing_files": [],
+        "resolved_disk_files": [],
         "disc_count": 1,
     }
     ext = os.path.splitext(file_path)[1].lower()
@@ -2190,9 +2611,11 @@ def _detect_rom_info(file_path):
         elif ext in DISK_IMAGE_EXTS:
             disk_details = _resolve_disk_sidecars(file_path)
             info["disk_missing_files"] = disk_details.get("missing_files") or []
+            info["resolved_disk_files"] = disk_details.get("resolved_files") or []
             info["disc_count"] = int(disk_details.get("disc_count") or 1)
+            path_lower = os.path.abspath(file_path).lower().replace("\\", "/")
             # CD/디스크 이미지 시리얼 스캔 (PS1 / PBP 등)
-            serial = disk_details.get("serial_code") or _scan_cd_serial(file_path)
+            serial = disk_details.get("serial_code") or ""
             if serial:
                 serial_upper = serial.upper()
                 if serial_upper.startswith(("MK", "GS", "T-", "GS-")) or "T-" in serial_upper:
@@ -2214,6 +2637,16 @@ def _detect_rom_info(file_path):
                 info["core"] = "dreamcast"
                 info["platform"] = "Dreamcast"
                 info["source_system"] = "sidecar"
+            elif ext == ".cue" and (info["resolved_disk_files"] or info["disk_missing_files"]):
+                info["source_system"] = "sidecar"
+                if any(tok in path_lower for tok in ("/saturn/", "/segasaturn/")):
+                    info["core"] = "saturn"
+                    info["platform"] = "Saturn"
+                    info["needed_bios"] = "saturn_bios.bin"
+                else:
+                    info["core"] = "psx"
+                    info["platform"] = "PS1"
+                    info["needed_bios"] = "scph5501.bin"
         try:
             with open(file_path, "rb") as f:
                 raw_data = f.read(0x10000)
@@ -2368,6 +2801,19 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         os.makedirs(roms_dir, exist_ok=True)
         return roms_dir
 
+    def _get_romm_library_dir(self):
+        """RomM 표준 library 디렉터리 탐색 (/mnt/gdrive/emulatorjs/romm_library 또는 ../../data/bookoasis_gamebooks/romm_library)"""
+        candidates = [
+            "/mnt/gdrive/emulatorjs/romm_library/library",
+            "/mnt/gdrive/emulatorjs/romm_library",
+            os.path.join(self._get_data_dir(), "romm_library", "library"),
+            os.path.join(self._get_data_dir(), "romm_library"),
+        ]
+        for c in candidates:
+            if os.path.isdir(c):
+                return c
+        return None
+
     def _get_user_saves_dir(self, user_id=None):
         """유저별 세이브 파일 디렉터리 (../../data/bookoasis_gamebooks/saves/user_{user_id}/)"""
         if user_id is None:
@@ -2463,6 +2909,100 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         os.makedirs(bios_dir, exist_ok=True)
         return bios_dir
 
+    def _get_runtime_bios_candidates(self, required_bios):
+        req = _normalize_required_archive(required_bios)
+        if not req:
+            return []
+
+        candidates = [req]
+        if req.startswith("scph") and req.endswith(".bin"):
+            candidates.extend(["scph5501.bin", "scph1001.bin", "scph5500.bin", "scph5502.bin", "scph7001.bin"])
+        elif req == "bios_cd_u.bin":
+            candidates.extend(["bios_cd_u.bin", "bios_cd_j.bin", "bios_cd_e.bin"])
+
+        unique = []
+        seen = set()
+        for name in candidates:
+            safe_name = os.path.basename(str(name or "").strip())
+            lower_name = safe_name.lower()
+            if safe_name and lower_name not in seen:
+                unique.append(safe_name)
+                seen.add(lower_name)
+        return unique
+
+    def _iter_runtime_bios_dirs(self, game_file_path=None, game_id=None):
+        resolved_game_path = game_file_path or ""
+        if not resolved_game_path and game_id:
+            try:
+                rows = self._db_query("SELECT file_path FROM games WHERE id = ?", (game_id,))
+                if rows:
+                    resolved_game_path = rows[0].get("file_path") or ""
+            except Exception:
+                resolved_game_path = ""
+
+        search_dirs = []
+        if resolved_game_path:
+            game_dir = os.path.dirname(os.path.abspath(resolved_game_path))
+            if game_dir:
+                search_dirs.append(game_dir)
+                # RomM 구조: library/{platform}/roms -> library/{platform}/bios 도 자동 탐색
+                if os.path.basename(game_dir).lower() == "roms":
+                    plat_bios = os.path.join(os.path.dirname(game_dir), "bios")
+                    if os.path.isdir(plat_bios):
+                        search_dirs.append(plat_bios)
+
+        # RomM library 전체 bios 디렉터리 추가
+        romm_lib = self._get_romm_library_dir()
+        if romm_lib and os.path.isdir(romm_lib):
+            try:
+                for p_entry in os.listdir(romm_lib):
+                    p_bios = os.path.join(romm_lib, p_entry, "bios")
+                    if os.path.isdir(p_bios):
+                        search_dirs.append(p_bios)
+            except Exception:
+                pass
+
+        search_dirs.append(self._get_bios_dir())
+        search_dirs.append(self._get_roms_dir())
+
+        extra_p = self._get_setting("EXTRA_ROMS_PATH", "").strip()
+        if extra_p and os.path.isdir(extra_p):
+            search_dirs.append(extra_p)
+
+        seen = set()
+        for sdir in search_dirs:
+            if not sdir or not os.path.isdir(sdir):
+                continue
+            abs_dir = os.path.abspath(sdir)
+            if abs_dir in seen:
+                continue
+            seen.add(abs_dir)
+            yield abs_dir
+
+    def _find_runtime_bios_path(self, required_bios, game_file_path=None, game_id=None):
+        candidate_names = self._get_runtime_bios_candidates(required_bios)
+        if not candidate_names:
+            return None
+
+        for sdir in self._iter_runtime_bios_dirs(game_file_path=game_file_path, game_id=game_id):
+            for candidate in candidate_names:
+                exact_path = os.path.join(sdir, candidate)
+                if os.path.isfile(exact_path):
+                    return exact_path
+
+            try:
+                lower_map = {str(f).lower(): f for f in os.listdir(sdir)}
+            except Exception:
+                lower_map = {}
+
+            for candidate in candidate_names:
+                actual_name = lower_map.get(candidate.lower())
+                if actual_name:
+                    actual_path = os.path.join(sdir, actual_name)
+                    if os.path.isfile(actual_path):
+                        return actual_path
+        return None
+
     def _migrate_bios_to_custom_dir(self, new_dir):
         """기존 바이오스 폴더의 파일들을 새로 설정된 폴더로 이동"""
         if not new_dir:
@@ -2504,6 +3044,148 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         self._migrate_old_plugin_data()
         self._init_db()
         self._migrate_bios_files()
+        self._init_romm_migration_state()
+
+    def _init_romm_migration_state(self):
+        """DB에 저장된 RomM 마이그레이션 상태를 전역 상태 매니저로 동기화"""
+        try:
+            saved_state = self._get_setting("ROMM_MIGRATION_STATE", "").strip()
+            if not saved_state:
+                # 초기 상태 확인: 만약 romm_library에 이미 복사 완료된 상태인지 확인
+                target_romm_root = self._get_romm_library_dir()
+                if target_romm_root:
+                    saved_state = "completed"
+                else:
+                    saved_state = "not_started"
+                self._set_setting("ROMM_MIGRATION_STATE", saved_state)
+
+            _update_romm_migration_progress(
+                state=saved_state,
+                phase="idle" if saved_state != "running" else "running",
+                percent=100 if saved_state == "completed" else 0,
+            )
+        except Exception as e:
+            logger.warning(f"[{SELF_ID}] Init romm migration state error: {e}")
+
+    def _start_async_romm_migration(self, force=False, rclone_config_content=None, rclone_remote=None, rclone_mount_base=None):
+        """백그라운드 스레드로 RomM 자동 복사 마이그레이션 실행"""
+        with _ROMM_MIGRATION_LOCK:
+            if _ROMM_MIGRATION_PROGRESS["is_running"]:
+                return False, "이미 마이그레이션이 진행 중입니다."
+            if not force and _ROMM_MIGRATION_PROGRESS["state"] == "completed":
+                return True, "이미 마이그레이션이 완료되었습니다."
+            _ROMM_MIGRATION_PROGRESS["is_running"] = True
+            _ROMM_MIGRATION_PROGRESS["state"] = "running"
+            _ROMM_MIGRATION_PROGRESS["phase"] = "starting"
+            _ROMM_MIGRATION_PROGRESS["percent"] = 0
+            _ROMM_MIGRATION_PROGRESS["error"] = ""
+            _ROMM_MIGRATION_PROGRESS["updated_at"] = time.time()
+
+        self._set_setting("ROMM_MIGRATION_STATE", "running")
+
+        # 인자로 넘어오지 않은 경우 저장된 설정 조회
+        if not rclone_config_content:
+            rclone_config_content = self._get_setting("RCLONE_CONFIG_CONTENT", "").strip() or None
+        if not rclone_remote:
+            rclone_remote = self._get_setting("RCLONE_REMOTE", "").strip() or None
+        if not rclone_mount_base:
+            rclone_mount_base = self._get_setting("RCLONE_MOUNT_BASE", "").strip() or None
+
+        _update_romm_migration_progress(
+            is_running=True,
+            state="running",
+            phase="starting",
+            percent=0,
+            error="",
+        )
+
+        def _worker():
+            try:
+                import sys
+                if _PLUGIN_DIR not in sys.path:
+                    sys.path.insert(0, _PLUGIN_DIR)
+
+                from tools.romm_migration_config import MANIFEST_PATH
+                from tools.romm_migration_plan import build_dry_run_plan
+                from tools.romm_migration_apply import execute_migration_plan
+
+                logger.info(f"[{SELF_ID}] RomM Migration worker starting. manifest_exists={MANIFEST_PATH.is_file()}")
+                _update_romm_migration_progress(
+                    is_running=True,
+                    phase="planning",
+                    current_item="최신 파일 및 메타데이터 계획 분석 중...",
+                    details="소스 ROM, BIOS, 커버 인덱스 구성 중",
+                )
+
+                # 1. 기존 생성된 plan이 있으면 재사용하고 없으면 생성
+                if not MANIFEST_PATH.is_file():
+                    build_dry_run_plan()
+
+                logger.info(f"[{SELF_ID}] RomM Migration execute_migration_plan call begin")
+
+                # 2. 실행
+                def _apply_cb(p):
+                    _update_romm_migration_progress(
+                        is_running=True,
+                        phase=p.get("phase", "running"),
+                        percent=p.get("percent", 0),
+                        current=p.get("current", 0),
+                        total=p.get("total", 0),
+                        current_item=p.get("current_item", ""),
+                        details=p.get("details", ""),
+                        copied_rom_files=p.get("copied_rom_files", 0),
+                        copied_bios_files=p.get("copied_bios_files", 0),
+                        copied_cover_files=p.get("copied_cover_files", 0),
+                        failed_count=p.get("failed_count", 0),
+                    )
+
+                res = execute_migration_plan(
+                    progress_cb=_apply_cb,
+                    rclone_config_content=rclone_config_content,
+                    rclone_remote=rclone_remote,
+                    rclone_mount_base=rclone_mount_base,
+                )
+
+                if res.get("success"):
+                    _update_romm_migration_progress(
+                        is_running=False,
+                        state="completed",
+                        phase="completed",
+                        percent=100,
+                        current_item="마이그레이션 완료",
+                        details=f"ROM {res.get('copied_rom_files', 0)}개, BIOS {res.get('copied_bios_files', 0)}개, Cover {res.get('copied_cover_files', 0)}개 복사 완료",
+                    )
+                    self._set_setting("ROMM_MIGRATION_STATE", "completed")
+                    # 새 romm_library 경로 기준으로 전체 재스캔 1회 자동 가동
+                    try:
+                        logger.info(f"[{SELF_ID}] Auto triggering full scan after RomM migration...")
+                        self._scan_roms(force_full=True)
+                    except Exception as scan_err:
+                        logger.warning(f"[{SELF_ID}] Post-migration scan warning: {scan_err}")
+                else:
+                    err_msg = f"마이그레이션 중 일부 오류 발생 (실패: {res.get('failed_count', 0)}건)"
+                    _update_romm_migration_progress(
+                        is_running=False,
+                        state="failed",
+                        phase="failed",
+                        error=err_msg,
+                        details=err_msg,
+                    )
+                    self._set_setting("ROMM_MIGRATION_STATE", "failed")
+
+            except Exception as ex:
+                logger.error(f"[{SELF_ID}] RomM Migration worker error: {ex}")
+                _update_romm_migration_progress(
+                    is_running=False,
+                    state="failed",
+                    phase="failed",
+                    error=str(ex),
+                    details=str(ex),
+                )
+                self._set_setting("ROMM_MIGRATION_STATE", "failed")
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True, "마이그레이션이 시작되었습니다."
 
     def _migrate_bios_files(self):
         """roms/ 폴더에 혼재된 바이오스 및 MAME 기판/디바이스 파일을 bios/ 폴더로 자동 분류 이동"""
@@ -2844,10 +3526,16 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         """
         self._migrate_bios_files()
 
-        scan_dirs = [self._get_roms_dir()]
+        scan_dirs = []
+        # RomM 마이그레이션이 완료된 경우 romm_library/library를 최우선 스캔
+        romm_lib_dir = self._get_romm_library_dir()
+        if romm_lib_dir and os.path.isdir(romm_lib_dir):
+            scan_dirs.append(romm_lib_dir)
+
+        scan_dirs.append(self._get_roms_dir())
 
         extra_path = self._get_setting("EXTRA_ROMS_PATH", "").strip()
-        if extra_path and os.path.isdir(extra_path):
+        if extra_path and os.path.isdir(extra_path) and extra_path not in scan_dirs:
             scan_dirs.append(extra_path)
 
         bios_dir = os.path.abspath(self._get_bios_dir())
@@ -2858,13 +3546,20 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         for sdir in scan_dirs:
             try:
-                for root, _, files in os.walk(sdir):
+                for root, dirs, files in os.walk(sdir):
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
                     abs_root = os.path.abspath(root)
                     # 바이오스 폴더 또는 커버 폴더 하위 경로는 롬 스캔 대상에서 원천 제외
                     if abs_root.startswith(bios_dir) or abs_root.startswith(covers_dir):
+                        dirs[:] = []
+                        continue
+                    rel_root = os.path.relpath(abs_root, os.path.abspath(sdir))
+                    if rel_root != "." and any(part.startswith(".") for part in rel_root.split(os.sep)):
                         continue
 
                     for f in files:
+                        if f.startswith("."):
+                            continue
                         if _is_bios_file(f):
                             continue
                         ext = os.path.splitext(f)[1].lower()
@@ -2959,8 +3654,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                 clean_title = _resolve_korean_game_title(info["filename"], target_for_kor)
                 disk_missing_files = rom_info.get("disk_missing_files") or []
-                if disk_missing_files:
-                    rom_info["source_system"] = rom_info.get("source_system") or "sidecar"
+                if disk_missing_files and str(rom_info.get("source_system") or "").strip() in ("", "filename"):
+                    rom_info["source_system"] = "sidecar"
                 identity_info = _collect_identity_fields(info["file_path"], rom_info, clean_title, info["size_bytes"])
 
                 return {
@@ -3045,22 +3740,22 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         gid = new_gid
                     except Exception as conv_ex:
                         logger.error(f"[{SELF_ID}] Scan 7z convert error: {conv_ex}")
-                elif current_folder_name != target_core_folder and current_folder_name not in ("roms", ""):
+                elif f_ext in (".cue", ".gdi") or (current_folder_name != target_core_folder and current_folder_name not in ("roms", "")):
                     try:
                         ideal_dir = os.path.join(base_dir, target_core_folder)
                         os.makedirs(ideal_dir, exist_ok=True)
-                        dest_file_path = os.path.join(ideal_dir, info["filename"])
-                        if not os.path.exists(dest_file_path):
-                            shutil.move(curr_file_path, dest_file_path)
-                            available_rom_names.discard(str(info.get("filename") or "").lower())
+                        original_path = curr_file_path
+                        move_result = _move_disk_bundle(curr_file_path, ideal_dir, related_infos=found_files.values())
+                        dest_file_path = move_result.get("primary_path") or original_path
+                        if move_result.get("moved") and dest_file_path != original_path:
                             curr_file_path = dest_file_path
                             info["file_path"] = dest_file_path
-                            available_rom_names.add(info["filename"].lower())
-                            
+                            info["filename"] = os.path.basename(dest_file_path)
+
                             sdir = info.get("sdir") or base_dir
                             rel = os.path.relpath(dest_file_path, sdir)
                             new_gid = _sanitize_id(f"{os.path.basename(sdir)}_{rel}")
-                            
+
                             for c_ext in (".png", ".jpg", ".jpeg", ".webp"):
                                 old_c = os.path.join(covers_dir, f"{gid}{c_ext}")
                                 if os.path.exists(old_c):
@@ -3070,11 +3765,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                     except Exception:
                                         pass
                                     break
-                            
+
                             if gid in found_files:
                                 del found_files[gid]
                             found_files[new_gid] = info
                             gid = new_gid
+                        elif move_result.get("conflict"):
+                            logger.warning(f"[{SELF_ID}] Skip disk bundle move due to existing target: {move_result.get('conflict')}")
                     except Exception as move_ex:
                         logger.error(f"[{SELF_ID}] Move rom to ideal folder error: {move_ex}")
 
@@ -3359,9 +4056,63 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         if not rows or not os.path.exists(rows[0]["file_path"]):
             abort(404, "ROM file not found")
 
-        file_path = rows[0]["file_path"]
-        actual_filename = filename or rows[0]["filename"]
+        root_file_path = rows[0]["file_path"]
+        requested_filename = os.path.basename((filename or rows[0]["filename"] or "").strip())
+        served_path = root_file_path
+        root_filename = os.path.basename(rows[0]["filename"] or root_file_path)
+        expected_bundle_filename = os.path.splitext(root_filename)[0] + ".zip"
+
+        # 멀티파일 ROM (디스크 번들: .cue + .bin, .gdi 등) 기본 다운로드/실행 요청 시 ZIP 번들 생성 서빙
+        # requested_filename이 특정 sidecar 파일을 명시적으로 요구한 경우가 아니면 bundle zip으로 서빙
+        is_direct_sidecar_request = False
+        if requested_filename and requested_filename not in (root_filename, expected_bundle_filename):
+            for candidate_path in _collect_disk_bundle_paths(root_file_path):
+                if os.path.basename(candidate_path) == requested_filename:
+                    served_path = candidate_path
+                    is_direct_sidecar_request = True
+                    break
+            else:
+                abort(404, "ROM sidecar file not found")
+
+        file_path = served_path
+        actual_filename = os.path.basename(file_path)
         ext = os.path.splitext(file_path)[1].lower()
+
+        # 멀티파일 디스크 번들 (.cue, .gdi 등 또는 sidecar가 2개 이상 존재하는 경우):
+        # RomM 표준에 맞춰 백엔드에서 zip + .m3u 아티팩트를 조립하여 EJS_gameUrl 단일 진입점으로 서빙
+        if not is_direct_sidecar_request and ext in (".cue", ".gdi", ".bin", ".iso", ".img"):
+            bundle_files = [p for p in _collect_disk_bundle_paths(root_file_path) if os.path.isfile(p)]
+            if len(bundle_files) > 1:
+                try:
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                        has_m3u = any(p.lower().endswith(".m3u") for p in bundle_files)
+                        for b_path in bundle_files:
+                            b_name = os.path.basename(b_path)
+                            zout.write(b_path, b_name)
+
+                        # .m3u가 번들에 없고 .cue가 포함되어 있는 경우 플레이리스트 자동 추가
+                        if not has_m3u:
+                            clean_stem = os.path.splitext(os.path.basename(root_file_path))[0]
+                            m3u_bytes = _generate_m3u_content_for_paths(bundle_files)
+                            if m3u_bytes:
+                                zout.writestr(f"{clean_stem}.m3u", m3u_bytes)
+
+                    zip_bytes = zip_buffer.getvalue()
+                    clean_stem = os.path.splitext(os.path.basename(root_file_path))[0]
+                    zip_filename = f"{clean_stem}.zip"
+
+                    ascii_fallback = re.sub(r"[^\x20-\x7E]", "_", zip_filename)
+                    encoded_filename = urllib.parse.quote(zip_filename)
+                    content_disposition = f'inline; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_filename}'
+
+                    resp = Response(zip_bytes, 200, mimetype="application/zip")
+                    resp.headers["Content-Length"] = str(len(zip_bytes))
+                    resp.headers["Content-Disposition"] = content_disposition
+                    resp.headers["Cache-Control"] = "public, max-age=86400"
+                    return resp
+                except Exception as b_err:
+                    logger.error(f"[{SELF_ID}] Multi-file disk bundle zip creation error: {b_err}")
 
         # .7z 압축 롬 파일인 경우: py7zr을 이용해 내부 롬 파일을 표준 .zip 형식으로 메모리 변환하여 서빙
         if ext == ".7z":
@@ -3463,30 +4214,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         from flask import Response, request
 
         safe_name = os.path.basename(filename)
-        search_dirs = [self._get_bios_dir(), self._get_roms_dir()]
-        extra_p = self._get_setting("EXTRA_ROMS_PATH", "").strip()
-        if extra_p and os.path.isdir(extra_p):
-            search_dirs.append(extra_p)
-
-        target_path = None
-        for sdir in search_dirs:
-            p = os.path.join(sdir, safe_name)
-            if os.path.isfile(p):
-                target_path = p
-                break
-
-        if not target_path:
-            for sdir in search_dirs:
-                if os.path.exists(sdir):
-                    try:
-                        for f in os.listdir(sdir):
-                            if f.lower() == safe_name.lower():
-                                target_path = os.path.join(sdir, f)
-                                break
-                    except Exception:
-                        pass
-                    if target_path:
-                        break
+        game_id = request.args.get("game_id", "").strip()
+        target_path = self._find_runtime_bios_path(safe_name, game_id=game_id if game_id else None)
 
         if not target_path or not os.path.isfile(target_path):
             return Response("BIOS file not found", 404)
@@ -3650,22 +4379,51 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         """커버 이미지 서빙"""
         from flask import Response, abort
 
-        rows = self._db_query("SELECT cover_path FROM games WHERE id = ?", (game_id,))
+        rows = self._db_query("SELECT cover_path, file_path, normalized_title, title FROM games WHERE id = ?", (game_id,))
+        cover_path = None
         if rows and rows[0]["cover_path"] and os.path.exists(rows[0]["cover_path"]):
             cover_path = rows[0]["cover_path"]
         else:
-            for ext in (".png", ".jpg", ".jpeg", ".webp"):
-                p = os.path.join(self._get_covers_dir(), f"{game_id}{ext}")
-                if os.path.exists(p):
-                    cover_path = p
+            search_dirs = [self._get_covers_dir()]
+            # RomM resources 및 assets 커버 경로 보강
+            romm_root = self._get_romm_library_dir() or os.path.join(self._get_data_dir(), "romm_library")
+            if romm_root.endswith("/library"):
+                romm_root = os.path.dirname(romm_root)
+            romm_res = os.path.join(romm_root, "resources", "roms")
+            romm_assets = os.path.join(romm_root, "assets", "covers")
+            if os.path.isdir(romm_assets):
+                search_dirs.append(romm_assets)
+
+            # 1. game_id 매칭
+            for sdir in search_dirs:
+                for ext in (".png", ".jpg", ".jpeg", ".webp"):
+                    p = os.path.join(sdir, f"{game_id}{ext}")
+                    if os.path.exists(p):
+                        cover_path = p
+                        break
+                if cover_path:
                     break
-            else:
+
+            # 2. RomM resources/{rom_id}/cover/cover.* 매칭
+            if not cover_path and rows and os.path.isdir(romm_res):
+                g_title = (rows[0].get("normalized_title") or rows[0].get("title") or "").strip().lower()
+                for c_dir in os.listdir(romm_res):
+                    c_cover_dir = os.path.join(romm_res, c_dir, "cover")
+                    if os.path.isdir(c_cover_dir):
+                        for cf in os.listdir(c_cover_dir):
+                            if cf.startswith("cover."):
+                                cover_path = os.path.join(c_cover_dir, cf)
+                                break
+                    if cover_path:
+                        break
+
+            if not cover_path or not os.path.exists(cover_path):
                 abort(404, "Cover image not found")
 
-        ext = os.path.splitext(cover_path)[1].lower().replace(".", "")
+        ext = os.path.splitext(str(cover_path))[1].lower().replace(".", "")
         mime = "image/png" if ext == "png" else "image/jpeg" if ext in ("jpg", "jpeg") else "image/webp"
 
-        with open(cover_path, "rb") as f:
+        with open(str(cover_path), "rb") as f:
             data = f.read()
 
         resp = Response(data, 200, mimetype=mime)
@@ -3787,6 +4545,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     shutil.move(temp_dest, dest_path)
             else:
                 shutil.move(temp_dest, dest_path)
+                bundle_result = _move_disk_bundle(dest_path, target_sub_dir)
+                dest_path = bundle_result.get("primary_path") or dest_path
+                safe_filename = os.path.basename(dest_path)
 
             self._scan_roms()
 
@@ -4064,6 +4825,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         try:
             if action == "list_games":
+                # RomM 자동 마이그레이션 상태 확인: 미시작 상태인 경우 백그라운드 자동 가동
+                migration_status = _get_romm_migration_status()
+                if migration_status.get("state") in ("not_started", "failed"):
+                    self._start_async_romm_migration(force=False)
+                    migration_status = _get_romm_migration_status()
+
                 # DB에 게임 데이터가 한 건도 없을 때만 최초 1회 자동 초기 스캔
                 game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
                 if not game_count_row or game_count_row[0]["cnt"] == 0:
@@ -4119,8 +4886,18 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     except Exception:
                         pass
 
+                bios_lookup_cache = {}
+                visible_games = []
                 for g in games:
                     gid = g["id"]
+                    file_path = g.get("file_path") or ""
+                    if not file_path or not os.path.exists(file_path):
+                        try:
+                            self._db_execute("DELETE FROM games WHERE id = ?", (gid,))
+                            self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (gid,))
+                        except Exception:
+                            pass
+                        continue
                     has_sav = f"{gid}.sav" in existing_saves
                     has_state = f"{gid}.state" in existing_saves or f"{gid}_slot1.state" in existing_saves
 
@@ -4129,10 +4906,26 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     url_fname = g["filename"]
                     if url_fname.lower().endswith(".7z"):
                         url_fname = os.path.splitext(url_fname)[0] + ".zip"
+                    elif os.path.splitext(url_fname)[1].lower() in (".cue", ".gdi") or bool(g.get("disk_file_urls")):
+                        # 멀티파일 ROM (디스크 번들)은 ZIP 번들로 확장자 매핑
+                        url_fname = os.path.splitext(url_fname)[0] + ".zip"
                     g["rom_url"] = f"{ROUTE_BASE}/rom/{gid}/{urllib.parse.quote(url_fname)}"
+                    g["disk_file_urls"] = _build_disk_file_url_map(gid, file_path, g["filename"])
                     g["save_url"] = f"{ROUTE_BASE}/save/{gid}?user_id={user_id}"
                     g["state_url"] = f"{ROUTE_BASE}/state/{gid}?user_id={user_id}"
                     g["cover_url"] = f"{ROUTE_BASE}/cover/{gid}"
+                    needed_bios = str(g.get("needed_bios") or "").strip()
+                    if needed_bios:
+                        game_dir = os.path.dirname(os.path.abspath(g.get("file_path") or "")) if g.get("file_path") else ""
+                        cache_key = (game_dir, needed_bios.lower())
+                        has_needed_bios = bios_lookup_cache.get(cache_key)
+                        if has_needed_bios is None:
+                            has_needed_bios = 1 if self._find_runtime_bios_path(needed_bios, game_file_path=g.get("file_path") or "") else 0
+                            bios_lookup_cache[cache_key] = has_needed_bios
+                        g["has_needed_bios"] = has_needed_bios
+                    else:
+                        g["has_needed_bios"] = 0
+                    visible_games.append(g)
 
                 available_bios = []
                 bios_dir = self._get_bios_dir()
@@ -4146,11 +4939,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                 return {
                     "success": True,
-                    "games": games,
-                    "total_count": len(games),
+                    "games": visible_games,
+                    "total_count": len(visible_games),
                     "available_bios": sorted(list(set(available_bios))),
                     "user_id": user_id,
                     "is_admin": _is_current_user_admin(),
+                    "migration": migration_status,
                     "config": {
                         "cloud_save_enabled": str(self._get_setting("CLOUD_SAVE_ENABLED", "1")).lower() in ("1", "true", "yes", "on"),
                         "auto_save_interval_sec": int(self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")),
@@ -4163,6 +4957,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "ss_password": str(self._get_setting("SS_PASSWORD", "") or "").strip(),
                         "igdb_client_id": str(self._get_setting("IGDB_CLIENT_ID", "") or "").strip(),
                         "igdb_client_secret": str(self._get_setting("IGDB_CLIENT_SECRET", "") or "").strip(),
+                        "rclone_remote": str(self._get_setting("RCLONE_REMOTE", "google_drive") or "google_drive").strip(),
+                        "rclone_mount_base": str(self._get_setting("RCLONE_MOUNT_BASE", "/mnt/gdrive") or "/mnt/gdrive").strip(),
+                        "rclone_config_content": str(self._get_setting("RCLONE_CONFIG_CONTENT", "") or "").strip(),
                         "max_content_length_mb": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100),
                         "max_upload_bytes": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100) * 1024 * 1024,
                     },
@@ -4333,6 +5130,29 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "success": True,
                     "progress": prog,
                     "cover_queue": _get_cover_queue_status(),
+                }
+
+            elif action == "migration_status":
+                return {
+                    "success": True,
+                    "migration": _get_romm_migration_status(),
+                }
+
+            elif action == "start_migration":
+                force = str(request.args.get("force", "")).lower() in ("1", "true", "yes")
+                rclone_config_content = str(request.args.get("rclone_config_content", "")).strip() or None
+                rclone_remote = str(request.args.get("rclone_remote", "")).strip() or None
+                rclone_mount_base = str(request.args.get("rclone_mount_base", "")).strip() or None
+                started, msg = self._start_async_romm_migration(
+                    force=force,
+                    rclone_config_content=rclone_config_content,
+                    rclone_remote=rclone_remote,
+                    rclone_mount_base=rclone_mount_base,
+                )
+                return {
+                    "success": started,
+                    "message": msg,
+                    "migration": _get_romm_migration_status(),
                 }
 
             elif action == "cover_queue_status":
@@ -4587,6 +5407,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 ss_password = str(_get_val("ss_password", "")).strip()
                 igdb_client_id = str(_get_val("igdb_client_id", "")).strip()
                 igdb_client_secret = str(_get_val("igdb_client_secret", "")).strip()
+                rclone_remote = str(_get_val("rclone_remote", "")).strip()
+                rclone_mount_base = str(_get_val("rclone_mount_base", "")).strip()
+                rclone_config_content = str(_get_val("rclone_config_content", "")).strip()
 
                 cloud_save = True if str(cloud_save_raw).lower() in ("1", "true", "yes", "on") else False
                 try:
@@ -4608,6 +5431,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 self._set_setting("SS_PASSWORD", ss_password)
                 self._set_setting("IGDB_CLIENT_ID", igdb_client_id)
                 self._set_setting("IGDB_CLIENT_SECRET", igdb_client_secret)
+                if rclone_remote:
+                    self._set_setting("RCLONE_REMOTE", rclone_remote)
+                if rclone_mount_base:
+                    self._set_setting("RCLONE_MOUNT_BASE", rclone_mount_base)
+                if rclone_config_content:
+                    self._set_setting("RCLONE_CONFIG_CONTENT", rclone_config_content)
 
                 # 커버 이미지 폴더가 새로 지정되었거나 변경되었을 경우 기존 커버 파일들을 새 위치로 마이그레이션
                 if covers_path and covers_path != prev_covers_path:

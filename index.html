@@ -170,6 +170,23 @@
     </div>
   </div>
 
+  <!-- RomM 자동 마이그레이션 모달 -->
+  <div id="gbaMigrationModal" class="gba-modal" style="display: none; z-index: 99999;">
+    <div class="gba-modal-box">
+      <div class="gba-modal-header">
+        <h3><i class="fa-solid fa-layer-group fa-spin"></i> RomM 표준 라이브러리 자동 마이그레이션</h3>
+      </div>
+      <div class="gba-modal-body">
+        <div class="gba-upload-status" id="gbaMigrationStatus">RomM 표준 구조로 게임 및 바이오스/커버를 안전하게 재배치하는 중...</div>
+        <div class="gba-progress-bar-wrap">
+          <div class="gba-progress-bar gba-migration-progress-bar" id="gbaMigrationProgressBar" style="width: 0%;"></div>
+        </div>
+        <div class="gba-upload-details" id="gbaMigrationDetails">준비 중...</div>
+        <div class="gba-upload-subdetails" id="gbaMigrationSubDetails" style="font-size: 11px; color: #888; margin-top: 6px; text-align: center;">기존 원본 파일은 안전하게 보존(Copy-first)됩니다.</div>
+      </div>
+    </div>
+  </div>
+
   <!-- 홈브류 허브 모달 -->
   <div id="gbaHomebrewModal" class="gba-modal" style="display: none;">
     <div class="gba-modal-box gba-homebrew-modal-box">
@@ -239,6 +256,18 @@
           <label class="gba-label">바이오스(BIOS) 저장 폴더 경로 (선택)</label>
           <input type="text" id="gbaSettingBiosPath" class="gba-input" placeholder="/mnt/nas/bios">
           <small class="gba-help-text">비워두면 기본 경로(<code>plugins/data/bookoasis_gamebooks/bios/</code>)를 유지합니다. 경로를 지정하여 저장하면 현재 등록된 기존 바이오스 및 기판 롬 파일들도 해당 폴더로 자동 이동됩니다.</small>
+        </div>
+
+        <div class="gba-form-group">
+          <label class="gba-label"><i class="fa-brands fa-google-drive"></i> Rclone 마운트 연동 (구글드라이브 고속 마이그레이션)</label>
+          <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+            <input type="text" id="gbaSettingRcloneRemote" class="gba-input" style="flex: 1;" placeholder="remote 이름 (예: google_drive)" value="google_drive">
+            <input type="text" id="gbaSettingRcloneMountBase" class="gba-input" style="flex: 1.5;" placeholder="마운트 절대 경로 (예: /mnt/gdrive)" value="/mnt/gdrive">
+          </div>
+          <div style="margin-top: 6px;">
+            <textarea id="gbaSettingRcloneConfigContent" class="gba-input" style="height: 70px; font-family: monospace; font-size: 11px; resize: vertical;" placeholder="[google_drive] rclone.conf 섹션 설정 본문 붙여넣기 (선택: 외부 원본 파일 의존 없이 자체 구동)"></textarea>
+          </div>
+          <small class="gba-help-text">구글드라이브 마운트 경로일 때 해당 remote 설정 섹션을 입력하면, 외부 원본 rclone.conf 없이 안전하게 서버 사이드 고속 복사(Server-side copy)를 실행합니다.</small>
         </div>
 
         <div class="gba-storage-info">
@@ -414,6 +443,17 @@
     <!-- 에뮬레이터 화면 뷰포트 -->
     <div class="gba-emulator-viewport" id="gbaEmulatorViewport">
       <div id="gbaEmulatorContainer" class="gba-emulator-container"></div>
+      <div id="gbaLaunchOverlay" class="gba-launch-overlay" style="display: none;">
+        <div class="gba-launch-overlay-box">
+          <div class="gba-spinner gba-launch-spinner"></div>
+          <div class="gba-launch-title" id="gbaLaunchTitle">에뮬레이터 준비 중...</div>
+          <div class="gba-launch-desc" id="gbaLaunchDesc">잠시만 기다려 주세요.</div>
+          <div class="gba-launch-progress">
+            <div id="gbaLaunchProgressBar" class="gba-launch-progress-bar indeterminate"></div>
+          </div>
+          <div class="gba-launch-meta" id="gbaLaunchMeta">대용량 ROM은 다운로드와 압축 해제에 시간이 걸릴 수 있습니다.</div>
+        </div>
+      </div>
     </div>
   </div>
 
