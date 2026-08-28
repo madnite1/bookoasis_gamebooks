@@ -29,11 +29,30 @@ from .romm_migration_config import (
     CANCEL_FLAG_PATH,
     COVER_MAP_PATH,
     MANIFEST_PATH,
+    SOURCE_ROOT,
     TARGET_LIBRARY_DIR,
     TARGET_ROMM_ROOT,
 )
 
 logger = logging.getLogger("bookoasis_gamebooks.romm_migration_apply")
+
+
+def _path_within(path: str | Path, root: str | Path) -> bool:
+    try:
+        p = Path(path).expanduser().resolve(strict=False)
+        r = Path(root).expanduser().resolve(strict=False)
+        return p == r or r in p.parents
+    except Exception:
+        return False
+
+
+def _is_expected_romm_root(path: str | Path) -> bool:
+    try:
+        p = Path(path).expanduser().resolve(strict=False)
+        expected = TARGET_ROMM_ROOT.expanduser().resolve(strict=False)
+        return p == expected and p.name == "romm_library" and _path_within(p, SOURCE_ROOT)
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -116,6 +135,12 @@ def _batch_copy_files(
 
     for src_p, dst_p in pairs:
         try:
+            if not _path_within(src_p, SOURCE_ROOT):
+                failed_items.append({"src": str(src_p), "dst": str(dst_p), "error": "source path outside managed root"})
+                continue
+            if not _path_within(dst_p, TARGET_ROMM_ROOT):
+                failed_items.append({"src": str(src_p), "dst": str(dst_p), "error": "target path outside RomM root"})
+                continue
             if not src_p.is_file():
                 failed_items.append({"src": str(src_p), "dst": str(dst_p), "error": "source file not found"})
                 continue
@@ -387,6 +412,13 @@ def rollback_migration(
 
     deleted_files = 0
     errors: List[str] = []
+    if not _is_expected_romm_root(romm_root):
+        return {
+            "success": False,
+            "deleted_files": 0,
+            "db_restored": False,
+            "errors": [f"Refusing rollback for unexpected RomM root: {romm_root}"],
+        }
 
     # 1. rclone 원격 정리 우선 시도 (고속 서버사이드 purge)
     if rclone_remote:
@@ -398,8 +430,9 @@ def rollback_migration(
             from utils.rclone_gdrive_copy import _run_rclone
 
             rel_romm_root = get_rclone_relative_path(str(romm_root))
-            if rel_romm_root and rel_romm_root != ".":
-                remote_target = f"{rclone_remote}:{rel_romm_root}"
+            normalized_rel = str(rel_romm_root or "").replace("\\", "/").strip("/")
+            if normalized_rel and normalized_rel != "." and normalized_rel.endswith("/romm_library") and ".." not in normalized_rel.split("/"):
+                remote_target = f"{rclone_remote}:{normalized_rel}"
                 logger.info(f"Purging remote RomM directory via rclone: {remote_target}")
                 code, _, stderr = _run_rclone(["purge", remote_target], timeout=120)
                 if code == 0:
@@ -419,7 +452,10 @@ def rollback_migration(
                 manifest = json.load(f)
             for item in manifest:
                 for tp in item.get("target_paths", []):
-                    targets_to_delete.append(Path(tp))
+                    if _path_within(tp, romm_root):
+                        targets_to_delete.append(Path(tp))
+                    else:
+                        errors.append(f"Skipped rollback target outside RomM root: {tp}")
         except Exception as e:
             errors.append(f"Failed to read manifest for rollback: {e}")
 
@@ -430,7 +466,10 @@ def rollback_migration(
             for item in bios_map:
                 tb = item.get("target_bios")
                 if tb:
-                    targets_to_delete.append(Path(tb))
+                    if _path_within(tb, romm_root):
+                        targets_to_delete.append(Path(tb))
+                    else:
+                        errors.append(f"Skipped BIOS rollback target outside RomM root: {tb}")
         except Exception as e:
             errors.append(f"Failed to read bios_map for rollback: {e}")
 
@@ -440,7 +479,7 @@ def rollback_migration(
                 p.unlink()
                 deleted_files += 1
         except Exception as ex:
-            pass
+            errors.append(f"Failed to delete rollback target {p}: {ex}")
 
     # 3. 빈 디렉터리 정리
     try:

@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path, PurePosixPath
 
 from plugins.metadata.base import BaseMetadataProvider
 
@@ -41,6 +42,78 @@ def _ensure_plugin_import_paths():
             sys.path.insert(0, p)
 
 logger = logging.getLogger(__name__)
+
+
+def _path_within(path, root):
+    """Resolve symlinks and verify that path is root itself or one of its descendants."""
+    try:
+        p = Path(path).expanduser().resolve(strict=False)
+        r = Path(root).expanduser().resolve(strict=False)
+        return p == r or r in p.parents
+    except Exception:
+        return False
+
+
+def _path_within_any(path, roots):
+    return any(root and _path_within(path, root) for root in roots)
+
+
+def _safe_7z_extract(archive_path, dest_dir, max_files=4096, max_unpacked_bytes=None):
+    """Extract a 7z archive only after path/count/size validation."""
+    import py7zr
+
+    max_unpacked_bytes = max_unpacked_bytes or int(os.environ.get("GAMEBOOKS_MAX_7Z_UNPACKED_MB", "2048")) * 1024 * 1024
+    dest_root = Path(dest_dir).resolve(strict=False)
+    with py7zr.SevenZipFile(str(archive_path), mode="r") as z7:
+        names = z7.getnames()
+        if len(names) > max_files:
+            raise ValueError(f"7z file count exceeds limit ({len(names)} > {max_files})")
+        for raw_name in names:
+            normalized = str(raw_name).replace("\\", "/")
+            pp = PurePosixPath(normalized)
+            if pp.is_absolute() or ".." in pp.parts or (pp.parts and ":" in pp.parts[0]):
+                raise ValueError(f"unsafe 7z member path: {raw_name}")
+        try:
+            total_declared = 0
+            for info in z7.list():
+                size = getattr(info, "uncompressed", None)
+                if size is None:
+                    size = getattr(info, "size", 0)
+                total_declared += int(size or 0)
+            if total_declared > max_unpacked_bytes:
+                raise ValueError(f"7z unpacked size exceeds limit ({total_declared} bytes)")
+        except ValueError:
+            raise
+        except Exception:
+            pass
+        z7.extract(path=str(dest_root))
+
+    file_count = 0
+    total_size = 0
+    for root, _dirs, files in os.walk(dest_root):
+        for name in files:
+            fp = Path(root) / name
+            if not _path_within(fp, dest_root):
+                raise ValueError(f"7z extraction escaped destination: {fp}")
+            file_count += 1
+            total_size += fp.stat().st_size
+            if file_count > max_files or total_size > max_unpacked_bytes:
+                raise ValueError("7z extraction exceeded safety limits")
+    return file_count, total_size
+
+
+def _validate_zip_file(path):
+    """Return True only for a readable, non-empty ZIP with no CRC errors."""
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+            return False
+        with zipfile.ZipFile(path, "r") as zf:
+            if not zf.infolist():
+                return False
+            return zf.testzip() is None
+    except Exception:
+        return False
+
 
 SELF_ID = "bookoasis_gamebooks"
 ROUTE_BASE = f"/api/webhook/{SELF_ID}"
@@ -3705,13 +3778,19 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         ideal_dir = os.path.join(base_dir, target_core_folder)
                         os.makedirs(ideal_dir, exist_ok=True)
                         dest_zip_path = os.path.join(ideal_dir, zip_fname)
-                        with py7zr.SevenZipFile(curr_file_path, mode="r") as z7:
-                            with tempfile.TemporaryDirectory() as tmpdir:
-                                z7.extract(path=tmpdir)
-                                extracted_files = [x for x in os.listdir(tmpdir) if not x.startswith(".")]
-                                with zipfile.ZipFile(dest_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-                                    for ef in extracted_files:
-                                        zout.write(os.path.join(tmpdir, ef), ef)
+                        work_zip_path = dest_zip_path + ".part"
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            _safe_7z_extract(curr_file_path, tmpdir)
+                            extracted_files = []
+                            with zipfile.ZipFile(work_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                                for root, _dirs, files in os.walk(tmpdir):
+                                    for ef in files:
+                                        full_ef = os.path.join(root, ef)
+                                        arc_ef = os.path.relpath(full_ef, tmpdir).replace(os.sep, "/")
+                                        if arc_ef.startswith("."):
+                                            continue
+                                        extracted_files.append(arc_ef)
+                                        zout.write(full_ef, arc_ef)
                                     if rom_info.get("platform") == "Neo-Geo" or rom_info.get("needed_bios") == "neogeo.zip":
                                         bios_p = os.path.join(self._get_bios_dir(), "neogeo.zip")
                                         if os.path.exists(bios_p):
@@ -3720,6 +3799,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                                 for b_info in zb.infolist():
                                                     if b_info.filename not in existing and not b_info.filename.startswith("."):
                                                         zout.writestr(b_info.filename, zb.read(b_info.filename))
+                        if not _validate_zip_file(work_zip_path):
+                            raise ValueError("converted ZIP validation failed")
+                        os.replace(work_zip_path, dest_zip_path)
                         if os.path.exists(curr_file_path):
                             os.remove(curr_file_path)
                         available_rom_names.discard(str(info.get("filename") or "").lower())
@@ -3974,6 +4056,21 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         """설정값 저장: 게임북 전용 로컬 SQLite DB(settings 테이블)에 저장합니다."""
         self._db_execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
 
+    def _managed_storage_roots(self):
+        """파일 이동/삭제가 허용되는 Game Books 관리 저장소 루트 목록."""
+        roots = [
+            self._get_data_dir(), self._get_roms_dir(), self._get_bios_dir(), self._get_covers_dir(),
+            self._get_emulatorjs_root(), self._get_romm_library_dir(),
+            self._get_setting("EXTRA_ROMS_PATH", "").strip(),
+            self._get_setting("COVERS_PATH", "").strip(),
+            self._get_setting("BIOS_PATH", "").strip(),
+            "/mnt/gdrive/emulatorjs",
+        ]
+        return [r for r in roots if r]
+
+    def _is_managed_storage_path(self, path):
+        return bool(path) and _path_within_any(path, self._managed_storage_roots())
+
     # ------------------------------------------------------------------
     # 라우트 동적 등록 (Werkzeug Rule 기반)
     # ------------------------------------------------------------------
@@ -4107,17 +4204,20 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 import py7zr
                 if py7zr.is_7zfile(file_path):
                     with tempfile.TemporaryDirectory() as tmpdir:
-                        with py7zr.SevenZipFile(file_path, mode="r") as z7:
-                            z7.extract(path=tmpdir)
-                        extracted_files = [f for f in os.listdir(tmpdir) if not f.startswith(".")]
+                        _safe_7z_extract(file_path, tmpdir)
+                        extracted_files = []
 
                         # 표준 ZIP 아카이브 메모리 생성
                         zip_buffer = io.BytesIO()
                         with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-                            for fname in extracted_files:
-                                full_ef = os.path.join(tmpdir, fname)
-                                if os.path.isfile(full_ef):
-                                    zout.write(full_ef, fname)
+                            for root, _dirs, files in os.walk(tmpdir):
+                                for fname in files:
+                                    full_ef = os.path.join(root, fname)
+                                    arc_ef = os.path.relpath(full_ef, tmpdir).replace(os.sep, "/")
+                                    if arc_ef.startswith("."):
+                                        continue
+                                    extracted_files.append(arc_ef)
+                                    zout.write(full_ef, arc_ef)
 
                             # 네오지오(Neo-Geo) 기종 롬셋인 경우: bios/neogeo.zip 바이오스 칩셋 파일들을 ZIP 내부에 자동 병합하여
                             # FBNeo 웹어셈블리 코어의 "missing files for THIS VERSION of FBNeo (Verify romsets: neogeo)" 방지
@@ -4525,13 +4625,19 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         dest_zip_path = os.path.join(target_sub_dir, f"{base_n}_{z_counter}.zip")
                         z_counter += 1
 
-                    with py7zr.SevenZipFile(temp_dest, mode="r") as z7:
-                        with tempfile.TemporaryDirectory() as tmpdir:
-                            z7.extract(path=tmpdir)
-                            extracted_files = [x for x in os.listdir(tmpdir) if not x.startswith(".")]
-                            with zipfile.ZipFile(dest_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-                                for ef in extracted_files:
-                                    zout.write(os.path.join(tmpdir, ef), ef)
+                    work_zip_path = dest_zip_path + ".part"
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        _safe_7z_extract(temp_dest, tmpdir)
+                        extracted_files = []
+                        with zipfile.ZipFile(work_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                            for root, _dirs, files in os.walk(tmpdir):
+                                for ef in files:
+                                    full_ef = os.path.join(root, ef)
+                                    arc_ef = os.path.relpath(full_ef, tmpdir).replace(os.sep, "/")
+                                    if arc_ef.startswith("."):
+                                        continue
+                                    extracted_files.append(arc_ef)
+                                    zout.write(full_ef, arc_ef)
                                 if rom_info.get("platform") == "Neo-Geo" or rom_info.get("needed_bios") == "neogeo.zip":
                                     bios_p = os.path.join(self._get_bios_dir(), "neogeo.zip")
                                     if os.path.exists(bios_p):
@@ -4540,6 +4646,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                             for b_info in zb.infolist():
                                                 if b_info.filename not in existing and not b_info.filename.startswith("."):
                                                     zout.writestr(b_info.filename, zb.read(b_info.filename))
+                    if not _validate_zip_file(work_zip_path):
+                        raise ValueError("converted ZIP validation failed")
+                    os.replace(work_zip_path, dest_zip_path)
                     if os.path.exists(temp_dest):
                         os.remove(temp_dest)
                     safe_filename = os.path.basename(dest_zip_path)
@@ -4832,13 +4941,16 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         # 공용 라이브러리/서버 설정을 변경하거나 내부 저장소 정보를 노출하는 액션은
         # UI 표시 여부와 관계없이 서버에서 관리자 권한을 강제합니다.
+        if user_id <= 0:
+            return {"success": False, "error": "로그인이 필요합니다."}
+
         admin_actions = {
             "check_game",
             "get_cover_migration_candidates", "get_bios_migration_candidates",
             "migrate_bios_batch", "migrate_cover_batch",
             "scan_new_roms", "scan_roms", "full_scan", "health_check",
             "get_migration_environment", "start_migration", "cancel_migration", "rollback_migration",
-            "fetch_missing_covers", "delete_game", "update_title", "save_settings", "set_artwork",
+            "fetch_missing_covers", "delete_game", "update_title", "save_settings", "search_artwork", "set_artwork",
         }
         if action in admin_actions and not is_admin:
             return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
@@ -4918,10 +5030,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         url_fname = os.path.splitext(url_fname)[0] + ".zip"
                     g["rom_url"] = f"{ROUTE_BASE}/rom/{gid}/{urllib.parse.quote(url_fname)}"
                     g["disk_file_urls"] = {}
-                    g["save_url"] = f"{ROUTE_BASE}/save/{gid}?user_id={user_id}"
-                    g["state_url"] = f"{ROUTE_BASE}/state/{gid}?user_id={user_id}"
+                    g["save_url"] = f"{ROUTE_BASE}/save/{gid}"
+                    g["state_url"] = f"{ROUTE_BASE}/state/{gid}"
                     g["cover_url"] = f"{ROUTE_BASE}/cover/{gid}"
                     g["has_needed_bios"] = 1
+                    if not is_admin:
+                        g["cover_path"] = bool(g.get("cover_path"))
+                        g.pop("file_path", None)
                     visible_games.append(g)
 
                 return {
@@ -5040,15 +5155,17 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 if not target_dir:
                     return {"success": False, "error": "target_dir 파라미터가 필요합니다."}
 
+                if not self._is_managed_storage_path(target_dir):
+                    return {"success": False, "error": "허용되지 않은 대상 경로입니다."}
                 os.makedirs(target_dir, exist_ok=True)
                 items = json_data.get("items", [])
                 moved_count = 0
 
                 for it in items:
                     src_p = it.get("path")
-                    fname = it.get("name") or (os.path.basename(src_p) if src_p else "")
+                    fname = os.path.basename(it.get("name") or (os.path.basename(src_p) if src_p else ""))
 
-                    if src_p and os.path.exists(src_p):
+                    if src_p and os.path.exists(src_p) and self._is_managed_storage_path(src_p):
                         dst_p = os.path.join(target_dir, fname)
                         if src_p != dst_p:
                             try:
@@ -5071,16 +5188,18 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 if not target_dir:
                     return {"success": False, "error": "target_dir 파라미터가 필요합니다."}
 
+                if not self._is_managed_storage_path(target_dir):
+                    return {"success": False, "error": "허용되지 않은 대상 경로입니다."}
                 os.makedirs(target_dir, exist_ok=True)
                 items = json_data.get("items", [])
                 moved_count = 0
 
                 for it in items:
                     src_p = it.get("path")
-                    fname = it.get("name") or (os.path.basename(src_p) if src_p else "")
+                    fname = os.path.basename(it.get("name") or (os.path.basename(src_p) if src_p else ""))
                     game_id = it.get("game_id")
 
-                    if src_p and os.path.exists(src_p):
+                    if src_p and os.path.exists(src_p) and self._is_managed_storage_path(src_p):
                         dst_p = os.path.join(target_dir, fname)
                         if src_p != dst_p:
                             try:
@@ -5162,8 +5281,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     launcher_pid=None,
                 )
                 return {
-                    "success": True,
-                    "message": "마이그레이션 취소 요청이 처리되었습니다.",
+                    "success": bool(ok),
+                    "message": "마이그레이션 취소 요청이 처리되었습니다." if ok else None,
+                    "error": None if ok else "마이그레이션 취소 플래그 생성에 실패했습니다.",
                     "migration": _get_romm_migration_status(),
                 }
 
@@ -5194,6 +5314,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 except Exception as roll_err:
                     logger.error(f"[{SELF_ID}] rollback_migration error: {roll_err}")
                     res = {"success": False, "error": str(roll_err)}
+
+                if not res.get("success"):
+                    return {
+                        "success": False,
+                        "error": res.get("error") or "; ".join(res.get("errors") or []) or "마이그레이션 원복에 실패했습니다.",
+                        "rollback": res,
+                        "migration": _get_romm_migration_status(),
+                    }
 
                 # 설정 및 마이그레이션 상태 원복 (메모리 및 파일 덮어쓰기)
                 self._set_setting("ROMM_MIGRATION_STATE", "not_started")
@@ -5509,7 +5637,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     rows = self._db_query("SELECT file_path FROM games WHERE id = ?", (game_id,))
                     if rows and rows[0]["file_path"] and os.path.exists(rows[0]["file_path"]):
                         try:
-                            if rows[0]["file_path"].startswith(self._get_roms_dir()):
+                            if self._is_managed_storage_path(rows[0]["file_path"]):
                                 os.remove(rows[0]["file_path"])
                         except Exception:
                             pass
