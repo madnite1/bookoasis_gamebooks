@@ -2871,6 +2871,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "README.md",
             "requirements.txt",
             "arcade_dat.db",
+            "tools/__init__.py",
+            "tools/romm_bundle_resolver.py",
+            "tools/romm_migration_apply.py",
+            "tools/romm_migration_config.py",
+            "tools/romm_migration_plan.py",
+            "tools/romm_slug_map.py",
+            "tools/romm_standalone_runner.py",
         ],
     }
 
