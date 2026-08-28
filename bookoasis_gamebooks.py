@@ -5015,9 +5015,34 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         pass
 
                 visible_games = []
+                # 카드에는 서버 절대경로 대신 활성 라이브러리 루트 기준 상대경로만 노출한다.
+                path_roots = []
+                for candidate in (
+                    self._get_romm_library_dir(),
+                    self._get_setting("EXTRA_ROMS_PATH", "").strip(),
+                    self._get_roms_dir(),
+                    self._get_emulatorjs_root(),
+                ):
+                    if candidate:
+                        root_abs = os.path.realpath(os.path.abspath(candidate))
+                        if root_abs not in path_roots:
+                            path_roots.append(root_abs)
+                # 중첩된 경로라면 가장 구체적인(긴) 루트를 우선한다.
+                path_roots.sort(key=len, reverse=True)
+
                 for g in games:
                     gid = g["id"]
                     file_path = g.get("file_path") or ""
+                    g["relative_path"] = g.get("filename") or ""
+                    if file_path:
+                        file_abs = os.path.realpath(os.path.abspath(file_path))
+                        for root_abs in path_roots:
+                            try:
+                                if os.path.commonpath([file_abs, root_abs]) == root_abs:
+                                    g["relative_path"] = os.path.relpath(file_abs, root_abs).replace(os.sep, "/")
+                                    break
+                            except (ValueError, OSError):
+                                continue
                     has_sav = f"{gid}.sav" in existing_saves
                     has_state = f"{gid}.state" in existing_saves or f"{gid}_slot1.state" in existing_saves
 
@@ -5036,7 +5061,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     g["has_needed_bios"] = 1
                     if not is_admin:
                         g["cover_path"] = bool(g.get("cover_path"))
-                        g.pop("file_path", None)
+                    # 관리자 여부와 관계없이 브라우저에는 서버 절대경로를 보내지 않는다.
+                    g.pop("file_path", None)
                     visible_games.append(g)
 
                 return {

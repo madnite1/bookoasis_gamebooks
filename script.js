@@ -629,7 +629,6 @@
     const sysInfo = getSystemInfo(game);
     const metaConfidence = Number(game.metadata_confidence || 0);
     const metaConfidenceLabel = metadataConfidenceLabel(metaConfidence);
-    const sourceSystem = game.source_system || '';
     const metaSource = game.metadata_source || '';
 
     // 커버 영역 (브라우저 디스크 캐시 즉시 활용)
@@ -695,7 +694,7 @@
         ${state.isAdmin ? `
           <div class="gba-card-meta" style="margin-top: 6px; flex-wrap: wrap; gap: 6px;">
             ${metaSource ? `<span title="메타 출처">출처: ${escapeHtml(metaSource)}</span>` : ''}
-            ${sourceSystem ? `<span title="판정 근거">근거: ${escapeHtml(sourceSystem)}</span>` : ''}
+            ${game.relative_path ? `<span title="ROM 상대경로"><i class="fa-regular fa-folder-open"></i> ${escapeHtml(game.relative_path)}</span>` : ''}
             ${game.revision_tag ? `<span title="리비전 태그">Rev: ${escapeHtml(game.revision_tag)}</span>` : ''}
             ${game.content_flags ? `<span title="콘텐츠 플래그">${escapeHtml(game.content_flags)}</span>` : ''}
           </div>
