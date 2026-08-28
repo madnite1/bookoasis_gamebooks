@@ -5,8 +5,23 @@ from typing import Any
 import sys
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+# Resolve both deployed layout (<project>/plugins/metadata/bookoasis_gamebooks)
+# and development layout (<workspace>/BookOasis_plugins/bookoasis_gamebooks).
+_PROJECT_CANDIDATES = []
+if ROOT_DIR.parent.name == "metadata" and ROOT_DIR.parent.parent.name == "plugins":
+    _PROJECT_CANDIDATES.append(ROOT_DIR.parent.parent.parent)
+_PROJECT_CANDIDATES.extend([
+    ROOT_DIR.parent.parent / "BookOasis",
+    Path("/app"),
+])
+PROJECT_ROOT = next(
+    (p for p in _PROJECT_CANDIDATES if (p / "plugins" / "metadata" / "base.py").is_file()),
+    _PROJECT_CANDIDATES[0],
+)
+for _import_root in (PROJECT_ROOT, ROOT_DIR):
+    _root_s = str(_import_root)
+    if _root_s not in sys.path:
+        sys.path.insert(0, _root_s)
 
 try:
     from bookoasis_gamebooks import (
