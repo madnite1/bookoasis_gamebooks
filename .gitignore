@@ -27,3 +27,6 @@ bak/
 *.cue
 *.iso
 *.pbp
+.hermes_*
+.hermes_migration/
+romm_tools/

@@ -170,19 +170,68 @@
     </div>
   </div>
 
-  <!-- RomM 자동 마이그레이션 모달 -->
+  <!-- RomM 표준 라이브러리 마이그레이션 모달 -->
   <div id="gbaMigrationModal" class="gba-modal" style="display: none; z-index: 99999;">
     <div class="gba-modal-box">
       <div class="gba-modal-header">
-        <h3><i class="fa-solid fa-layer-group fa-spin"></i> RomM 표준 라이브러리 자동 마이그레이션</h3>
+        <h3 id="gbaMigrationHeaderTitle"><i class="fa-solid fa-layer-group"></i> RomM 표준 라이브러리 마이그레이션</h3>
+        <button class="gba-modal-close" id="gbaMigrationCloseBtn" style="display: none;">&times;</button>
       </div>
       <div class="gba-modal-body">
-        <div class="gba-upload-status" id="gbaMigrationStatus">RomM 표준 구조로 게임 및 바이오스/커버를 안전하게 재배치하는 중...</div>
-        <div class="gba-progress-bar-wrap">
+        <div class="gba-upload-status" id="gbaMigrationStatus">RomM 표준 구조로 게임 및 바이오스/커버를 안전하게 재배치합니다.</div>
+        <div class="gba-progress-bar-wrap" id="gbaMigrationProgressBarWrap" style="display: none;">
           <div class="gba-progress-bar gba-migration-progress-bar" id="gbaMigrationProgressBar" style="width: 0%;"></div>
         </div>
-        <div class="gba-upload-details" id="gbaMigrationDetails">준비 중...</div>
+
+        <!-- 마이그레이션 단계 인디케이터 -->
+        <div id="gbaMigrationStepsWrap" style="display: none; margin: 12px 0 8px 0; padding: 8px 10px; background: rgba(0,0,0,0.03); border-radius: 6px; border: 1px solid rgba(0,0,0,0.08); font-size: 11px;">
+          <div style="display: flex; justify-content: space-between; gap: 4px;">
+            <div id="gbaStepPlanning" style="flex: 1; text-align: center; padding: 4px; border-radius: 4px; color: #888;">
+              <i class="fa-solid fa-list-check"></i> 1. 계획 분석
+            </div>
+            <div id="gbaStepRom" style="flex: 1; text-align: center; padding: 4px; border-radius: 4px; color: #888;">
+              <i class="fa-solid fa-gamepad"></i> 2. 롬 복사
+            </div>
+            <div id="gbaStepBios" style="flex: 1; text-align: center; padding: 4px; border-radius: 4px; color: #888;">
+              <i class="fa-solid fa-microchip"></i> 3. BIOS 복사
+            </div>
+            <div id="gbaStepDb" style="flex: 1; text-align: center; padding: 4px; border-radius: 4px; color: #888;">
+              <i class="fa-solid fa-database"></i> 4. DB 동기화
+            </div>
+          </div>
+        </div>
+
+        <div class="gba-upload-details" id="gbaMigrationDetails">마이그레이션을 진행하면 EmulatorJS 및 RomM 표준 폴더 구조로 정돈됩니다.</div>
         <div class="gba-upload-subdetails" id="gbaMigrationSubDetails" style="font-size: 11px; color: #888; margin-top: 6px; text-align: center;">기존 원본 파일은 안전하게 보존(Copy-first)됩니다.</div>
+
+        <!-- 원격/클라우드 마운트일 때 표시되는 일회성 rclone 설정 입력 영역 (저장되지 않음) -->
+        <div id="gbaMigrationRcloneSection" style="display: none; margin-top: 14px; padding: 12px; background: rgba(0, 0, 0, 0.04); border-radius: 6px; border: 1px dashed rgba(0, 0, 0, 0.15); text-align: left;">
+          <div style="font-size: 12px; font-weight: bold; margin-bottom: 6px; color: #333;">
+            <i class="fa-brands fa-google-drive"></i> 원격 마운트 감지: 고속 마이그레이션(rclone) 설정
+          </div>
+          <div style="font-size: 11px; color: #666; margin-bottom: 8px;">
+            원격 클라우드 마운트 경로가 감지되었습니다. BookOasis 코어에 등록된 리모트를 선택해 주세요. (선택 정보는 DB에 저장되지 않습니다)
+          </div>
+          <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+            <div style="flex: 1;">
+              <label style="font-size: 11px; font-weight: 600; display: block; margin-bottom: 3px;">리모트 선택</label>
+              <select id="gbaMigrationRcloneRemoteSelect" class="gba-input" style="width: 100%; box-sizing: border-box;">
+                <option value="">(리모트 선택)</option>
+              </select>
+            </div>
+            <div style="flex: 1.2;">
+              <label style="font-size: 11px; font-weight: 600; display: block; margin-bottom: 3px;">마운트 절대 경로</label>
+              <input type="text" id="gbaMigrationRcloneMountBaseInput" class="gba-input" style="width: 100%; box-sizing: border-box;" placeholder="/mnt/gdrive" value="/mnt/gdrive">
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top: 16px; text-align: center; display: flex; justify-content: center; gap: 8px;" id="gbaMigrationActionRow">
+          <button type="button" class="gba-btn gba-btn-primary" id="gbaMigrationStartBtn" style="font-size: 13px; padding: 6px 16px;">마이그레이션 시작</button>
+          <button type="button" class="gba-btn gba-btn-secondary" id="gbaMigrationLaterBtn" style="font-size: 13px; padding: 6px 14px;">나중에 하기</button>
+          <button type="button" class="gba-btn gba-btn-danger" id="gbaMigrationCancelBtn" style="display: none; font-size: 12px; padding: 4px 12px;">마이그레이션 중단</button>
+          <button type="button" class="gba-btn gba-btn-danger" id="gbaMigrationRollbackBtn" style="display: none; font-size: 12px; padding: 4px 12px; background: #6b7280;">마이그레이션 원복</button>
+        </div>
       </div>
     </div>
   </div>
@@ -244,18 +293,6 @@
           <label class="gba-label">통합 에뮬레이터 라이브러리 루트 경로</label>
           <input type="text" id="gbaSettingEmulatorjsRoot" class="gba-input" placeholder="/mnt/gdrive/emulatorjs">
           <small class="gba-help-text">RomM 표준 라이브러리(<code>romm_library/library/</code>, <code>romm_library/bios/</code>, <code>romm_library/resources/</code>)가 위치한 통합 루트 디렉터리입니다.</small>
-        </div>
-
-        <div class="gba-form-group">
-          <label class="gba-label"><i class="fa-brands fa-google-drive"></i> Rclone 마운트 연동 (구글드라이브 고속 마이그레이션)</label>
-          <div style="display: flex; gap: 8px; margin-bottom: 6px;">
-            <input type="text" id="gbaSettingRcloneRemote" class="gba-input" style="flex: 1;" placeholder="remote 이름 (예: google_drive)" value="google_drive">
-            <input type="text" id="gbaSettingRcloneMountBase" class="gba-input" style="flex: 1.5;" placeholder="마운트 절대 경로 (예: /mnt/gdrive)" value="/mnt/gdrive">
-          </div>
-          <div style="margin-top: 6px;">
-            <textarea id="gbaSettingRcloneConfigContent" class="gba-input" style="height: 70px; font-family: monospace; font-size: 11px; resize: vertical;" placeholder="[google_drive] rclone.conf 섹션 설정 본문 붙여넣기 (선택: 외부 원본 파일 의존 없이 자체 구동)"></textarea>
-          </div>
-          <small class="gba-help-text">구글드라이브 마운트 경로일 때 해당 remote 설정 섹션을 입력하면, 외부 원본 rclone.conf 없이 안전하게 서버 사이드 고속 복사(Server-side copy)를 실행합니다.</small>
         </div>
 
         <div class="gba-storage-info">

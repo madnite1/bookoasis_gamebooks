@@ -25,11 +25,20 @@ from datetime import datetime, timedelta, timezone
 
 from plugins.metadata.base import BaseMetadataProvider
 
-# 플러그인 전용 격리 패키지(libs/) sys.path 등록
+# 플러그인 전용 격리 패키지(libs/) 및 내부 모듈(tools/) sys.path 등록
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
 _LIBS_DIR = os.path.join(_PLUGIN_DIR, "libs")
 if os.path.isdir(_LIBS_DIR) and _LIBS_DIR not in sys.path:
     sys.path.insert(0, _LIBS_DIR)
+
+
+def _ensure_plugin_import_paths():
+    """스레드/함수 내부 어디환에서도 tools 및 내부 모듈을 안정적으로 import할 수 있도록 sys.path 보장"""
+    for p in (_PLUGIN_DIR, _LIBS_DIR, "/app"):
+        if p and os.path.exists(p) and p not in sys.path:
+            sys.path.insert(0, p)
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +76,10 @@ _ROMM_MIGRATION_PROGRESS = {
     "copied_cover_files": 0,
     "failed_count": 0,
     "error": "",
+    "launcher_pid": None,
     "updated_at": 0,
 }
-_ROMM_MIGRATION_LOCK = threading.Lock()
+_ROMM_MIGRATION_LOCK = threading.RLock()
 
 # 백그라운드 커버 아트 다운로드 전역 큐 매니저
 _COVER_QUEUE = []
@@ -197,6 +207,7 @@ def _update_romm_migration_progress(
     copied_cover_files=None,
     failed_count=None,
     error=None,
+    launcher_pid=None,
 ):
     with _ROMM_MIGRATION_LOCK:
         if is_running is not None:
@@ -225,10 +236,22 @@ def _update_romm_migration_progress(
             _ROMM_MIGRATION_PROGRESS["failed_count"] = failed_count
         if error is not None:
             _ROMM_MIGRATION_PROGRESS["error"] = error
+        if launcher_pid is not None:
+            _ROMM_MIGRATION_PROGRESS["launcher_pid"] = launcher_pid
         _ROMM_MIGRATION_PROGRESS["updated_at"] = time.time()
         try:
-            with open(_ROMM_STATUS_FILE, "w", encoding="utf-8") as sf:
-                json.dump(_ROMM_MIGRATION_PROGRESS, sf)
+            status_dir = os.path.dirname(_ROMM_STATUS_FILE)
+            os.makedirs(status_dir, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=status_dir,
+                delete=False,
+                prefix=".tmp_status_",
+            ) as tf:
+                json.dump(_ROMM_MIGRATION_PROGRESS, tf, ensure_ascii=False)
+                temp_name = tf.name
+            os.replace(temp_name, _ROMM_STATUS_FILE)
         except Exception:
             pass
 
@@ -240,6 +263,7 @@ def _get_romm_migration_status():
                 with open(_ROMM_STATUS_FILE, "r", encoding="utf-8") as sf:
                     disk_st = json.load(sf)
                     if disk_st and isinstance(disk_st, dict):
+                        _ROMM_MIGRATION_PROGRESS.clear()
                         _ROMM_MIGRATION_PROGRESS.update(disk_st)
             except Exception:
                 pass
@@ -1094,16 +1118,11 @@ def _get_current_user_id():
         if uid:
             return int(uid)
 
-        # 2. 쿼리 파라미터 확인 (세션이 없는 API 독립 호출 대비)
-        uid_arg = request.args.get("user_id")
-        if uid_arg:
-            try:
-                return int(uid_arg)
-            except Exception:
-                pass
+        # 인증된 세션만 사용자 식별에 사용합니다.
+        # 쿼리스트링 user_id를 신뢰하면 다른 사용자의 세이브/즐겨찾기를 가장할 수 있습니다.
     except Exception:
         pass
-    return 1
+    return 0
 
 
 def _is_current_user_admin():
@@ -3079,157 +3098,93 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
     def __init__(self):
         super().__init__()
-        self._migrate_old_plugin_data()
         self._init_db()
-        self._migrate_bios_files()
         self._init_romm_migration_state()
 
     def _init_romm_migration_state(self):
-        """DB에 저장된 RomM 마이그레이션 상태를 전역 상태 매니저로 동기화"""
+        """DB/상태파일에 저장된 RomM 마이그레이션 상태를 전역 상태 매니저로 동기화 (원격 경로 IO 없이 상태만 동기화)"""
         try:
             saved_state = self._get_setting("ROMM_MIGRATION_STATE", "").strip()
             if not saved_state:
-                # 초기 상태 확인: 만약 romm_library에 이미 복사 완료된 상태인지 확인
-                target_romm_root = self._get_romm_library_dir()
-                if target_romm_root:
-                    saved_state = "completed"
-                else:
-                    saved_state = "not_started"
+                saved_state = "not_started"
                 self._set_setting("ROMM_MIGRATION_STATE", saved_state)
 
-            _update_romm_migration_progress(
-                state=saved_state,
-                phase="idle" if saved_state != "running" else "running",
-                percent=100 if saved_state == "completed" else 0,
-            )
+            if saved_state == "completed":
+                _update_romm_migration_progress(
+                    is_running=False,
+                    state="completed",
+                    phase="completed",
+                    percent=100,
+                )
         except Exception as e:
             logger.warning(f"[{SELF_ID}] Init romm migration state error: {e}")
 
-    def _start_async_romm_migration(self, force=False, rclone_config_content=None, rclone_remote=None, rclone_mount_base=None):
-        """백그라운드 스레드로 RomM 자동 복사 마이그레이션 실행"""
-        with _ROMM_MIGRATION_LOCK:
-            if _ROMM_MIGRATION_PROGRESS["is_running"]:
-                return False, "이미 마이그레이션이 진행 중입니다."
-            if not force and _ROMM_MIGRATION_PROGRESS["state"] == "completed":
-                return True, "이미 마이그레이션이 완료되었습니다."
-            _ROMM_MIGRATION_PROGRESS["is_running"] = True
-            _ROMM_MIGRATION_PROGRESS["state"] = "running"
-            _ROMM_MIGRATION_PROGRESS["phase"] = "starting"
-            _ROMM_MIGRATION_PROGRESS["percent"] = 0
-            _ROMM_MIGRATION_PROGRESS["error"] = ""
-            _ROMM_MIGRATION_PROGRESS["updated_at"] = time.time()
+    def _start_async_romm_migration(self, force=False, rclone_remote=None, rclone_mount_base=None):
+        """백그라운드 스레드 워커로 RomM 자동 복사 마이그레이션 실행"""
+        cur_status = _get_romm_migration_status()
+        if cur_status.get("is_running") and cur_status.get("state") == "running":
+            return False, "이미 마이그레이션이 진행 중입니다."
 
-        self._set_setting("ROMM_MIGRATION_STATE", "running")
+        if not force and cur_status.get("state") == "completed":
+            return True, "이미 마이그레이션이 완료되었습니다."
 
-        # 인자로 넘어오지 않은 경우 저장된 설정 조회
-        if not rclone_config_content:
-            rclone_config_content = self._get_setting("RCLONE_CONFIG_CONTENT", "").strip() or None
-        if not rclone_remote:
-            rclone_remote = self._get_setting("RCLONE_REMOTE", "").strip() or None
-        if not rclone_mount_base:
-            rclone_mount_base = self._get_setting("RCLONE_MOUNT_BASE", "").strip() or None
+        # 이전 남아있을 수 있는 취소 플래그 제거
+        try:
+            _ensure_plugin_import_paths()
+            try:
+                from tools.romm_migration_apply import clear_cancel_migration_flag
+            except ImportError:
+                from plugins.metadata.bookoasis_gamebooks.tools.romm_migration_apply import clear_cancel_migration_flag
+            clear_cancel_migration_flag()
+        except Exception:
+            pass
 
         _update_romm_migration_progress(
             is_running=True,
             state="running",
             phase="starting",
             percent=0,
+            current=0,
+            total=0,
+            current_item="마이그레이션 시작 준비 중...",
+            details="백그라운드 워커 스레드를 시작하는 중입니다.",
+            copied_rom_files=0,
+            copied_bios_files=0,
+            copied_cover_files=0,
+            failed_count=0,
             error="",
+            launcher_pid=None,
         )
 
-        def _worker():
+        self._set_setting("ROMM_MIGRATION_STATE", "running")
+
+        def _thread_migration_worker():
             try:
-                import sys
-                if _PLUGIN_DIR not in sys.path:
-                    sys.path.insert(0, _PLUGIN_DIR)
-
-                from tools.romm_migration_config import MANIFEST_PATH
-                from tools.romm_migration_plan import build_dry_run_plan
-                from tools.romm_migration_apply import execute_migration_plan
-
-                logger.info(f"[{SELF_ID}] RomM Migration worker starting. manifest_exists={MANIFEST_PATH.is_file()}")
-                _update_romm_migration_progress(
-                    is_running=True,
-                    phase="planning",
-                    current_item="최신 파일 및 메타데이터 계획 분석 중...",
-                    details="소스 ROM, BIOS, 커버 인덱스 구성 중",
-                )
-
-                # 1. 기존 생성된 plan이 있으면 재사용하고 없으면 생성
-                if not MANIFEST_PATH.is_file():
-                    build_dry_run_plan()
-
-                logger.info(f"[{SELF_ID}] RomM Migration execute_migration_plan call begin")
-
-                # 2. 실행
-                def _apply_cb(p):
-                    _update_romm_migration_progress(
-                        is_running=True,
-                        phase=p.get("phase", "running"),
-                        percent=p.get("percent", 0),
-                        current=p.get("current", 0),
-                        total=p.get("total", 0),
-                        current_item=p.get("current_item", ""),
-                        details=p.get("details", ""),
-                        copied_rom_files=p.get("copied_rom_files", 0),
-                        copied_bios_files=p.get("copied_bios_files", 0),
-                        copied_cover_files=p.get("copied_cover_files", 0),
-                        failed_count=p.get("failed_count", 0),
-                    )
-
-                res = execute_migration_plan(
-                    progress_cb=_apply_cb,
-                    rclone_config_content=rclone_config_content,
+                _ensure_plugin_import_paths()
+                try:
+                    from tools.romm_standalone_runner import run_standalone_migration
+                except ImportError:
+                    from plugins.metadata.bookoasis_gamebooks.tools.romm_standalone_runner import run_standalone_migration
+                logger.info(f"[{SELF_ID}] Starting in-process thread migration worker...")
+                run_standalone_migration(
+                    force=force,
                     rclone_remote=rclone_remote,
                     rclone_mount_base=rclone_mount_base,
+                    plugin_data_dir=self._get_data_dir(),
                 )
-
-                if res.get("success"):
-                    _update_romm_migration_progress(
-                        is_running=False,
-                        state="completed",
-                        phase="completed",
-                        percent=100,
-                        current_item="마이그레이션 완료",
-                        details=f"ROM {res.get('copied_rom_files', 0)}개, BIOS {res.get('copied_bios_files', 0)}개, Cover {res.get('copied_cover_files', 0)}개 복사 완료",
-                    )
-                    self._set_setting("ROMM_MIGRATION_STATE", "completed")
-                    # 마이그레이션 완료 후: 단일 라이브러리 루트 설정(/mnt/gdrive/emulatorjs) 자동 정착 및 개별 경로 정리
-                    emulatorjs_root = self._get_emulatorjs_root()
-                    self._set_setting("EMULATORJS_ROOT", emulatorjs_root)
-                    self._set_setting("EXTRA_ROMS_PATH", "")
-                    self._set_setting("COVERS_PATH", "")
-                    self._set_setting("BIOS_PATH", "")
-                    # 새 romm_library 경로 기준으로 전체 재스캔 1회 자동 가동
-                    try:
-                        logger.info(f"[{SELF_ID}] Auto triggering full scan after RomM migration...")
-                        self._scan_roms(force_full=True)
-                    except Exception as scan_err:
-                        logger.warning(f"[{SELF_ID}] Post-migration scan warning: {scan_err}")
-                else:
-                    err_msg = f"마이그레이션 중 일부 오류 발생 (실패: {res.get('failed_count', 0)}건)"
-                    _update_romm_migration_progress(
-                        is_running=False,
-                        state="failed",
-                        phase="failed",
-                        error=err_msg,
-                        details=err_msg,
-                    )
-                    self._set_setting("ROMM_MIGRATION_STATE", "failed")
-
+                logger.info(f"[{SELF_ID}] In-process thread migration worker finished.")
             except Exception as ex:
-                logger.error(f"[{SELF_ID}] RomM Migration worker error: {ex}")
+                logger.error(f"[{SELF_ID}] Failed in thread migration worker: {ex}")
                 _update_romm_migration_progress(
                     is_running=False,
                     state="failed",
                     phase="failed",
-                    error=str(ex),
-                    details=str(ex),
+                    error=f"스레드 실행 실패: {ex}",
                 )
                 self._set_setting("ROMM_MIGRATION_STATE", "failed")
 
-        threading.Thread(target=_worker, daemon=True).start()
-        return True, "마이그레이션이 시작되었습니다."
+        threading.Thread(target=_thread_migration_worker, daemon=True).start()
+        return True, "마이그레이션이 백그라운드 스레드로 시작되었습니다."
 
     def _migrate_bios_files(self):
         """roms/ 폴더에 혼재된 바이오스 및 MAME 기판/디바이스 파일을 bios/ 폴더로 자동 분류 이동"""
@@ -4069,21 +4024,6 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         if endpoint not in registered_endpoints:
                             app.url_map.add(Rule(path, endpoint=endpoint, methods=methods))
 
-                if not getattr(app, "_gba_wsgi_patched", False):
-                    orig_wsgi = app.wsgi_app
-
-                    def _gba_wsgi(environ, start_response):
-                        path = environ.get("PATH_INFO", "")
-                        if path.startswith(ROUTE_BASE):
-                            try:
-                                self._do_register_routes(app)
-                            except Exception:
-                                pass
-                        return orig_wsgi(environ, start_response)
-
-                    app.wsgi_app = _gba_wsgi
-                    app._gba_wsgi_patched = True
-
                 _REGISTERED_APPS.add(app_id)
             except Exception as e:
                 logger.error(f"[{SELF_ID}] Route register error: {e}")
@@ -4095,6 +4035,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         """ROM 바이너리 다운로드 / 스트리밍 (.7z 압축 롬은 내부 롬을 즉시 추출하여 EmulatorJS 호환 스트림으로 전송)"""
         import io
         from flask import Response, abort, request
+
+        if _get_current_user_id() <= 0:
+            abort(401, "Authentication required")
 
         rows = self._db_query("SELECT file_path, filename FROM games WHERE id = ?", (game_id,))
         if not rows or not os.path.exists(rows[0]["file_path"]):
@@ -4219,6 +4162,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             if match:
                 start = int(match.group(1))
                 end = int(match.group(2)) if match.group(2) else file_size - 1
+                if start >= file_size or end < start:
+                    resp = Response(b"", 416, mimetype="application/octet-stream")
+                    resp.headers["Content-Range"] = f"bytes */{file_size}"
+                    return resp
+                end = min(end, file_size - 1)
                 length = end - start + 1
 
                 def _generate():
@@ -4255,7 +4203,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
     def _route_bios_stream(self, filename):
         """바이오스 및 기판 펌웨어 파일 스트리밍 (/bios/<filename>)"""
-        from flask import Response, request
+        from flask import Response, abort, request
+
+        if _get_current_user_id() <= 0:
+            abort(401, "Authentication required")
 
         safe_name = os.path.basename(filename)
         game_id = request.args.get("game_id", "").strip()
@@ -4276,6 +4227,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             if match:
                 start = int(match.group(1))
                 end = int(match.group(2)) if match.group(2) else file_size - 1
+                if start >= file_size or end < start:
+                    resp = Response(b"", 416, mimetype="application/octet-stream")
+                    resp.headers["Content-Range"] = f"bytes */{file_size}"
+                    return resp
+                end = min(end, file_size - 1)
                 length = end - start + 1
 
                 def _generate():
@@ -4315,6 +4271,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         from flask import Response, jsonify, request
 
         user_id = _get_current_user_id()
+        if user_id <= 0:
+            return jsonify({"success": False, "error": "로그인이 필요합니다."}), 401
         user_saves_dir = self._get_user_saves_dir(user_id)
         save_path = os.path.join(user_saves_dir, f"{game_id}.sav")
 
@@ -4369,6 +4327,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         from flask import Response, jsonify, request
 
         user_id = _get_current_user_id()
+        if user_id <= 0:
+            return jsonify({"success": False, "error": "로그인이 필요합니다."}), 401
         user_saves_dir = self._get_user_saves_dir(user_id)
         state_path = os.path.join(user_saves_dir, f"{game_id}_slot{slot}.state")
         default_state_path = os.path.join(user_saves_dir, f"{game_id}.state")
@@ -4423,6 +4383,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         """커버 이미지 서빙"""
         from flask import Response, abort
 
+        if _get_current_user_id() <= 0:
+            abort(401, "Authentication required")
+
         rows = self._db_query("SELECT cover_path, file_path, normalized_title, title FROM games WHERE id = ?", (game_id,))
         cover_path = None
         if rows and rows[0]["cover_path"] and os.path.exists(rows[0]["cover_path"]):
@@ -4448,18 +4411,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 if cover_path:
                     break
 
-            # 2. RomM resources/{rom_id}/cover/cover.* 매칭
-            if not cover_path and rows and os.path.isdir(romm_res):
-                g_title = (rows[0].get("normalized_title") or rows[0].get("title") or "").strip().lower()
-                for c_dir in os.listdir(romm_res):
-                    c_cover_dir = os.path.join(romm_res, c_dir, "cover")
-                    if os.path.isdir(c_cover_dir):
-                        for cf in os.listdir(c_cover_dir):
-                            if cf.startswith("cover."):
-                                cover_path = os.path.join(c_cover_dir, cf)
-                                break
-                    if cover_path:
-                        break
+            # RomM resources/{rom_id}/cover/cover.*는 games 테이블에 rom_id 매핑이 없으면
+            # 정확한 게임을 식별할 수 없습니다. 첫 번째 커버를 임의 반환하던 기존 fallback은
+            # 다른 게임의 표지가 노출될 수 있으므로 사용하지 않습니다.
 
             if not cover_path or not os.path.exists(cover_path):
                 abort(404, "Cover image not found")
@@ -4488,12 +4442,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         # 업로드 타입 확인 (rom | bios | cover)
         upload_type = request.form.get("type", "rom").lower()
 
-        if upload_type in ("rom", "bios") and not _is_current_user_admin():
-            return jsonify({"success": False, "error": "관리자만 ROM 및 바이오스를 업로드할 수 있습니다."}), 403
+        # ROM/BIOS/커버는 모두 공용 라이브러리를 변경하므로 관리자만 허용합니다.
+        if upload_type in ("rom", "bios", "cover") and not _is_current_user_admin():
+            return jsonify({"success": False, "error": "관리자만 ROM, 바이오스 및 공용 커버를 업로드할 수 있습니다."}), 403
 
         raw_filename = file.filename
         safe_filename = re.sub(r"[^\w\.\-\(\) ]", "_", raw_filename)
         ext = os.path.splitext(safe_filename)[1].lower()
+        base_n, ext_n = os.path.splitext(safe_filename)
 
         allowed_rom_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z", ".bin", ".rom", ".cue", ".gdi", ".iso", ".img", ".chd"}
         allowed_img_exts = {".png", ".jpg", ".jpeg", ".webp"}
@@ -4629,6 +4585,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
     def _route_preflight_check(self):
         """업로드 전 클라이언트 헤더 기반 초고속 Pre-flight 검증 (/preflight)"""
         from flask import jsonify, request
+
+        if not _is_current_user_admin():
+            return jsonify({"success": False, "error": "관리자만 ROM 업로드 사전 검사를 사용할 수 있습니다."}), 403
 
         payload = request.get_json(silent=True) or {}
         filename = str(payload.get("filename", "")).strip()
@@ -4869,14 +4828,24 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         user_id = _get_current_user_id()
         action = request.args.get("action", "list_games").strip()
+        is_admin = _is_current_user_admin()
+
+        # 공용 라이브러리/서버 설정을 변경하거나 내부 저장소 정보를 노출하는 액션은
+        # UI 표시 여부와 관계없이 서버에서 관리자 권한을 강제합니다.
+        admin_actions = {
+            "check_game",
+            "get_cover_migration_candidates", "get_bios_migration_candidates",
+            "migrate_bios_batch", "migrate_cover_batch",
+            "scan_new_roms", "scan_roms", "full_scan", "health_check",
+            "get_migration_environment", "start_migration", "cancel_migration", "rollback_migration",
+            "fetch_missing_covers", "delete_game", "update_title", "save_settings", "set_artwork",
+        }
+        if action in admin_actions and not is_admin:
+            return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
 
         try:
             if action == "list_games":
-                # RomM 자동 마이그레이션 상태 확인: 미시작 상태인 경우 백그라운드 자동 가동
                 migration_status = _get_romm_migration_status()
-                if migration_status.get("state") in ("not_started", "failed"):
-                    self._start_async_romm_migration(force=False)
-                    migration_status = _get_romm_migration_status()
 
                 # DB에 게임 데이터가 한 건도 없을 때만 최초 1회 자동 초기 스캔
                 game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
@@ -4933,18 +4902,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     except Exception:
                         pass
 
-                bios_lookup_cache = {}
                 visible_games = []
                 for g in games:
                     gid = g["id"]
                     file_path = g.get("file_path") or ""
-                    if not file_path or not os.path.exists(file_path):
-                        try:
-                            self._db_execute("DELETE FROM games WHERE id = ?", (gid,))
-                            self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (gid,))
-                        except Exception:
-                            pass
-                        continue
                     has_sav = f"{gid}.sav" in existing_saves
                     has_state = f"{gid}.state" in existing_saves or f"{gid}_slot1.state" in existing_saves
 
@@ -4953,61 +4914,38 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     url_fname = g["filename"]
                     if url_fname.lower().endswith(".7z"):
                         url_fname = os.path.splitext(url_fname)[0] + ".zip"
-                    elif os.path.splitext(url_fname)[1].lower() in (".cue", ".gdi") or bool(g.get("disk_file_urls")):
-                        # 멀티파일 ROM (디스크 번들)은 ZIP 번들로 확장자 매핑
+                    elif os.path.splitext(url_fname)[1].lower() in (".cue", ".gdi"):
                         url_fname = os.path.splitext(url_fname)[0] + ".zip"
                     g["rom_url"] = f"{ROUTE_BASE}/rom/{gid}/{urllib.parse.quote(url_fname)}"
-                    g["disk_file_urls"] = _build_disk_file_url_map(gid, file_path, g["filename"])
+                    g["disk_file_urls"] = {}
                     g["save_url"] = f"{ROUTE_BASE}/save/{gid}?user_id={user_id}"
                     g["state_url"] = f"{ROUTE_BASE}/state/{gid}?user_id={user_id}"
                     g["cover_url"] = f"{ROUTE_BASE}/cover/{gid}"
-                    needed_bios = str(g.get("needed_bios") or "").strip()
-                    if needed_bios:
-                        game_dir = os.path.dirname(os.path.abspath(g.get("file_path") or "")) if g.get("file_path") else ""
-                        cache_key = (game_dir, needed_bios.lower())
-                        has_needed_bios = bios_lookup_cache.get(cache_key)
-                        if has_needed_bios is None:
-                            has_needed_bios = 1 if self._find_runtime_bios_path(needed_bios, game_file_path=g.get("file_path") or "") else 0
-                            bios_lookup_cache[cache_key] = has_needed_bios
-                        g["has_needed_bios"] = has_needed_bios
-                    else:
-                        g["has_needed_bios"] = 0
+                    g["has_needed_bios"] = 1
                     visible_games.append(g)
-
-                available_bios = []
-                bios_dir = self._get_bios_dir()
-                if os.path.exists(bios_dir):
-                    try:
-                        for f in os.listdir(bios_dir):
-                            if not f.startswith("."):
-                                available_bios.append(f.lower())
-                    except Exception:
-                        pass
 
                 return {
                     "success": True,
                     "games": visible_games,
                     "total_count": len(visible_games),
-                    "available_bios": sorted(list(set(available_bios))),
+                    "available_bios": [],
                     "user_id": user_id,
-                    "is_admin": _is_current_user_admin(),
+                    "is_admin": is_admin,
                     "migration": migration_status,
                     "config": {
                         "cloud_save_enabled": str(self._get_setting("CLOUD_SAVE_ENABLED", "1")).lower() in ("1", "true", "yes", "on"),
                         "auto_save_interval_sec": int(self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")),
-                        "emulatorjs_root": str(self._get_setting("EMULATORJS_ROOT", "") or self._get_emulatorjs_root() or "").strip(),
-                        "extra_roms_path": str(self._get_setting("EXTRA_ROMS_PATH", "") or "").strip(),
-                        "covers_path": str(self._get_setting("COVERS_PATH", "") or "").strip(),
-                        "bios_path": str(self._get_setting("BIOS_PATH", "") or "").strip(),
-                        "ss_devid": str(self._get_setting("SS_DEVID", "") or "").strip(),
-                        "ss_devpassword": str(self._get_setting("SS_DEVPASSWORD", "") or "").strip(),
-                        "ss_user": str(self._get_setting("SS_USER", "") or "").strip(),
-                        "ss_password": str(self._get_setting("SS_PASSWORD", "") or "").strip(),
-                        "igdb_client_id": str(self._get_setting("IGDB_CLIENT_ID", "") or "").strip(),
-                        "igdb_client_secret": str(self._get_setting("IGDB_CLIENT_SECRET", "") or "").strip(),
-                        "rclone_remote": str(self._get_setting("RCLONE_REMOTE", "google_drive") or "google_drive").strip(),
-                        "rclone_mount_base": str(self._get_setting("RCLONE_MOUNT_BASE", "/mnt/gdrive") or "/mnt/gdrive").strip(),
-                        "rclone_config_content": str(self._get_setting("RCLONE_CONFIG_CONTENT", "") or "").strip(),
+                        # 서버 경로와 외부 서비스 자격증명은 관리자 화면에만 전달합니다.
+                        "emulatorjs_root": str(self._get_setting("EMULATORJS_ROOT", "") or self._get_emulatorjs_root() or "").strip() if is_admin else "",
+                        "extra_roms_path": str(self._get_setting("EXTRA_ROMS_PATH", "") or "").strip() if is_admin else "",
+                        "covers_path": str(self._get_setting("COVERS_PATH", "") or "").strip() if is_admin else "",
+                        "bios_path": str(self._get_setting("BIOS_PATH", "") or "").strip() if is_admin else "",
+                        "ss_devid": str(self._get_setting("SS_DEVID", "") or "").strip() if is_admin else "",
+                        "ss_devpassword": str(self._get_setting("SS_DEVPASSWORD", "") or "").strip() if is_admin else "",
+                        "ss_user": str(self._get_setting("SS_USER", "") or "").strip() if is_admin else "",
+                        "ss_password": str(self._get_setting("SS_PASSWORD", "") or "").strip() if is_admin else "",
+                        "igdb_client_id": str(self._get_setting("IGDB_CLIENT_ID", "") or "").strip() if is_admin else "",
+                        "igdb_client_secret": str(self._get_setting("IGDB_CLIENT_SECRET", "") or "").strip() if is_admin else "",
                         "max_content_length_mb": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100),
                         "max_upload_bytes": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100) * 1024 * 1024,
                     },
@@ -5181,19 +5119,183 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 }
 
             elif action == "migration_status":
+                status = _get_romm_migration_status()
+                # 백그라운드 프로세스가 완료되었는데 플러그인 설정 및 후속 스캔이 아직 반영되지 않았다면 반영
+                if status.get("state") == "completed" and self._get_setting("ROMM_MIGRATION_STATE", "").strip() != "completed":
+                    try:
+                        self._set_setting("ROMM_MIGRATION_STATE", "completed")
+                        emulatorjs_root = self._get_emulatorjs_root()
+                        self._set_setting("EMULATORJS_ROOT", emulatorjs_root)
+                        self._set_setting("EXTRA_ROMS_PATH", "")
+                        self._set_setting("COVERS_PATH", "")
+                        self._set_setting("BIOS_PATH", "")
+                        logger.info(f"[{SELF_ID}] Standalone migration completed detected via status poll. Triggering scan...")
+                        threading.Thread(target=self._scan_roms, kwargs={"force_full": True}, daemon=True).start()
+                    except Exception as fin_err:
+                        logger.warning(f"[{SELF_ID}] Finalize setting error: {fin_err}")
+
                 return {
                     "success": True,
+                    "migration": status,
+                }
+
+            elif action == "cancel_migration":
+                try:
+                    _ensure_plugin_import_paths()
+                    try:
+                        from tools.romm_migration_apply import request_cancel_migration
+                    except ImportError:
+                        from plugins.metadata.bookoasis_gamebooks.tools.romm_migration_apply import request_cancel_migration
+                    ok = request_cancel_migration()
+                except Exception as req_err:
+                    logger.error(f"[{SELF_ID}] request_cancel_migration error: {req_err}")
+                    ok = False
+                # 스레드 워커는 취소 플래그를 주기적으로 읽고 스스로 종료한다.
+                # 취소 플래그 생성 후 즉시 인메모리/DB 상태를 cancelled로 업데이트하여 프론트엔드에 즉시 반영
+                self._set_setting("ROMM_MIGRATION_STATE", "cancelled")
+                _update_romm_migration_progress(
+                    is_running=False,
+                    state="cancelled",
+                    phase="cancelled",
+                    current_item="마이그레이션이 취소되었습니다",
+                    details="사용자 요청에 의해 마이그레이션이 중단되었습니다.",
+                    launcher_pid=None,
+                )
+                return {
+                    "success": True,
+                    "message": "마이그레이션 취소 요청이 처리되었습니다.",
                     "migration": _get_romm_migration_status(),
+                }
+
+            elif action == "rollback_migration":
+                rclone_remote = (str(request.form.get("rclone_remote", "") or request.args.get("rclone_remote", "")).strip()) or None
+                if not rclone_remote:
+                    try:
+                        _ensure_plugin_import_paths()
+                        from utils.rclone_gdrive_copy import list_writable_drive_remotes
+                        cw_remotes = list_writable_drive_remotes() or []
+                        for cr in cw_remotes:
+                            r_name = cr.get("name") if isinstance(cr, dict) else (cr if isinstance(cr, str) else None)
+                            if r_name:
+                                rclone_remote = r_name
+                                break
+                    except Exception:
+                        pass
+                try:
+                    _ensure_plugin_import_paths()
+                    try:
+                        from tools.romm_migration_apply import rollback_migration
+                    except ImportError:
+                        from plugins.metadata.bookoasis_gamebooks.tools.romm_migration_apply import rollback_migration
+                    res = rollback_migration(
+                        plugin_data_dir=self._get_data_dir(),
+                        rclone_remote=rclone_remote,
+                    )
+                except Exception as roll_err:
+                    logger.error(f"[{SELF_ID}] rollback_migration error: {roll_err}")
+                    res = {"success": False, "error": str(roll_err)}
+
+                # 설정 및 마이그레이션 상태 원복 (메모리 및 파일 덮어쓰기)
+                self._set_setting("ROMM_MIGRATION_STATE", "not_started")
+                with _ROMM_MIGRATION_LOCK:
+                    _ROMM_MIGRATION_PROGRESS.clear()
+                    _ROMM_MIGRATION_PROGRESS.update({
+                        "is_running": False,
+                        "state": "not_started",
+                        "phase": "not_started",
+                        "current_item": "마이그레이션 원복 완료",
+                        "details": f"복사 파일 {res.get('deleted_files', 0)}개 삭제, DB 복원: {'완료' if res.get('db_restored') else '생략'}",
+                        "percent": 0,
+                        "current": 0,
+                        "total": 0,
+                        "copied_rom_files": 0,
+                        "copied_bios_files": 0,
+                        "copied_cover_files": 0,
+                        "failed_count": 0,
+                        "error": "",
+                        "launcher_pid": None,
+                        "updated_at": time.time(),
+                    })
+                    try:
+                        status_dir = os.path.dirname(_ROMM_STATUS_FILE)
+                        os.makedirs(status_dir, exist_ok=True)
+                        with tempfile.NamedTemporaryFile(
+                            mode="w",
+                            encoding="utf-8",
+                            dir=status_dir,
+                            delete=False,
+                            prefix=".tmp_status_",
+                        ) as tf:
+                            json.dump(_ROMM_MIGRATION_PROGRESS, tf, ensure_ascii=False)
+                            temp_name = tf.name
+                        os.replace(temp_name, _ROMM_STATUS_FILE)
+                    except Exception:
+                        pass
+                return {
+                    "success": True,
+                    "message": "마이그레이션이 성공적으로 원복되었습니다.",
+                    "rollback": res,
+                    "migration": _get_romm_migration_status(),
+                }
+
+            elif action == "get_migration_environment":
+                source_root = self._get_emulatorjs_root()
+                source_roms_dir = os.path.join(source_root, "roms") if os.path.isdir(os.path.join(source_root, "roms")) else self._get_roms_dir()
+                try:
+                    _ensure_plugin_import_paths()
+                    try:
+                        from tools.romm_migration_plan import is_remote_mount
+                    except ImportError:
+                        from plugins.metadata.bookoasis_gamebooks.tools.romm_migration_plan import is_remote_mount
+                    is_remote = is_remote_mount(source_roms_dir) or is_remote_mount(source_root)
+                except Exception:
+                    is_remote = False
+
+                available_remotes = []
+                try:
+                    import sys
+                    if "/app" not in sys.path:
+                        sys.path.insert(0, "/app")
+                    from utils.rclone_gdrive_copy import list_writable_drive_remotes
+                    core_remotes = list_writable_drive_remotes() or []
+                    for r in core_remotes:
+                        if isinstance(r, dict) and r.get("name"):
+                            available_remotes.append(r.get("name"))
+                        elif isinstance(r, str):
+                            available_remotes.append(r)
+                except Exception as ex:
+                    logger.debug(f"[{SELF_ID}] Failed to list core writable drive remotes: {ex}")
+
+                return {
+                    "success": True,
+                    "is_remote": is_remote,
+                    "source_root": source_root,
+                    "source_roms_dir": source_roms_dir,
+                    "default_mount_base": source_root if is_remote else "",
+                    "remotes": available_remotes,
                 }
 
             elif action == "start_migration":
                 force = str(request.args.get("force", "")).lower() in ("1", "true", "yes")
-                rclone_config_content = str(request.args.get("rclone_config_content", "")).strip() or None
-                rclone_remote = str(request.args.get("rclone_remote", "")).strip() or None
-                rclone_mount_base = str(request.args.get("rclone_mount_base", "")).strip() or None
+                req_json = request.get_json(silent=True) or {}
+                rclone_remote = (str(request.form.get("rclone_remote", "") or req_json.get("rclone_remote", "") or request.args.get("rclone_remote", "")).strip()) or None
+                rclone_mount_base = (str(request.form.get("rclone_mount_base", "") or req_json.get("rclone_mount_base", "") or request.args.get("rclone_mount_base", "")).strip()) or None
+                if not rclone_remote:
+                    try:
+                        import sys
+                        if "/app" not in sys.path:
+                            sys.path.insert(0, "/app")
+                        from utils.rclone_gdrive_copy import list_writable_drive_remotes
+                        cw_remotes = list_writable_drive_remotes() or []
+                        for cr in cw_remotes:
+                            r_name = cr.get("name") if isinstance(cr, dict) else (cr if isinstance(cr, str) else None)
+                            if r_name:
+                                rclone_remote = r_name
+                                break
+                    except Exception:
+                        pass
                 started, msg = self._start_async_romm_migration(
                     force=force,
-                    rclone_config_content=rclone_config_content,
                     rclone_remote=rclone_remote,
                     rclone_mount_base=rclone_mount_base,
                 )
@@ -5456,9 +5558,6 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 ss_password = str(_get_val("ss_password", "")).strip()
                 igdb_client_id = str(_get_val("igdb_client_id", "")).strip()
                 igdb_client_secret = str(_get_val("igdb_client_secret", "")).strip()
-                rclone_remote = str(_get_val("rclone_remote", "")).strip()
-                rclone_mount_base = str(_get_val("rclone_mount_base", "")).strip()
-                rclone_config_content = str(_get_val("rclone_config_content", "")).strip()
 
                 cloud_save = True if str(cloud_save_raw).lower() in ("1", "true", "yes", "on") else False
                 try:
@@ -5482,12 +5581,6 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 self._set_setting("SS_PASSWORD", ss_password)
                 self._set_setting("IGDB_CLIENT_ID", igdb_client_id)
                 self._set_setting("IGDB_CLIENT_SECRET", igdb_client_secret)
-                if rclone_remote:
-                    self._set_setting("RCLONE_REMOTE", rclone_remote)
-                if rclone_mount_base:
-                    self._set_setting("RCLONE_MOUNT_BASE", rclone_mount_base)
-                if rclone_config_content:
-                    self._set_setting("RCLONE_CONFIG_CONTENT", rclone_config_content)
 
                 # 커버 이미지 폴더가 새로 지정되었거나 변경되었을 경우 기존 커버 파일들을 새 위치로 마이그레이션
                 if covers_path and covers_path != prev_covers_path:
@@ -5684,26 +5777,4 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return False, "카테고리 전용 EmulatorJS 에뮬레이터 플러그인입니다."
 
 
-# Flask 404 Fallback Hook (서버 재시작 후 첫 요청 시에도 라우트를 즉시 자동 바인딩)
-from flask import Flask, request
-from werkzeug.exceptions import NotFound
-
-if not getattr(Flask, "_gba_404_patched", False):
-    _orig_handle_user_exception = Flask.handle_user_exception
-
-    def _gba_handle_user_exception(self, e):
-        if isinstance(e, NotFound) and getattr(e, "code", None) == 404:
-            try:
-                path = request.path
-                if path.startswith(ROUTE_BASE):
-                    p = BookoasisGamebooksMetadataProvider()
-                    p._do_register_routes(self)
-                    adapter = self.create_url_adapter(request)
-                    endpoint, values = adapter.match(path_info=path, method=request.method)
-                    return self.view_functions[endpoint](**values)
-            except Exception as ex:
-                logger.error(f"[{SELF_ID}] 404 fallback dispatch error: {ex}")
-        return _orig_handle_user_exception(self, e)
-
-    Flask.handle_user_exception = _gba_handle_user_exception
-    Flask._gba_404_patched = True
+# 플러그인 로드 완료 (코어 표준 라우트 맵 확장)

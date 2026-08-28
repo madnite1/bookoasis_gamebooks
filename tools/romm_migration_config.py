@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 SOURCE_ROOT = Path("/mnt/gdrive/emulatorjs")
 SOURCE_ROMS_DIR = SOURCE_ROOT / "roms"
 SOURCE_BIOS_DIR = SOURCE_ROOT / "bios"
@@ -22,6 +26,8 @@ SUMMARY_PATH = MANIFEST_DIR / "migration_summary.txt"
 COVER_MAP_PATH = MANIFEST_DIR / "migration_cover_map.json"
 BIOS_MAP_PATH = MANIFEST_DIR / "migration_bios_map.json"
 SLUG_STATS_PATH = MANIFEST_DIR / "migration_slug_stats.json"
+CANCEL_FLAG_PATH = MANIFEST_DIR / ".migration_cancelled"
+STATUS_PATH = ROOT_DIR / "tools" / ".romm_migration_status.json"
 
 STANDARD_SLUGS = (
     "arcade",

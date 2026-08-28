@@ -95,8 +95,20 @@
     }
 
     const res = await fetch(url.toString(), options);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
+    let data;
+    try {
+      data = await res.json();
+    } catch (err) {
+      data = null;
+    }
+    if (!res.ok) {
+      const errMsg = (data && (data.error || data.message)) ? (data.error || data.message) : `HTTP ${res.status}`;
+      const errorObj = new Error(errMsg);
+      errorObj.response = data;
+      errorObj.status = res.status;
+      throw errorObj;
+    }
+    return data;
   }
 
   // --------------------------------------------------------------------------
@@ -166,18 +178,97 @@
   function handleMigrationState(mig) {
     if (!mig) return;
     const modal = $('gbaMigrationModal');
+    const headerTitleEl = $('gbaMigrationHeaderTitle');
+    const closeBtn = $('gbaMigrationCloseBtn');
     const statusEl = $('gbaMigrationStatus');
-    const progressBar = $('gbaMigrationProgressBar');
     const detailsEl = $('gbaMigrationDetails');
     const subDetailsEl = $('gbaMigrationSubDetails');
+    const progressWrapEl = $('gbaMigrationProgressBarWrap');
+    const progressBar = $('gbaMigrationProgressBar');
+    const stepsWrapEl = $('gbaMigrationStepsWrap');
+    const stepPlanningEl = $('gbaStepPlanning');
+    const stepRomEl = $('gbaStepRom');
+    const stepBiosEl = $('gbaStepBios');
+    const stepDbEl = $('gbaStepDb');
+    const startBtn = $('gbaMigrationStartBtn');
+    const laterBtn = $('gbaMigrationLaterBtn');
+    const cancelBtn = $('gbaMigrationCancelBtn');
+    const rollbackBtn = $('gbaMigrationRollbackBtn');
 
-    const isRunning = mig.is_running || mig.state === 'running';
+    const stateValue = String(mig.state || '').trim() || 'not_started';
+    const phaseValue = String(mig.phase || '').trim().toLowerCase();
+    const isRunning = !!(mig.is_running || stateValue === 'running');
+    const pct = Math.max(0, Math.min(100, mig.percent || 0));
+
+    if (!modal) return;
+
+    const setVisible = (el, visible, displayValue = 'inline-flex') => {
+      if (!el) return;
+      el.style.display = visible ? displayValue : 'none';
+    };
+
+    const setStepState = (el, stepState) => {
+      if (!el) return;
+      const styles = {
+        pending: { bg: 'transparent', color: '#888', border: 'none' },
+        active: { bg: 'rgba(59,130,246,0.15)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.3)', fontWeight: 'bold' },
+        done: { bg: 'rgba(34,197,94,0.15)', color: '#15803d', border: '1px solid rgba(34,197,94,0.3)', fontWeight: 'normal' },
+      };
+      const style = styles[stepState] || styles.pending;
+      el.style.background = style.bg;
+      el.style.color = style.color;
+      el.style.border = style.border;
+      el.style.fontWeight = style.fontWeight || 'normal';
+    };
+
+    const updateMigrationSteps = () => {
+      if (!stepsWrapEl) return;
+      setVisible(stepsWrapEl, isRunning || stateValue === 'completed' || stateValue === 'failed' || stateValue === 'cancelled', 'block');
+
+      setStepState(stepPlanningEl, 'pending');
+      setStepState(stepRomEl, 'pending');
+      setStepState(stepBiosEl, 'pending');
+      setStepState(stepDbEl, 'pending');
+
+      if (phaseValue === 'planning' || phaseValue === 'start' || phaseValue === 'starting') {
+        setStepState(stepPlanningEl, 'active');
+      } else if (phaseValue === 'rom') {
+        setStepState(stepPlanningEl, 'done');
+        setStepState(stepRomEl, 'active');
+      } else if (phaseValue === 'bios') {
+        setStepState(stepPlanningEl, 'done');
+        setStepState(stepRomEl, 'done');
+        setStepState(stepBiosEl, 'active');
+      } else if (phaseValue === 'syncing_db' || phaseValue === 'db') {
+        setStepState(stepPlanningEl, 'done');
+        setStepState(stepRomEl, 'done');
+        setStepState(stepBiosEl, 'done');
+        setStepState(stepDbEl, 'active');
+      } else if (stateValue === 'completed') {
+        setStepState(stepPlanningEl, 'done');
+        setStepState(stepRomEl, 'done');
+        setStepState(stepBiosEl, 'done');
+        setStepState(stepDbEl, 'done');
+      } else if (stateValue === 'failed' || stateValue === 'cancelled') {
+        if ((mig.copied_rom_files || 0) > 0) setStepState(stepRomEl, 'done');
+        if ((mig.copied_bios_files || 0) > 0) setStepState(stepBiosEl, 'done');
+      }
+    };
+    updateMigrationSteps();
+    const rcloneSec = $('gbaMigrationRcloneSection');
 
     if (isRunning) {
       state.isMigrating = true;
-      if (modal) modal.style.display = 'flex';
+      modal.style.display = 'flex';
+      if (headerTitleEl) headerTitleEl.innerHTML = '<i class="fa-solid fa-layer-group fa-spin"></i> RomM 표준 라이브러리 마이그레이션';
+      setVisible(closeBtn, false);
+      setVisible(progressWrapEl, true, 'block');
+      setVisible(startBtn, false);
+      setVisible(laterBtn, false);
+      setVisible(cancelBtn, true);
+      setVisible(rollbackBtn, false);
+      setVisible(rcloneSec, false);
 
-      const pct = Math.max(0, Math.min(100, mig.percent || 0));
       if (progressBar) progressBar.style.width = `${pct}%`;
 
       if (statusEl) {
@@ -195,37 +286,72 @@
       }
 
       if (subDetailsEl) {
-        subDetailsEl.textContent = `ROM ${mig.copied_rom_files || 0}개 / BIOS ${mig.copied_bios_files || 0}개 / 커버 ${mig.copied_cover_files || 0}개 완료 (Copy-first 보존)`;
+        subDetailsEl.textContent = `ROM ${mig.copied_rom_files || 0}개 / BIOS ${mig.copied_bios_files || 0}개 완료 (Copy-first 보존)`;
       }
 
       startMigrationMonitor();
-    } else {
-      if (state.isMigrating) {
-        state.isMigrating = false;
-        if (state.migrationPollTimer) {
-          clearInterval(state.migrationPollTimer);
-          state.migrationPollTimer = null;
-        }
-
-        if (mig.state === 'completed') {
-          if (progressBar) progressBar.style.width = '100%';
-          if (statusEl) statusEl.textContent = '🎉 RomM 마이그레이션이 성공적으로 완료되었습니다!';
-          if (detailsEl) detailsEl.textContent = mig.details || '새로운 라이브러리 목록을 불러옵니다.';
-          setTimeout(() => {
-            if (modal) modal.style.display = 'none';
-            loadLibrary(false);
-          }, 1200);
-        } else if (mig.state === 'failed') {
-          if (statusEl) statusEl.textContent = '❌ RomM 마이그레이션 실패';
-          if (detailsEl) detailsEl.textContent = mig.error || '마이그레이션 도중 오류가 발생했습니다.';
-          setTimeout(() => {
-            if (modal) modal.style.display = 'none';
-          }, 4000);
-        } else {
-          if (modal) modal.style.display = 'none';
-        }
-      }
+      return;
     }
+
+    state.isMigrating = false;
+    if (state.migrationPollTimer) {
+      clearInterval(state.migrationPollTimer);
+      state.migrationPollTimer = null;
+    }
+
+    if (stateValue === 'completed') {
+      if (progressBar) progressBar.style.width = '100%';
+      if (headerTitleEl) headerTitleEl.innerHTML = '<i class="fa-solid fa-circle-check"></i> RomM 마이그레이션 완료';
+      if (statusEl) statusEl.textContent = '🎉 RomM 마이그레이션이 성공적으로 완료되었습니다!';
+      if (detailsEl) detailsEl.textContent = mig.details || '새로운 라이브러리 목록을 불러옵니다.';
+      if (subDetailsEl) subDetailsEl.textContent = '이제부터 목록 로딩은 마이그레이션을 자동 시작하지 않고 DB 기준으로 동작합니다.';
+      setVisible(progressWrapEl, true, 'block');
+      setVisible(startBtn, false);
+      setVisible(laterBtn, false);
+      setVisible(cancelBtn, false);
+      setVisible(closeBtn, false);
+      setVisible(rcloneSec, false);
+      setTimeout(() => {
+        modal.style.display = 'none';
+        loadLibrary(false);
+      }, 1200);
+      return;
+    }
+
+    modal.style.display = 'flex';
+    setVisible(progressWrapEl, false);
+    setVisible(closeBtn, true, 'inline-flex');
+    setVisible(startBtn, true);
+    setVisible(laterBtn, true);
+    setVisible(cancelBtn, false);
+    setVisible(rollbackBtn, stateValue === 'completed' || stateValue === 'failed' || stateValue === 'cancelled');
+    if (progressBar) progressBar.style.width = '0%';
+
+    if (stateValue === 'failed') {
+      if (headerTitleEl) headerTitleEl.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> RomM 마이그레이션 재시도 필요';
+      if (statusEl) statusEl.textContent = '❌ 마이그레이션 중 오류가 발생했습니다.';
+      if (detailsEl) detailsEl.textContent = mig.error || mig.details || '마이그레이션 도중 오류가 발생했습니다. 다시 시작할 수 있습니다.';
+      if (subDetailsEl) {
+        const failCount = mig.failed_count || 0;
+        const romDone = mig.copied_rom_files || 0;
+        const biosDone = mig.copied_bios_files || 0;
+        subDetailsEl.textContent = `진행 현황: ROM ${romDone}개, BIOS ${biosDone}개 복사 완료 / 실패 ${failCount}건. 리모트 설정을 확인 후 다시 시도해 주세요.`;
+      }
+      return;
+    }
+
+    if (stateValue === 'cancelled') {
+      if (headerTitleEl) headerTitleEl.innerHTML = '<i class="fa-solid fa-pause-circle"></i> RomM 마이그레이션이 중단되었습니다';
+      if (statusEl) statusEl.textContent = '⏸️ 마이그레이션이 중단된 상태입니다.';
+      if (detailsEl) detailsEl.textContent = mig.details || '원할 때 다시 시작할 수 있습니다.';
+      if (subDetailsEl) subDetailsEl.textContent = '목록은 먼저 표시되며, 마이그레이션은 버튼을 눌렀을 때만 시작됩니다.';
+      return;
+    }
+
+    if (headerTitleEl) headerTitleEl.innerHTML = '<i class="fa-solid fa-layer-group"></i> RomM 표준 라이브러리 마이그레이션';
+    if (statusEl) statusEl.textContent = 'RomM 표준 라이브러리 마이그레이션이 필요합니다.';
+    if (detailsEl) detailsEl.textContent = mig.details || '게임 목록은 먼저 표시되었습니다. 원하면 지금 마이그레이션을 시작하세요.';
+    if (subDetailsEl) subDetailsEl.textContent = '완료 기준은 워커가 최종 상태를 completed로 기록한 경우입니다. 디렉터리 존재만으로 완료 처리하지 않습니다.';
   }
 
   function startMigrationMonitor() {
@@ -2620,6 +2746,151 @@
   }
 
   function bindEvents() {
+    // RomM 마이그레이션 모달 버튼 연동
+    $('gbaMigrationStartBtn')?.addEventListener('click', async () => {
+      const startBtn = $('gbaMigrationStartBtn');
+      const rcloneSec = $('gbaMigrationRcloneSection');
+      const rcloneRemoteSel = $('gbaMigrationRcloneRemoteSelect');
+      const rcloneMountInput = $('gbaMigrationRcloneMountBaseInput');
+
+      // 1. 먼저 백엔드에 롬 폴더가 원격/클라우드 마운트인지 질의 및 코어 리모트 목록 획득
+      let isRemote = false;
+      let defaultMountBase = '/mnt/gdrive';
+      let coreRemotes = [];
+      try {
+        const envRes = await apiCall('get_migration_environment');
+        if (envRes && envRes.success) {
+          isRemote = !!envRes.is_remote;
+          if (envRes.default_mount_base) {
+            defaultMountBase = envRes.default_mount_base;
+          }
+          if (Array.isArray(envRes.remotes)) {
+            coreRemotes = envRes.remotes;
+          }
+        } else {
+          showToast('마이그레이션 환경 확인 실패: 원격 마운트 여부를 확인하지 못했습니다.', true);
+          return;
+        }
+      } catch (err) {
+        console.warn('[GBA] Check migration env error:', err);
+        showToast('마이그레이션 환경 확인 실패: ' + (err?.message || '원격 마운트 여부를 확인하지 못했습니다.'), true);
+        return;
+      }
+
+      // 2. 원격 마운트인데 rclone 섹션이 아직 안 열려 있다면: 모달 내에 rclone 입력 섹션을 펼치고 입력을 유도
+      const isRcloneSecHidden = !rcloneSec || rcloneSec.style.display === 'none' || window.getComputedStyle(rcloneSec).display === 'none';
+      if (isRemote && isRcloneSecHidden) {
+        if (rcloneSec) rcloneSec.style.display = 'block';
+        if (rcloneMountInput && !rcloneMountInput.value) {
+          rcloneMountInput.value = defaultMountBase;
+        }
+        // 코어에서 가져온 리모트 목록이 있으면 드롭다운에 미리 채움
+        if (rcloneRemoteSel && coreRemotes.length > 0) {
+          rcloneRemoteSel.innerHTML = '';
+          coreRemotes.forEach((r) => {
+            const opt = document.createElement('option');
+            opt.value = r;
+            opt.textContent = `${r} (BookOasis 코어)`;
+            rcloneRemoteSel.appendChild(opt);
+          });
+          rcloneRemoteSel.value = coreRemotes[0];
+        }
+        showToast('원격 마운트 환경입니다. 마이그레이션에 사용할 리모트를 선택해 주세요.');
+        if (startBtn) {
+          startBtn.textContent = '선택 완료 후 마이그레이션 시작';
+        }
+        return;
+      }
+
+      if (!confirm('RomM 표준 구조로 마이그레이션을 시작하시겠습니까?\n\n- 기존 원본 파일은 유지(Copy-first)됩니다.\n- 백그라운드 워커 스레드로 실행됩니다.')) return;
+
+      const rcloneRemote = (rcloneRemoteSel && rcloneRemoteSel.value) ? rcloneRemoteSel.value.trim() : '';
+      const rcloneMountBase = (rcloneMountInput && rcloneMountInput.value) ? rcloneMountInput.value.trim() : '';
+
+      try {
+        const payload = {};
+        if (rcloneRemote) payload.rclone_remote = rcloneRemote;
+        if (rcloneMountBase) payload.rclone_mount_base = rcloneMountBase;
+
+        // UI 즉시 진행 상태로 전환
+        handleMigrationState({
+          is_running: true,
+          state: 'running',
+          phase: 'planning',
+          percent: 0,
+          current_item: '마이그레이션 요청 전송 중...',
+          details: '백그라운드 독립 워커 프로세스를 시작하는 중입니다.',
+        });
+        startMigrationMonitor();
+
+        const res = await apiCall('start_migration', payload);
+        if (res && res.success) {
+          showToast('마이그레이션이 시작되었습니다.');
+          if (res.migration) {
+            handleMigrationState(res.migration);
+          }
+        } else {
+          showToast('마이그레이션 시작 실패: ' + (res?.message || res?.error || '알 수 없는 오류'), true);
+        }
+      } catch (e) {
+        showToast('마이그레이션 시작 요청 중 오류가 발생했습니다.', true);
+      }
+    });
+
+    $('gbaMigrationLaterBtn')?.addEventListener('click', () => {
+      const modal = $('gbaMigrationModal');
+      if (modal) modal.style.display = 'none';
+    });
+
+    $('gbaMigrationCloseBtn')?.addEventListener('click', () => {
+      const modal = $('gbaMigrationModal');
+      if (modal) modal.style.display = 'none';
+    });
+
+    $('gbaMigrationCancelBtn')?.addEventListener('click', async () => {
+      if (!confirm('진행 중인 RomM 마이그레이션을 중단하시겠습니까? (이미 복사된 파일은 유지됩니다)')) return;
+      try {
+        const res = await apiCall('cancel_migration');
+        if (res && res.success) {
+          showToast('마이그레이션 취소 요청을 전송했습니다.');
+          if (res.migration) {
+            handleMigrationState(res.migration);
+          }
+        } else {
+          showToast('취소 요청 실패: ' + (res?.message || res?.error || '알 수 없는 오류'), true);
+        }
+      } catch (e) {
+        const fallbackResp = e?.response;
+        if (fallbackResp && fallbackResp.migration) {
+          handleMigrationState(fallbackResp.migration);
+        }
+        showToast('취소 요청 실패: ' + (e?.message || '알 수 없는 오류'), true);
+      }
+    });
+
+    $('gbaMigrationRollbackBtn')?.addEventListener('click', async () => {
+      if (!confirm('RomM 마이그레이션을 원복하시겠습니까?\n복사된 romm_library 파일이 삭제되고 DB 메타데이터가 이전 상태로 복구됩니다. (원본 파일은 보존됩니다)')) return;
+      try {
+        showToast('마이그레이션 원복 작업을 진행 중입니다...');
+        const res = await apiCall('rollback_migration');
+        if (res && res.success) {
+          showToast('마이그레이션이 성공적으로 원복되었습니다.');
+          const modal = $('gbaMigrationModal');
+          if (modal) modal.style.display = 'none';
+          if (res.migration) {
+            handleMigrationState(res.migration);
+          }
+          setTimeout(() => {
+            loadLibrary(true);
+          }, 500);
+        } else {
+          showToast('원복 실패: ' + (res?.message || res?.error || '알 수 없는 오류'), true);
+        }
+      } catch (e) {
+        showToast('원복 실패: ' + (e?.message || '알 수 없는 오류'), true);
+      }
+    });
+
     // 검색창 입력 & 초기화
     const searchInput = $('gbaSearchInput');
     const clearBtn = $('gbaSearchClear');
@@ -3183,17 +3454,6 @@
         $('gbaSettingBiosPath').value = state.config.bios_path || '';
       }
 
-      // rclone 설정 필드 채우기
-      if ($('gbaSettingRcloneRemote')) {
-        $('gbaSettingRcloneRemote').value = state.config.rclone_remote || 'google_drive';
-      }
-      if ($('gbaSettingRcloneMountBase')) {
-        $('gbaSettingRcloneMountBase').value = state.config.rclone_mount_base || '/mnt/gdrive';
-      }
-      if ($('gbaSettingRcloneConfigContent')) {
-        $('gbaSettingRcloneConfigContent').value = state.config.rclone_config_content || '';
-      }
-
       $('gbaSettingsModal').style.display = 'flex';
     });
 
@@ -3209,9 +3469,6 @@
       const extraPath = $('gbaSettingExtraPath') ? $('gbaSettingExtraPath').value.trim() : '';
       const coversPath = $('gbaSettingCoversPath') ? $('gbaSettingCoversPath').value.trim() : '';
       const biosPath = $('gbaSettingBiosPath') ? $('gbaSettingBiosPath').value.trim() : '';
-      const rcloneRemote = $('gbaSettingRcloneRemote') ? $('gbaSettingRcloneRemote').value.trim() : '';
-      const rcloneMountBase = $('gbaSettingRcloneMountBase') ? $('gbaSettingRcloneMountBase').value.trim() : '';
-      const rcloneConfigContent = $('gbaSettingRcloneConfigContent') ? $('gbaSettingRcloneConfigContent').value.trim() : '';
       const cloudSave = $('gbaSettingCloudSave').checked ? '1' : '0';
       const interval = $('gbaSettingInterval').value.trim();
       const saveBtn = $('gbaSettingsSaveBtn');
@@ -3301,9 +3558,6 @@
           extra_roms_path: extraPath,
           covers_path: coversPath,
           bios_path: biosPath,
-          rclone_remote: rcloneRemote,
-          rclone_mount_base: rcloneMountBase,
-          rclone_config_content: rcloneConfigContent,
           cloud_save_enabled: cloudSave,
           auto_save_interval_sec: interval,
         });
@@ -3313,9 +3567,6 @@
           state.config.extra_roms_path = extraPath;
           state.config.covers_path = coversPath;
           state.config.bios_path = biosPath;
-          state.config.rclone_remote = rcloneRemote;
-          state.config.rclone_mount_base = rcloneMountBase;
-          state.config.rclone_config_content = rcloneConfigContent;
           state.config.cloud_save_enabled = cloudSave === '1';
           state.config.auto_save_interval_sec = parseInt(interval, 10) || 60;
           renderGames();

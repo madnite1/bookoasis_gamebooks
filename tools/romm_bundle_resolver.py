@@ -8,11 +8,18 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from bookoasis_gamebooks import (
-    _collect_disk_bundle_paths,
-    _resolve_disk_sidecars,
-    _rewrite_disk_manifest_to_local_paths,
-)
+try:
+    from bookoasis_gamebooks import (
+        _collect_disk_bundle_paths,
+        _resolve_disk_sidecars,
+        _rewrite_disk_manifest_to_local_paths,
+    )
+except ImportError:
+    from plugins.metadata.bookoasis_gamebooks.bookoasis_gamebooks import (
+        _collect_disk_bundle_paths,
+        _resolve_disk_sidecars,
+        _rewrite_disk_manifest_to_local_paths,
+    )
 
 
 def collect_bundle(file_path: str | Path) -> dict[str, Any]:
