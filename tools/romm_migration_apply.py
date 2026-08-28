@@ -445,11 +445,17 @@ def rollback_migration(
     rclone_remote: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    RomM 마이그레이션 결과 100% 원복(Rollback):
-    1. manifest 및 bios_map의 대상 파일(target_paths) 안전 삭제 (소스 원본은 보존)
-    2. rclone 원격 마운트 환경인 경우 rclone purge / delete 로 신속하게 원격 타겟 정리
-    3. 생성된 빈 RomM 디렉터리 정리
-    4. gba.db 백업본(bak_migration_*)이 존재하면 최신 백업본으로 복원
+    RomM 마이그레이션 결과 원복(Rollback).
+
+    원격(rclone) 모드:
+      1. RomM 대상 루트를 서버사이드 purge
+      2. purge 성공 시 FUSE 파일 순회/삭제를 생략
+      3. purge 성공이 확인된 경우에만 DB 백업 복원
+
+    로컬 모드:
+      1. manifest/bios_map에 기록된 대상 파일만 경계 검증 후 삭제
+      2. 생성된 빈 디렉터리 정리
+      3. DB 백업 복원
     """
     manifest_f = manifest_path or MANIFEST_PATH
     bios_map_f = bios_map_path or BIOS_MAP_PATH
@@ -457,16 +463,22 @@ def rollback_migration(
 
     deleted_files = 0
     errors: List[str] = []
+    remote_mode = bool(rclone_remote)
+    remote_purged = False
+
     if not _is_expected_romm_root(romm_root):
         return {
             "success": False,
             "deleted_files": 0,
             "db_restored": False,
+            "remote_purged": False,
+            "cleanup_mode": "refused",
             "errors": [f"Refusing rollback for unexpected RomM root: {romm_root}"],
         }
 
-    # 1. rclone 원격 정리 우선 시도 (고속 서버사이드 purge)
-    if rclone_remote:
+    # 1. 원격 저장소는 서버사이드 purge를 유일한 1차 정리 방법으로 사용한다.
+    #    성공 후 FUSE를 다시 순회하면 수천 파일에서 장시간 block될 수 있으므로 생략한다.
+    if remote_mode:
         try:
             import sys
             if "/app" not in sys.path:
@@ -476,76 +488,99 @@ def rollback_migration(
 
             rel_romm_root = get_rclone_relative_path(str(romm_root))
             normalized_rel = str(rel_romm_root or "").replace("\\", "/").strip("/")
-            if normalized_rel and normalized_rel != "." and normalized_rel.endswith("/romm_library") and ".." not in normalized_rel.split("/"):
+            valid_remote_target = (
+                bool(normalized_rel)
+                and normalized_rel != "."
+                and normalized_rel.endswith("/romm_library")
+                and ".." not in normalized_rel.split("/")
+            )
+            if not valid_remote_target:
+                errors.append(f"Refusing unsafe rclone rollback target: {normalized_rel or rel_romm_root!r}")
+            else:
                 remote_target = f"{rclone_remote}:{normalized_rel}"
                 logger.info(f"Purging remote RomM directory via rclone: {remote_target}")
-                code, _, stderr = _run_rclone(["purge", remote_target], timeout=120)
+                code, _, stderr = _run_rclone(["purge", remote_target, "--drive-use-trash=false"], timeout=180)
                 if code == 0:
-                    logger.info("Successfully purged remote RomM directory via rclone")
-                    deleted_files += 1
+                    remote_purged = True
+                    deleted_files += 1  # 원격 트리 1건 정리로 집계
+                    logger.info("Successfully purged remote RomM directory; skipping FUSE cleanup")
                 else:
-                    err_msg = stderr.decode("utf-8", "replace").strip()
-                    logger.debug(f"rclone purge failed ({remote_target}): {err_msg}")
+                    err_msg = stderr.decode("utf-8", "replace").strip() or f"rclone exit code {code}"
+                    errors.append(f"rclone purge failed ({remote_target}): {err_msg}")
         except Exception as r_err:
-            logger.debug(f"rclone purge exception: {r_err}")
+            errors.append(f"rclone purge exception: {r_err}")
 
-    # 2. 로컬 / FUSE 타겟 파일 정리
-    targets_to_delete: List[Path] = []
-    if manifest_f.is_file():
+        # 원격 purge 확인 없이 DB를 되돌리면 DB는 레거시, 파일은 RomM인 불일치 상태가 된다.
+        # FUSE 재귀 fallback도 의도적으로 하지 않는다.
+        if not remote_purged:
+            logger.error("Rollback stopped because remote purge was not confirmed")
+            return {
+                "success": False,
+                "deleted_files": deleted_files,
+                "db_restored": False,
+                "remote_purged": False,
+                "cleanup_mode": "rclone_failed",
+                "errors": errors or ["Remote RomM cleanup was not confirmed."],
+            }
+
+    # 2. 로컬 모드에서만 manifest/bios_map의 대상 파일을 개별 삭제한다.
+    if not remote_mode:
+        targets_to_delete: List[Path] = []
+        if manifest_f.is_file():
+            try:
+                with open(manifest_f, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                for item in manifest:
+                    for tp in item.get("target_paths", []):
+                        if _path_within(tp, romm_root):
+                            targets_to_delete.append(Path(tp))
+                        else:
+                            errors.append(f"Skipped rollback target outside RomM root: {tp}")
+            except Exception as e:
+                errors.append(f"Failed to read manifest for rollback: {e}")
+
+        if bios_map_f.is_file():
+            try:
+                with open(bios_map_f, "r", encoding="utf-8") as f:
+                    bios_map = json.load(f)
+                for item in bios_map:
+                    tb = item.get("target_bios")
+                    if tb:
+                        if _path_within(tb, romm_root):
+                            targets_to_delete.append(Path(tb))
+                        else:
+                            errors.append(f"Skipped BIOS rollback target outside RomM root: {tb}")
+            except Exception as e:
+                errors.append(f"Failed to read bios_map for rollback: {e}")
+
+        for target_path in dict.fromkeys(targets_to_delete):
+            try:
+                if target_path.is_file():
+                    target_path.unlink()
+                    deleted_files += 1
+            except Exception as ex:
+                errors.append(f"Failed to delete rollback target {target_path}: {ex}")
+
+        # 로컬 디스크에서만 빈 디렉터리 정리. 원격/FUSE에는 절대 os.walk하지 않는다.
         try:
-            with open(manifest_f, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-            for item in manifest:
-                for tp in item.get("target_paths", []):
-                    if _path_within(tp, romm_root):
-                        targets_to_delete.append(Path(tp))
-                    else:
-                        errors.append(f"Skipped rollback target outside RomM root: {tp}")
-        except Exception as e:
-            errors.append(f"Failed to read manifest for rollback: {e}")
-
-    if bios_map_f.is_file():
-        try:
-            with open(bios_map_f, "r", encoding="utf-8") as f:
-                bios_map = json.load(f)
-            for item in bios_map:
-                tb = item.get("target_bios")
-                if tb:
-                    if _path_within(tb, romm_root):
-                        targets_to_delete.append(Path(tb))
-                    else:
-                        errors.append(f"Skipped BIOS rollback target outside RomM root: {tb}")
-        except Exception as e:
-            errors.append(f"Failed to read bios_map for rollback: {e}")
-
-    for p in targets_to_delete:
-        try:
-            if p.is_file():
-                p.unlink()
-                deleted_files += 1
-        except Exception as ex:
-            errors.append(f"Failed to delete rollback target {p}: {ex}")
-
-    # 3. 빈 디렉터리 정리
-    try:
-        if romm_root.is_dir():
-            for root, dirs, files in os.walk(str(romm_root), topdown=False):
-                for d in dirs:
-                    d_path = Path(root) / d
+            if romm_root.is_dir():
+                for root, dirs, _files in os.walk(str(romm_root), topdown=False):
+                    for directory in dirs:
+                        d_path = Path(root) / directory
+                        try:
+                            if d_path.is_dir() and not any(d_path.iterdir()):
+                                d_path.rmdir()
+                        except Exception:
+                            pass
+                if romm_root.is_dir() and not any(romm_root.iterdir()):
                     try:
-                        if d_path.is_dir() and not any(d_path.iterdir()):
-                            d_path.rmdir()
+                        romm_root.rmdir()
                     except Exception:
                         pass
-            if romm_root.is_dir() and not any(romm_root.iterdir()):
-                try:
-                    romm_root.rmdir()
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.debug(f"Clean empty dirs warning: {e}")
+        except Exception as e:
+            logger.debug(f"Clean empty dirs warning: {e}")
 
-    # 4. DB 복원 (최신 gba.db.bak_migration_* 찾아서 복원)
+    # 3. 파일 정리가 성공한 뒤에만 DB 복원.
     db_restored = False
     db_path = _get_target_db_path(plugin_data_dir)
     if db_path and db_path.parent.is_dir():
@@ -554,23 +589,32 @@ def rollback_migration(
             bak_files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
             if bak_files:
                 latest_bak = bak_files[0]
-                shutil.copy2(latest_bak, str(db_path))
+                temp_restore = db_path.with_name(f".{db_path.name}.rollback_tmp")
+                shutil.copy2(latest_bak, str(temp_restore))
+                os.replace(str(temp_restore), str(db_path))
                 db_restored = True
                 logger.info(f"Restored gba.db from backup: {latest_bak}")
+            else:
+                errors.append("No migration DB backup found for rollback")
         except Exception as ex:
             errors.append(f"Failed to restore gba.db: {ex}")
 
-    # 5. 상태 플래그 및 매니페스트 정리
     try:
         clear_cancel_migration_flag()
     except Exception:
         pass
 
-    logger.info(f"Rollback completed. Deleted {deleted_files} files, DB restored: {db_restored}")
+    success = db_restored and not errors
+    logger.info(
+        "Rollback completed. mode=%s remote_purged=%s deleted=%d db_restored=%s errors=%d",
+        "rclone" if remote_mode else "local", remote_purged, deleted_files, db_restored, len(errors),
+    )
     return {
-        "success": True,
+        "success": success,
         "deleted_files": deleted_files,
         "db_restored": db_restored,
+        "remote_purged": remote_purged,
+        "cleanup_mode": "rclone" if remote_mode else "local",
         "errors": errors,
     }
 
