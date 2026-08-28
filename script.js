@@ -293,6 +293,7 @@
       return;
     }
 
+    const wasMigrating = state.isMigrating;
     state.isMigrating = false;
     if (state.migrationPollTimer) {
       clearInterval(state.migrationPollTimer);
@@ -300,6 +301,13 @@
     }
 
     if (stateValue === 'completed') {
+      // 이미 완료된 상태로 페이지를 연 경우에는 list_games -> completed ->
+      // loadLibrary 재호출 루프를 만들지 않는다. 실제 running -> completed 전환 때만
+      // 한 번 목록을 조용히 갱신한다.
+      if (!wasMigrating) {
+        modal.style.display = 'none';
+        return;
+      }
       if (progressBar) progressBar.style.width = '100%';
       if (headerTitleEl) headerTitleEl.innerHTML = '<i class="fa-solid fa-circle-check"></i> RomM 마이그레이션 완료';
       if (statusEl) statusEl.textContent = '🎉 RomM 마이그레이션이 성공적으로 완료되었습니다!';
@@ -313,7 +321,7 @@
       setVisible(rcloneSec, false);
       setTimeout(() => {
         modal.style.display = 'none';
-        loadLibrary(false);
+        loadLibrary(true);
       }, 1200);
       return;
     }
