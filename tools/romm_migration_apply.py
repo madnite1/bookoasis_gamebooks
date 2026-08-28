@@ -195,54 +195,84 @@ def _batch_copy_files(
                 else:
                     remote_batch_errors[(str(src_p), str(dst_p))] = "rclone 상대 경로 계산 실패"
 
-            total_sub_batches = len(grouped)
-            curr_batch_idx = 0
+            # 한 디렉터리에 수백~수천 파일이 있으면 단일 rclone 호출이 오래 걸려
+            # timeout으로 배치 전체가 실패할 수 있다. 작은 chunk로 나눠 재시도한다.
+            batch_size = max(10, int(os.environ.get("GAMEBOOKS_RCLONE_BATCH_SIZE", "100")))
+            batch_timeout = max(120, int(os.environ.get("GAMEBOOKS_RCLONE_BATCH_TIMEOUT", "600")))
+            batch_retries = max(1, int(os.environ.get("GAMEBOOKS_RCLONE_BATCH_RETRIES", "3")))
+            chunks: List[Tuple[str, str, List[Tuple[str, Path, Path]]]] = []
             for (src_parent_rel, dst_dir_rel), file_tuples in grouped.items():
+                for chunk_start in range(0, len(file_tuples), batch_size):
+                    chunks.append((src_parent_rel, dst_dir_rel, file_tuples[chunk_start:chunk_start + batch_size]))
+
+            total_sub_batches = len(chunks)
+            for curr_batch_idx, (src_parent_rel, dst_dir_rel, file_tuples) in enumerate(chunks, 1):
                 if is_migration_cancelled():
                     break
-                curr_batch_idx += 1
                 if sub_progress_cb:
                     sub_progress_cb(
                         f"서버사이드 배치 복사 중 ({curr_batch_idx}/{total_sub_batches})",
                         f"경로: {src_parent_rel} -> {dst_dir_rel} ({len(file_tuples)}개 파일)",
                     )
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
-                    for name, _, _ in file_tuples:
-                        tf.write(f"{name}\n")
-                    tf_path = tf.name
 
-                try:
-                    src_remote_dir = f"{rclone_remote}:{src_parent_rel}" if src_parent_rel else f"{rclone_remote}:"
-                    dst_remote_dir = f"{rclone_remote}:{dst_dir_rel}" if dst_dir_rel else f"{rclone_remote}:"
-                    copy_args = [
-                        "copy",
-                        src_remote_dir,
-                        dst_remote_dir,
-                        "--files-from", tf_path,
-                        "--drive-server-side-across-configs",
-                        "--fast-list",
-                    ]
-                    code, _, stderr = _run_rclone(copy_args, timeout=120)
-                    if code == 0:
-                        for _, src_p, dst_p in file_tuples:
-                            if (src_p, dst_p) in remaining_pairs:
-                                remaining_pairs.remove((src_p, dst_p))
-                                rclone_success_count += 1
-                    else:
-                        err_text = stderr.decode('utf-8', 'replace').strip() or 'unknown rclone error'
-                        logger.debug(f"Batch rclone copy failed ({src_parent_rel} -> {dst_dir_rel}): {err_text}")
-                        for _, src_p, dst_p in file_tuples:
-                            remote_batch_errors[(str(src_p), str(dst_p))] = f"서버사이드 배치 복사 실패: {err_text}"
-                except Exception as ex:
-                    logger.debug(f"Batch rclone copy error: {ex}")
+                src_remote_dir = f"{rclone_remote}:{src_parent_rel}" if src_parent_rel else f"{rclone_remote}:"
+                dst_remote_dir = f"{rclone_remote}:{dst_dir_rel}" if dst_dir_rel else f"{rclone_remote}:"
+                last_error = "unknown rclone error"
+                chunk_ok = False
+
+                for attempt in range(1, batch_retries + 1):
+                    if is_migration_cancelled():
+                        break
+                    tf_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+                            for name, _, _ in file_tuples:
+                                tf.write(f"{name}\n")
+                            tf_path = tf.name
+                        copy_args = [
+                            "copy",
+                            src_remote_dir,
+                            dst_remote_dir,
+                            "--files-from", tf_path,
+                            "--drive-server-side-across-configs",
+                            "--fast-list",
+                            "--retries", "3",
+                            "--low-level-retries", "10",
+                        ]
+                        code, _, stderr = _run_rclone(copy_args, timeout=batch_timeout)
+                        if code == 0:
+                            chunk_ok = True
+                            break
+                        last_error = stderr.decode("utf-8", "replace").strip() or f"rclone exit code {code}"
+                        logger.warning(
+                            "Batch rclone copy failed (%s -> %s), attempt %d/%d: %s",
+                            src_parent_rel, dst_dir_rel, attempt, batch_retries, last_error[:500],
+                        )
+                    except Exception as ex:
+                        last_error = str(ex)
+                        logger.warning(
+                            "Batch rclone copy error (%s -> %s), attempt %d/%d: %s",
+                            src_parent_rel, dst_dir_rel, attempt, batch_retries, ex,
+                        )
+                    finally:
+                        if tf_path and os.path.exists(tf_path):
+                            try:
+                                os.unlink(tf_path)
+                            except Exception:
+                                pass
+                    if attempt < batch_retries:
+                        time.sleep(min(2 ** attempt, 8))
+
+                if chunk_ok:
                     for _, src_p, dst_p in file_tuples:
-                        remote_batch_errors[(str(src_p), str(dst_p))] = f"서버사이드 배치 복사 예외: {ex}"
-                finally:
-                    if os.path.exists(tf_path):
-                        try:
-                            os.unlink(tf_path)
-                        except Exception:
-                            pass
+                        if (src_p, dst_p) in remaining_pairs:
+                            remaining_pairs.remove((src_p, dst_p))
+                            rclone_success_count += 1
+                else:
+                    for _, src_p, dst_p in file_tuples:
+                        remote_batch_errors[(str(src_p), str(dst_p))] = (
+                            f"서버사이드 배치 복사 실패 ({batch_retries}회 시도): {last_error}"
+                        )
         except Exception as e:
             logger.debug(f"Rclone batch module load/exec error: {e}")
             for src_p, dst_p in remaining_pairs:
