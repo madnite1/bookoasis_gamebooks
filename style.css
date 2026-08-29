@@ -1225,9 +1225,6 @@ kbd {
   transition: width 0.2s ease;
 }
 
-.gba-migration-progress-bar {
-  background: linear-gradient(90deg, #3b82f6, #10b981, #8b5cf6) !important;
-}
 
 /* --------------------------------------------------------------------------
    Emulator Fullscreen Player View & Custom Controls
