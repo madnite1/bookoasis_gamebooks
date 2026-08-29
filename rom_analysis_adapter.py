@@ -137,14 +137,20 @@ def _convert_result(result):
     platform = GAMEBOOKS_PLATFORM_MAP.get(system_id, "")
     if getattr(result, "is_arcade", False):
         core = "arcade"
-        if arcade and (getattr(arcade, "required_bios", None) == ["neogeo.zip"] or "neogeo.zip" in (getattr(arcade, "required_bios", None) or [])):
-            platform = "Neo-Geo"
-        else:
-            platform = "Arcade"
+        # 플랫폼은 BIOS 의존성이 아니라 분석기의 기종 판정으로 결정한다.
+        # 일반 Arcade 게임도 DAT 후보/의존성 때문에 neogeo.zip을 요구할 수 있으므로
+        # required_bios만 보고 Neo-Geo로 승격하면 오분류가 발생한다.
+        platform_slug = str(getattr(result, "platform_slug", "") or "").lower()
+        platform = "Neo-Geo" if system_id == "neogeo" or platform_slug == "neogeo" else "Arcade"
 
     bios_files = list(getattr(bios, "bios_files", None) or [])
     required_bios = list(getattr(arcade, "required_bios", None) or [])
     needed_bios = (required_bios or bios_files or [""])[0]
+    # 기존 Game Books 런타임/BIOS 관리 UI와의 파일명 계약을 유지한다.
+    if system_id == "psx" and "scph5501.bin" in bios_files:
+        needed_bios = "scph5501.bin"
+    elif needed_bios == "stv.zip":
+        needed_bios = "stvbios.zip"
 
     parent_rom = _normalize_archive_name(getattr(arcade, "parent_rom", "") if arcade else "")
     required_chd = str(getattr(arcade, "chd_name", "") or "") if arcade else ""

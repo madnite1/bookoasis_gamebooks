@@ -110,11 +110,16 @@ class RomAnalyzer:
         if not result and file_ext in [".zip", ".7z"]:
             result = ArcadeDetector.detect(abs_path)
 
-        # 3. 콘솔 및 핸드헬드 카트리지 바이너리 헤더 검사 (ZIP 내 콘솔 롬 포함)
+        # 3. 아케이드로 식별되지 않은 다중 파일 ZIP/7z는 콘솔 DAT CRC 결과를 직접 사용한다.
+        # 단일 콘솔 ROM ZIP은 다음 ConsoleHeaderDetector가 바이너리 헤더를 더 강한 근거로 판별한다.
+        if not result and file_ext in {".zip", ".7z"}:
+            result = cls._detect_console_archive_dat(abs_path)
+
+        # 4. 콘솔 및 핸드헬드 카트리지 바이너리 헤더 검사 (ZIP 내 콘솔 롬 포함)
         if not result:
             result = ConsoleHeaderDetector.detect(abs_path)
 
-        # 4. 일반 확장자 기반 폴백 검사
+        # 5. 일반 확장자 기반 폴백 검사
         if not result and file_ext in GENERIC_EXT_MAP:
             g = GENERIC_EXT_MAP[file_ext]
             result = RomAnalysisResult(
@@ -189,6 +194,62 @@ class RomAnalyzer:
             cls._calc_hashes(abs_path, result)
 
         return result
+
+    @classmethod
+    def _detect_console_archive_dat(cls, file_path: str) -> Optional[RomAnalysisResult]:
+        """다중 파일 콘솔 ZIP/7z를 DAT CRC 근거로 식별한다."""
+        dat_match = DatMatcher.match_archive(file_path)
+        if not dat_match or not dat_match.matched or not dat_match.platform:
+            return None
+        if dat_match.platform.lower() == "arcade" or dat_match.matched_count <= 0:
+            return None
+        if dat_match.status == "ambiguous":
+            return None
+
+        platform = _DAT_PLATFORM_MAP.get(dat_match.platform)
+        if not platform:
+            return None
+
+        confidence_score = dat_match.confidence_score
+        evidence = [DetectionEvidence(
+            method="dat_crc",
+            confidence=confidence_score,
+            detail=(
+                f"console archive DAT {dat_match.status}: {dat_match.matched_count}/{dat_match.total_roms} ROM CRC matched; "
+                f"DAT coverage={dat_match.match_rate:.2f}%, archive coverage={dat_match.archive_match_rate:.2f}%"
+            ),
+            source=dat_match.system_name or "DAT",
+        )]
+        return RomAnalysisResult(
+            file_path=file_path,
+            file_name=os.path.basename(file_path),
+            file_size=os.path.getsize(file_path),
+            file_ext=os.path.splitext(file_path)[1].lower(),
+            system_id=platform["id"],
+            system_name=platform["name"],
+            system_type=platform["type"],
+            platform_slug=platform["slug"],
+            libretro_system=platform["libretro"],
+            is_arcade=False,
+            is_disc=False,
+            is_playable=True,
+            confidence="high" if confidence_score >= 0.90 else "medium",
+            confidence_score=confidence_score,
+            header_metadata=HeaderMetadata(title=dat_match.title or dat_match.rom_name or os.path.splitext(os.path.basename(file_path))[0]),
+            evidence=evidence,
+            detection_methods=["dat_crc"],
+            alternatives=[
+                {
+                    "rom_name": c.rom_name,
+                    "title": c.title,
+                    "platform": c.platform,
+                    "source": c.system_name,
+                    "score": c.score,
+                }
+                for c in dat_match.candidates[1:5]
+            ],
+            summary=f"콘솔 DAT CRC 아카이브: {platform['name']} ({dat_match.title or dat_match.rom_name})",
+        )
 
     @classmethod
     def _apply_console_dat(cls, file_path: str, result: RomAnalysisResult):

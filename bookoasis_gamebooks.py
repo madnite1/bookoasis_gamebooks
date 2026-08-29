@@ -682,7 +682,7 @@ def _collect_identity_fields(file_path, rom_info, clean_title="", size_bytes=0):
                 serial_code = _scan_cd_serial(resolved_path) or ""
                 if serial_code:
                     break
-        elif ext in (".bin", ".iso", ".img", ".chd", ".pbp"):
+        elif ext in (".bin", ".iso", ".img", ".pbp"):
             serial_code = _scan_cd_serial(file_path) or ""
 
     rom_crc32 = ""
@@ -1728,10 +1728,80 @@ def _resolve_disk_track_path(file_path, rel_name):
     return ""
 
 
+def _parse_m3u_bundle(file_path):
+    """vendored rom-analyzer의 안전한 M3U 파서를 사용해 실제 디스크 경로를 해석한다."""
+    details = {
+        "referenced_files": [],
+        "resolved_files": [],
+        "missing_files": [],
+        "invalid_references": [],
+        "error": "",
+    }
+    try:
+        from rom_analyzer.disc.parsers import parse_m3u
+
+        abs_path = os.path.abspath(str(file_path or ""))
+        parsed = parse_m3u(abs_path, os.path.dirname(abs_path))
+        details["referenced_files"] = list(parsed.referenced_files or [])
+        details["resolved_files"] = [
+            os.path.abspath(path)
+            for path in (parsed.resolved_files or [])
+            if path and os.path.isfile(path)
+        ]
+        details["missing_files"] = list(parsed.missing_files or [])
+        details["invalid_references"] = list(parsed.invalid_references or [])
+        details["error"] = str(parsed.error or "")
+    except Exception as exc:
+        details["error"] = f"M3U 파싱 실패: {type(exc).__name__}: {exc}"
+    return details
+
+
+def _filter_m3u_claimed_files(found_files):
+    """M3U가 소유한 디스크 파일을 독립 게임 후보에서 제외한다."""
+    claimed_disk_paths = set()
+    for candidate in list((found_files or {}).values()):
+        if os.path.splitext(candidate.get("filename") or "")[1].lower() != ".m3u":
+            continue
+        parsed = _parse_m3u_bundle(candidate.get("file_path") or "")
+        for child_path in parsed.get("resolved_files") or []:
+            if os.path.isfile(child_path):
+                claimed_disk_paths.add(os.path.realpath(os.path.abspath(child_path)))
+
+    if not claimed_disk_paths:
+        return dict(found_files or {}), claimed_disk_paths
+
+    filtered = {
+        gid: info
+        for gid, info in (found_files or {}).items()
+        if os.path.splitext(info.get("filename") or "")[1].lower() == ".m3u"
+        or os.path.realpath(os.path.abspath(info.get("file_path") or "")) not in claimed_disk_paths
+    }
+    return filtered, claimed_disk_paths
+
+
 def _resolve_disk_sidecars(file_path):
     ext = os.path.splitext(str(file_path or ""))[1].lower()
     missing = []
     details = {"missing_files": [], "resolved_files": [], "serial_code": "", "disc_count": 1}
+    if ext == ".m3u":
+        parsed = _parse_m3u_bundle(file_path)
+        details["resolved_files"] = parsed.get("resolved_files") or []
+        details["missing_files"] = list(parsed.get("missing_files") or [])
+        details["missing_files"].extend(
+            f"잘못된 참조: {ref}" for ref in (parsed.get("invalid_references") or [])
+        )
+        if parsed.get("error"):
+            details["missing_files"].append(parsed["error"])
+        details["disc_count"] = max(1, len(parsed.get("referenced_files") or []))
+        # CHD 압축 payload를 raw serial scanner로 읽지 않는다. 자식 CUE/ISO 등만 보조 검사한다.
+        for resolved_path in details["resolved_files"]:
+            if os.path.splitext(resolved_path)[1].lower() == ".chd":
+                continue
+            serial = _resolve_disk_sidecars(resolved_path).get("serial_code") or ""
+            if serial:
+                details["serial_code"] = serial
+                break
+        return details
     if ext == ".cue":
         tracks = _parse_cue_tracks(file_path)
         resolved_files = []
@@ -1860,6 +1930,16 @@ def _collect_disk_bundle_paths(file_path):
     ext = os.path.splitext(file_path)[1].lower()
     _add(file_path)
 
+    if ext == ".m3u":
+        details = _resolve_disk_sidecars(file_path)
+        for resolved_path in details.get("resolved_files") or []:
+            _add(resolved_path)
+            child_ext = os.path.splitext(resolved_path)[1].lower()
+            if child_ext in (".cue", ".gdi"):
+                for child_path in _collect_disk_bundle_paths(resolved_path):
+                    _add(child_path)
+        return bundle
+
     if ext in (".cue", ".gdi"):
         details = _resolve_disk_sidecars(file_path)
         for resolved_path in details.get("resolved_files") or []:
@@ -1911,12 +1991,25 @@ def _generate_m3u_content_for_paths(file_paths):
 def _rewrite_disk_manifest_to_local_paths(file_path):
     file_path = os.path.abspath(str(file_path or ""))
     ext = os.path.splitext(file_path)[1].lower()
-    if ext not in (".cue", ".gdi") or not os.path.exists(file_path):
+    if ext not in (".cue", ".gdi", ".m3u") or not os.path.exists(file_path):
         return False
 
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
+        if ext == ".m3u":
+            raw_bytes = Path(file_path).read_bytes()
+            text = None
+            for encoding in ("utf-8-sig", "cp949", "cp1252", "latin-1"):
+                try:
+                    text = raw_bytes.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if text is None:
+                return False
+            lines = text.splitlines(keepends=True)
+        else:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
     except Exception:
         return False
 
@@ -1945,6 +2038,29 @@ def _rewrite_disk_manifest_to_local_paths(file_path):
                 changed = changed or (new_line != line)
                 rewritten.append(new_line + newline)
                 continue
+        elif ext == ".m3u":
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                quote = ""
+                token = stripped
+                if len(token) >= 2 and token[0] == token[-1] and token[0] in ('"', "'"):
+                    quote = token[0]
+                    token = token[1:-1].strip()
+                normalized = os.path.normpath(token.replace("\\", os.sep))
+                if (
+                    token
+                    and "://" not in token
+                    and not os.path.isabs(token)
+                    and normalized not in ("", ".", "..")
+                    and not normalized.startswith(".." + os.sep)
+                ):
+                    rel_name = os.path.basename(normalized)
+                    new_token = f"{quote}{rel_name}{quote}" if quote else rel_name
+                    prefix_len = len(line) - len(line.lstrip())
+                    new_line = line[:prefix_len] + new_token
+                    changed = changed or (new_line != line)
+                    rewritten.append(new_line + newline)
+                    continue
 
         rewritten.append(raw_line)
 
@@ -1967,16 +2083,21 @@ def _move_disk_bundle(file_path, target_dir, related_infos=None):
         return {"moved": False, "primary_path": file_path, "move_map": {}, "conflict": ""}
 
     move_map = {}
+    destination_sources = {}
     for src_path in bundle_paths:
         dest_path = os.path.join(target_dir, os.path.basename(src_path))
         if os.path.abspath(dest_path) == src_path:
             continue
+        previous_source = destination_sources.get(os.path.abspath(dest_path))
+        if previous_source and previous_source != src_path:
+            return {"moved": False, "primary_path": file_path, "move_map": {}, "conflict": dest_path}
+        destination_sources[os.path.abspath(dest_path)] = src_path
         if os.path.exists(dest_path):
             return {"moved": False, "primary_path": file_path, "move_map": {}, "conflict": dest_path}
         move_map[src_path] = dest_path
 
     os.makedirs(target_dir, exist_ok=True)
-    manifest_exts = {".cue", ".gdi"}
+    manifest_exts = {".cue", ".gdi", ".m3u"}
     move_order = [p for p in bundle_paths if os.path.splitext(p)[1].lower() not in manifest_exts]
     move_order += [p for p in bundle_paths if os.path.splitext(p)[1].lower() in manifest_exts]
 
@@ -2230,7 +2351,7 @@ def _query_arcade_dat(stem, internal_crcs=None):
     return None
 
 
-def _detect_rom_info(file_path):
+def _detect_rom_info_legacy(file_path):
     """ROM 파일의 코어(core), 플랫폼(platform), 타이틀(title), 게임코드 등을 자동 감지합니다."""
     info = {
         "core": "",
@@ -2732,6 +2853,24 @@ def _detect_rom_info(file_path):
             info["parent_hint"] = f"{clone_match.group(1).lower()}.zip"
 
     return info
+
+
+def _detect_rom_info(file_path):
+    """rom-analyzer를 우선 사용하고 식별 실패/예외 시 기존 감지기로 안전하게 폴백한다."""
+    try:
+        from rom_analysis_adapter import analyze_rom
+
+        modern = analyze_rom(file_path)
+        modern_core = str(modern.get("core") or "").strip()
+        modern_platform = str(modern.get("platform") or "").strip()
+        if modern_core and modern_platform:
+            return modern
+    except Exception as exc:
+        logger.debug(
+            f"[{SELF_ID}] rom-analyzer fallback ({os.path.basename(str(file_path))}): {exc}"
+        )
+
+    return _detect_rom_info_legacy(file_path)
 
 
 class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
@@ -3478,7 +3617,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         bios_dir = os.path.abspath(self._get_bios_dir())
         covers_dir = os.path.abspath(self._get_covers_dir())
 
-        allowed_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z", ".cue", ".gdi"}
+        allowed_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z", ".cue", ".gdi", ".chd", ".m3u"}
         found_files = {}
 
         for sdir in scan_dirs:
@@ -3520,6 +3659,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 pass
             except Exception as e:
                 logger.error(f"[{SELF_ID}] Scan dir error ({sdir}): {e}")
+
+        # M3U는 멀티디스크 게임의 대표 실행 파일이다. 플레이리스트가 참조한 디스크는
+        # 독립 게임 카드로 중복 등록하지 않고 M3U의 sidecar로만 유지한다.
+        found_files, claimed_disk_paths = _filter_m3u_claimed_files(found_files)
 
         existing_games = {g["id"]: g for g in self._db_query("SELECT * FROM games")}
         now_str = _get_kst_now_str()
@@ -3686,7 +3829,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         gid = new_gid
                     except Exception as conv_ex:
                         logger.error(f"[{SELF_ID}] Scan 7z convert error: {conv_ex}")
-                elif f_ext in (".cue", ".gdi") or (current_folder_name != target_core_folder and current_folder_name not in ("roms", "")):
+                elif f_ext in (".cue", ".gdi", ".m3u") or (current_folder_name != target_core_folder and current_folder_name not in ("roms", "")):
                     try:
                         ideal_dir = os.path.join(base_dir, target_core_folder)
                         os.makedirs(ideal_dir, exist_ok=True)
@@ -4402,7 +4545,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         ext = os.path.splitext(safe_filename)[1].lower()
         base_n, ext_n = os.path.splitext(safe_filename)
 
-        allowed_rom_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z", ".bin", ".rom", ".cue", ".gdi", ".iso", ".img", ".chd"}
+        allowed_rom_exts = set(SUPPORTED_SYSTEMS.keys()) | {".zip", ".7z", ".bin", ".rom", ".cue", ".gdi", ".iso", ".img", ".chd", ".m3u"}
         allowed_img_exts = {".png", ".jpg", ".jpeg", ".webp"}
 
         if upload_type == "bios":
@@ -4592,9 +4735,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         elif ext in (".md", ".gen", ".smd"):
             detected_platform = "Genesis"
         # PS1 / Saturn / Dreamcast / PCE-CD
-        elif ext in (".iso", ".chd", ".cue", ".pbp", ".gdi"):
+        elif ext in (".iso", ".chd", ".cue", ".pbp", ".gdi", ".m3u"):
             if ext == ".gdi":
                 detected_platform = "Dreamcast"
+            elif ext == ".m3u":
+                detected_platform = "멀티디스크 플레이리스트 (스캔 시 실제 디스크로 기종 판별)"
             elif ext == ".cue":
                 detected_platform = "PS1/Saturn (serial 확인 권장)"
             elif ext == ".chd" and any(tok in stem for tok in ("pce", "tg16", "supercd", "pcengine")):

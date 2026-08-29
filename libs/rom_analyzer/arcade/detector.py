@@ -218,8 +218,13 @@ class ArcadeDetector:
             chd_name = catalog_info.get("chd_name")
             recommended_cores = catalog_info.get("cores", recommended_cores)
         else:
-            # 카탈로그에 없는 경우 내부 칩 파일 및 파일명 정규식으로 기판 추론
-            board_name, inferred_bios = cls._infer_board_from_files(rom_key, inner_files)
+            # DAT CRC로 아케이드 롬셋이 이미 식별된 경우 일반적인 칩 파일 접미사(.c2, .a10 등)를
+            # 기판 판별 근거로 다시 사용하지 않는다. 서로 다른 기판이 같은 접미사를 쓰기 때문에
+            # 강한 DAT 결과를 Neo-Geo/PGM으로 잘못 덮어쓰는 오탐을 방지한다.
+            board_name, inferred_bios = cls._infer_board_from_files(
+                rom_key,
+                [] if dat_match and dat_match.matched_count > 0 else inner_files,
+            )
             if inferred_bios and inferred_bios not in required_bios:
                 required_bios.append(inferred_bios)
 
@@ -232,6 +237,10 @@ class ArcadeDetector:
                 dep = f"{dat_match.romof}.zip"
                 if dep not in required_bios:
                     required_bios.append(dep)
+                # exact/strong DAT에서 Neo-Geo BIOS 의존성이 확인되면 기판 판정 근거로 사용한다.
+                # ambiguous 후보에서는 다른 기판의 잘못된 romof가 섞일 수 있으므로 승격하지 않는다.
+                if dat_match.romof == "neogeo" and dat_match.status in {"exact", "strong"}:
+                    board_name = "SNK Neo-Geo MVS"
 
         # 아케이드 판별이 되었거나, 내부 칩 파일들이 전형적인 아케이드 롬 구조인 경우
         if dat_match or catalog_info or board_name or (inner_files and cls._has_arcade_rom_structure(inner_files)):
