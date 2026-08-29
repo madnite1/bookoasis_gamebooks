@@ -3064,6 +3064,78 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (best_path, game_id))
         return best_path
 
+    def _rom_path_folder_aliases(self, platform_or_core):
+        key = str(platform_or_core or "").lower().replace("-", "").replace("_", "")
+        groups = {
+            "arcade": ["arcade", "mame2003", "neogeo"],
+            "mame2003": ["mame2003", "arcade", "neogeo"],
+            "neogeo": ["neogeo", "arcade", "mame2003"],
+            "genesis": ["megadriv", "segamd", "genesis"],
+            "segamd": ["megadriv", "segamd", "genesis"],
+            "megadrive": ["megadriv", "segamd", "genesis"],
+            "ps1": ["psx", "ps1"], "psx": ["psx", "ps1"],
+            "saturn": ["saturn", "segasaturn"],
+            "gb": ["gb"], "gbc": ["gbc"], "gba": ["gba"],
+            "nes": ["nes"], "snes": ["snes"], "n64": ["n64"],
+            "pce": ["pce"], "dreamcast": ["dreamcast"],
+        }
+        return groups.get(key, [key] if key else [])
+
+    def _resolve_existing_rom_path(self, game_id, filename="", current_path="", core="", platform="", update_db=False):
+        """DB의 ROM 경로가 끊긴 경우 동일 파일명을 라이브러리 루트에서 안전하게 재탐색한다."""
+        if current_path and os.path.isfile(current_path):
+            return os.path.abspath(current_path)
+        raw_filename = os.path.basename(str(filename or current_path or "")).strip()
+        if not raw_filename:
+            return None
+
+        roots = []
+        for candidate in (self._get_roms_dir(), self._get_setting("EXTRA_ROMS_PATH", "").strip()):
+            if candidate and os.path.isdir(candidate):
+                real = os.path.realpath(os.path.abspath(candidate))
+                if real not in roots:
+                    roots.append(real)
+
+        aliases = []
+        for value in (core, platform):
+            for alias in self._rom_path_folder_aliases(value):
+                if alias and alias not in aliases:
+                    aliases.append(alias)
+
+        candidates = []
+        wanted = raw_filename.casefold()
+        for root_dir in roots:
+            try:
+                for walk_root, dirs, files in os.walk(root_dir):
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+                    matches = [f for f in files if f.casefold() == wanted]
+                    for match in matches:
+                        path = os.path.abspath(os.path.join(walk_root, match))
+                        rel_parts = [part.lower().replace("-", "").replace("_", "") for part in os.path.relpath(path, root_dir).split(os.sep)[:-1]]
+                        score = 100
+                        for idx, alias in enumerate(aliases):
+                            norm_alias = alias.lower().replace("-", "").replace("_", "")
+                            if norm_alias in rel_parts:
+                                score += max(1, 30 - idx)
+                                break
+                        candidates.append((score, path))
+            except Exception as exc:
+                logger.debug(f"[{SELF_ID}] ROM path fallback scan error ({raw_filename}): {exc}")
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (-item[0], item[1].lower()))
+        best_score = candidates[0][0]
+        best = [path for score, path in candidates if score == best_score]
+        if len(best) != 1:
+            logger.warning(f"[{SELF_ID}] ROM path fallback ambiguous ({raw_filename}): {best}")
+            return None
+        best_path = best[0]
+        if update_db:
+            self._db_execute("UPDATE games SET file_path = ? WHERE id = ?", (best_path, game_id))
+            logger.info(f"[{SELF_ID}] ROM path recovered: {game_id} -> {best_path}")
+        return best_path
+
     def _migrate_covers_to_custom_dir(self, new_dir):
         """기존 커버 아트 폴더의 파일들을 새로 설정된 폴더로 이동 및 DB cover_path 경로 갱신"""
         if not new_dir:
@@ -4145,11 +4217,24 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         if _get_current_user_id() <= 0:
             abort(401, "Authentication required")
 
-        rows = self._db_query("SELECT file_path, filename FROM games WHERE id = ?", (game_id,))
-        if not rows or not os.path.exists(rows[0]["file_path"]):
+        rows = self._db_query("SELECT file_path, filename, core, platform FROM games WHERE id = ?", (game_id,))
+        if not rows:
             abort(404, "ROM file not found")
+        row = rows[0]
+        root_file_path = row["file_path"]
+        if not os.path.isfile(root_file_path):
+            recovered_path = self._resolve_existing_rom_path(
+                game_id,
+                filename=row["filename"],
+                current_path=root_file_path,
+                core=row["core"],
+                platform=row["platform"],
+                update_db=True,
+            )
+            if not recovered_path:
+                abort(404, "ROM file not found")
+            root_file_path = recovered_path
 
-        root_file_path = rows[0]["file_path"]
         requested_filename = os.path.basename((filename or rows[0]["filename"] or "").strip())
         served_path = root_file_path
         root_filename = os.path.basename(rows[0]["filename"] or root_file_path)
