@@ -61,6 +61,7 @@
           <option value="chd_required">CHD 필요</option>
           <option value="incomplete">불완전</option>
           <option value="bad_dump_or_unknown">재확인 필요</option>
+          <option value="unsupported">현재 코어 미지원</option>
         </select>
       </div>
 
@@ -551,6 +552,10 @@
               <div style="font-size: 0.8rem; color: #ef4444; font-weight: 600; margin-bottom: 4px;">CHD 음원 디스크 필요</div>
               <div id="gbaHealthChdCount" style="font-size: 1.6rem; font-weight: 700; color: #ef4444;">0</div>
             </div>
+            <div style="background: rgba(124, 58, 237, 0.1); border: 1px solid rgba(124, 58, 237, 0.25); border-radius: 8px; padding: 14px; text-align: center;">
+              <div style="font-size: 0.8rem; color: #a78bfa; font-weight: 600; margin-bottom: 4px;">현재 코어 구동 불가</div>
+              <div id="gbaHealthUnsupportedCount" style="font-size: 1.6rem; font-weight: 700; color: #a78bfa;">0</div>
+            </div>
           </div>
 
           <!-- 필터 탭 & 검색 -->
@@ -558,6 +563,7 @@
             <div class="gba-btn-group">
               <button class="gba-btn gba-btn-secondary gba-health-tab-btn active" data-tab="incomplete">보완 필요 롬셋 (<span id="gbaHealthIncompleteTabCount">0</span>)</button>
               <button class="gba-btn gba-btn-secondary gba-health-tab-btn" data-tab="chd">CHD 필요 (<span id="gbaHealthChdTabCount">0</span>)</button>
+              <button class="gba-btn gba-btn-secondary gba-health-tab-btn" data-tab="unsupported">코어 미지원 (<span id="gbaHealthUnsupportedTabCount">0</span>)</button>
             </div>
             <input type="text" id="gbaHealthSearchInput" class="gba-input" placeholder="진단 결과 내 검색..." style="max-width: 200px; font-size: 0.85rem; padding: 6px 10px;">
           </div>
@@ -578,7 +584,7 @@
         </div>
       </div>
       <div class="gba-modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 0.8rem; color: var(--gba-text-muted);">💡 불완전한 롬셋은 최신 Non-Merged 롬 파일로 교체 시 100% 정상 구동됩니다.</span>
+        <span style="font-size: 0.8rem; color: var(--gba-text-muted);">💡 코어 미지원 항목은 ROM/BIOS 누락이 아니라 현재 EmulatorJS Stable의 게임별 호환성 제한일 수 있습니다.</span>
         <button class="gba-btn gba-btn-secondary" id="gbaHealthCheckOkBtn">닫기</button>
       </div>
     </div>

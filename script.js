@@ -459,6 +459,7 @@
           ${game.health_status === 'bios_required' ? `<span class="gba-badge" style="background: rgba(249, 115, 22, 0.92); color: #fff; font-weight: 700;" title="필수 BIOS 또는 시스템 파일이 누락되었습니다."><i class="fa-solid fa-microchip"></i> BIOS 필요</span>` : ''}
           ${game.health_status === 'parent_required' ? `<span class="gba-badge" style="background: rgba(234, 88, 12, 0.92); color: #fff; font-weight: 700;" title="필수 부모 롬(Parent ROM)이 누락되었습니다."><i class="fa-solid fa-folder-tree"></i> Parent 필요</span>` : ''}
           ${game.health_status === 'bad_dump_or_unknown' ? `<span class="gba-badge" style="background: rgba(107, 114, 128, 0.95); color: #fff; font-weight: 700;" title="손상되었거나 DAT와 일치하지 않는 롬셋일 수 있습니다."><i class="fa-solid fa-circle-question"></i> 재확인 필요</span>` : ''}
+          ${game.health_status === 'unsupported' ? `<span class="gba-badge" style="background: rgba(124, 58, 237, 0.95); color: #fff; font-weight: 700;" title="ROM/BIOS는 확인되었지만 현재 EmulatorJS Stable 코어의 게임별 호환성 제한으로 구동할 수 없습니다."><i class="fa-solid fa-ban"></i> 코어 미지원</span>` : ''}
           ${game.health_status === 'chd_required' ? `<span class="gba-badge" style="background: rgba(239, 68, 68, 0.9); color: #fff; font-weight: 700;" title="대용량 CHD 음원 디스크 이미지가 필요합니다."><i class="fa-solid fa-compact-disc"></i> CHD 필요</span>` : ''}
           ${metaConfidenceLabel ? `<span class="gba-badge" style="background: rgba(59, 130, 246, 0.16); color: #bfdbfe; border: 1px solid rgba(96, 165, 250, 0.3);" title="메타 출처: ${escapeHtml(metaSource || '미확인')} / 신뢰도: ${metaConfidence}"><i class="fa-solid fa-database"></i> 메타 ${escapeHtml(metaConfidenceLabel)}</span>` : ''}
         </div>
@@ -951,6 +952,18 @@
         btnText: `BIOS (${requiredBios}) 업로드`,
         isOptional: false,
       };
+    } else if (game.health_status === 'unsupported') {
+      return {
+        type: 'unsupported',
+        needed: '현재 EmulatorJS Stable 코어',
+        systemName: '에뮬레이터 코어 호환성 제한',
+        title: '현재 코어에서 구동 불가',
+        reason: `${escapeHtml(game.missing_roms || 'ROM/BIOS 파일은 확인되었지만 현재 EmulatorJS Stable 코어에서 이 게임을 정상 구동할 수 없습니다.')}`,
+        notice: 'ROM 또는 BIOS 누락 문제가 아니라 <strong>현재 에뮬레이터 코어의 게임별 호환성 제한</strong>입니다. 실행을 강행하면 검은 화면이나 부팅 정지가 발생할 수 있습니다.',
+        btnText: '',
+        hideUpload: true,
+        isOptional: false,
+      };
     } else if (game.health_status === 'bad_dump_or_unknown') {
       return {
         type: 'unknown',
@@ -1006,13 +1019,16 @@
       return;
     }
     const isParent = missing.type === 'parent';
+    const isUnsupported = missing.type === 'unsupported';
     const iconClass = missing.type === 'parent'
       ? 'fa-solid fa-folder-tree'
       : missing.type === 'chd'
         ? 'fa-solid fa-compact-disc'
         : missing.type === 'unknown'
           ? 'fa-solid fa-circle-question'
-          : 'fa-solid fa-microchip';
+          : isUnsupported
+            ? 'fa-solid fa-ban'
+            : 'fa-solid fa-microchip';
 
     if ($('gbaBiosWarningHeaderSpan')) {
       $('gbaBiosWarningHeaderSpan').textContent = missing.title || (isParent ? '아케이드 부모 롬(Parent ROM) 필요' : '시스템 바이오스(BIOS) 확인');
@@ -1035,6 +1051,10 @@
     if ($('gbaBiosWarningUploadSpan')) {
       $('gbaBiosWarningUploadSpan').textContent = missing.btnText || (isParent ? '부모 롬 업로드' : '바이오스 업로드');
     }
+    const uploadBtn = $('gbaBiosWarningUploadBtn');
+    if (uploadBtn) uploadBtn.style.display = missing.hideUpload ? 'none' : 'inline-flex';
+    const proceedBtn = $('gbaBiosWarningProceedBtn');
+    if (proceedBtn) proceedBtn.textContent = isUnsupported ? '그래도 실행' : '무시하고 계속 실행';
     modal.style.display = 'flex';
 
     $('gbaBiosWarningProceedBtn').onclick = () => {
@@ -2886,7 +2906,11 @@
       if (!tbody || !healthData) return;
 
       const q = ($('gbaHealthSearchInput')?.value || '').trim().toLowerCase();
-      const list = activeHealthTab === 'incomplete' ? (healthData.incomplete_list || []) : (healthData.chd_list || []);
+      const list = activeHealthTab === 'incomplete'
+        ? (healthData.incomplete_list || [])
+        : activeHealthTab === 'chd'
+          ? (healthData.chd_list || [])
+          : (healthData.unsupported_list || []);
       const confidenceLabel = (score) => metadataConfidenceLabel(score || 0);
       
       const filtered = list.filter((item) => {
@@ -2898,7 +2922,7 @@
         tbody.innerHTML = `
           <tr>
             <td colspan="3" style="text-align: center; padding: 24px; color: var(--gba-text-muted);">
-              ${q ? '검색된 항목이 없습니다.' : (activeHealthTab === 'incomplete' ? '🎉 누락된 칩셋이 있는 불완전 롬셋이 없습니다! (모두 100% 정상)' : '🎉 CHD 디스크 이미지가 필요한 게임이 없습니다.')}
+              ${q ? '검색된 항목이 없습니다.' : (activeHealthTab === 'incomplete' ? '🎉 보완이 필요한 롬셋이 없습니다.' : activeHealthTab === 'chd' ? '🎉 CHD 디스크 이미지가 필요한 게임이 없습니다.' : '🎉 현재 EmulatorJS Stable 코어에서 구동 불가로 판정된 게임이 없습니다.')}
             </td>
           </tr>
         `;
@@ -2907,7 +2931,12 @@
 
       tbody.innerHTML = filtered.map((item) => {
         const isInc = activeHealthTab === 'incomplete';
-        const badgeColor = isInc ? 'background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);' : 'background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);';
+        const isUnsupported = activeHealthTab === 'unsupported';
+        const badgeColor = isInc
+          ? 'background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);'
+          : isUnsupported
+            ? 'background: rgba(124, 58, 237, 0.15); color: #a78bfa; border: 1px solid rgba(124, 58, 237, 0.3);'
+            : 'background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);';
         const metaInfo = [];
         if (item.metadata_source) metaInfo.push(`출처: ${item.metadata_source}`);
         if (item.metadata_confidence) metaInfo.push(`신뢰도: ${confidenceLabel(item.metadata_confidence)} (${item.metadata_confidence})`);
@@ -2952,9 +2981,11 @@
         if ($('gbaHealthPassCount')) $('gbaHealthPassCount').textContent = res.summary.pass;
         if ($('gbaHealthIncompleteCount')) $('gbaHealthIncompleteCount').textContent = res.summary.incomplete;
         if ($('gbaHealthChdCount')) $('gbaHealthChdCount').textContent = res.summary.chd;
+        if ($('gbaHealthUnsupportedCount')) $('gbaHealthUnsupportedCount').textContent = res.summary.unsupported || 0;
 
         if ($('gbaHealthIncompleteTabCount')) $('gbaHealthIncompleteTabCount').textContent = res.summary.incomplete;
         if ($('gbaHealthChdTabCount')) $('gbaHealthChdTabCount').textContent = res.summary.chd;
+        if ($('gbaHealthUnsupportedTabCount')) $('gbaHealthUnsupportedTabCount').textContent = res.summary.unsupported || 0;
 
         if (loading) loading.style.display = 'none';
         if (result) result.style.display = 'block';

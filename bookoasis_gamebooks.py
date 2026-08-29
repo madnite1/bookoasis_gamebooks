@@ -2873,6 +2873,48 @@ def _detect_rom_info(file_path):
     return _detect_rom_info_legacy(file_path)
 
 
+def _emulatorjs_unsupported_reason(rom_info):
+    """rom-analyzer가 명시적으로 EmulatorJS 비호환 판정을 낸 경우 사용자용 사유를 반환한다."""
+    if not isinstance(rom_info, dict) or rom_info.get("emulatorjs_supported") is not False:
+        return ""
+    warnings = rom_info.get("analysis_warnings") or []
+    if isinstance(warnings, str):
+        warnings = [warnings]
+    reasons = [str(item).strip() for item in warnings if str(item).strip()]
+    if reasons:
+        return " / ".join(reasons[:3])
+    return "현재 EmulatorJS Stable 코어에서 이 ROM/미디어 조합을 지원하지 않습니다."
+
+
+def _mame_compatibility_health(rom_name):
+    """MAME2003/Plus 호환성 스냅샷으로 빠르게 health 상태를 재판정한다."""
+    driver = os.path.splitext(os.path.basename(str(rom_name or "")))[0].lower().strip()
+    if not driver:
+        return None
+    try:
+        from rom_analyzer.arcade.compatibility import ArcadeCompatibilityManager
+
+        compatibility = ArcadeCompatibilityManager.get_for_rom(driver)
+    except Exception as exc:
+        logger.debug(f"[{SELF_ID}] MAME compatibility lookup failed ({driver}): {exc}")
+        return None
+    if not compatibility:
+        return None
+
+    ordered = []
+    for core_id in ("mame2003", "mame2003_plus"):
+        info = compatibility.get(core_id)
+        if info:
+            ordered.append((core_id, info))
+    if not ordered:
+        return None
+    if any(info.supported for _core_id, info in ordered):
+        return ("pass", "")
+
+    details = ", ".join(f"{core_id}={info.driver_status}" for core_id, info in ordered)
+    return ("unsupported", f"MAME2003 계열 게임 호환성 제한: {details}")
+
+
 class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
     id = "bookoasis_gamebooks"
     name = "Game Books"
@@ -4016,6 +4058,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 missing_roms_str = "DAT 미일치 또는 미지원/손상 의심 롬셋"
                         except Exception:
                             pass
+
+                # 파일/BIOS/DAT 무결성이 정상이더라도 현재 EmulatorJS Stable 코어에서
+                # 게임별 드라이버 호환성이 차단된 경우는 정상(pass)으로 표시하지 않는다.
+                if health_status == "pass":
+                    unsupported_reason = _emulatorjs_unsupported_reason(rom_info)
+                    if unsupported_reason:
+                        health_status = "unsupported"
+                        missing_roms_str = unsupported_reason
 
                 existing_cover_file = self._resolve_existing_cover(
                     gid,
@@ -5408,11 +5458,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 conn_dat = sqlite3.connect(dat_db_path, timeout=10)
                 cur_dat = conn_dat.cursor()
 
-                all_games = self._db_query("SELECT id, filename, file_path, core, platform, title, game_code, needed_bios, COALESCE(health_status, 'pass') AS health_status, COALESCE(missing_roms, '') AS missing_roms FROM games ORDER BY title ASC")
+                all_games = self._db_query("SELECT id, filename, file_path, core, platform, title, game_code, needed_bios, metadata_source, metadata_confidence, source_system, COALESCE(health_status, 'pass') AS health_status, COALESCE(missing_roms, '') AS missing_roms FROM games ORDER BY title ASC")
                 
                 pass_count = 0
                 incomplete_list = []
                 chd_list = []
+                unsupported_list = []
 
                 for g in all_games:
                     gid = g["id"]
@@ -5428,8 +5479,51 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     if not os.path.exists(fpath):
                         continue
 
+                    # 기존 DB가 예전 스캔 결과(pass)를 가지고 있어도 무결성 진단을 누르는 즉시
+                    # MAME2003 계열 호환성 스냅샷을 조회해 별도 풀스캔 없이 상태를 보정한다.
+                    compatibility_health = None
+                    if health_status in ("pass", "unsupported") and (
+                        core in ("mame", "mame2003", "mame2003_plus") or health_status == "unsupported"
+                    ):
+                        compatibility_health = _mame_compatibility_health(g.get("game_code") or fname)
+                    if compatibility_health:
+                        compat_status, compat_reason = compatibility_health
+                        should_update = False
+                        if compat_status == "unsupported":
+                            should_update = health_status != "unsupported" or missing_roms != compat_reason
+                            health_status = "unsupported"
+                            missing_roms = compat_reason
+                        elif (
+                            compat_status == "pass"
+                            and health_status == "unsupported"
+                            and missing_roms.startswith("MAME2003 계열 게임 호환성 제한:")
+                        ):
+                            should_update = True
+                            health_status = "pass"
+                            missing_roms = ""
+                        if should_update:
+                            self._db_execute(
+                                "UPDATE games SET health_status = ?, missing_roms = ? WHERE id = ?",
+                                (health_status, missing_roms, gid),
+                            )
+
                     if health_status == "pass":
                         pass_count += 1
+                        continue
+
+                    if health_status == "unsupported":
+                        unsupported_list.append({
+                            "id": gid,
+                            "title": title,
+                            "filename": fname,
+                            "core": core,
+                            "platform": plat,
+                            "health_status": health_status,
+                            "metadata_source": g.get("metadata_source") or "",
+                            "metadata_confidence": g.get("metadata_confidence") or 0,
+                            "source_system": g.get("source_system") or "",
+                            "reason": missing_roms or "현재 EmulatorJS Stable 코어에서 구동할 수 없습니다.",
+                        })
                         continue
 
                     if health_status == "chd_required":
@@ -5488,10 +5582,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "total": len(all_games),
                         "pass": pass_count,
                         "incomplete": len(incomplete_list),
-                        "chd": len(chd_list)
+                        "chd": len(chd_list),
+                        "unsupported": len(unsupported_list)
                     },
                     "incomplete_list": incomplete_list,
-                    "chd_list": chd_list
+                    "chd_list": chd_list,
+                    "unsupported_list": unsupported_list
                 }
 
             elif action == "scan_roms":

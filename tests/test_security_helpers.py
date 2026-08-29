@@ -89,6 +89,23 @@ class SecurityHelperTests(unittest.TestCase):
             self.assertIn('"Disc 2.chd"', text)
             self.assertNotIn('discs/Disc 2.chd', text)
 
+    def test_mame_compatibility_health_marks_nonworking_game_unsupported(self):
+        status, reason = gamebooks._mame_compatibility_health('astrass')
+        self.assertEqual(status, 'unsupported')
+        self.assertIn('mame2003=game not working', reason)
+        self.assertIn('mame2003_plus=game not working', reason)
+
+    def test_mame_compatibility_health_keeps_working_game_pass(self):
+        self.assertEqual(gamebooks._mame_compatibility_health('bakubaku'), ('pass', ''))
+
+    def test_emulatorjs_unsupported_reason_uses_analyzer_warning(self):
+        reason = gamebooks._emulatorjs_unsupported_reason({
+            'emulatorjs_supported': False,
+            'analysis_warnings': ['MAME2003 계열 게임 호환성 제한: mame2003=game not working'],
+        })
+        self.assertIn('game not working', reason)
+        self.assertEqual(gamebooks._emulatorjs_unsupported_reason({'emulatorjs_supported': True}), '')
+
     def test_cover_fallback_prefers_platform_and_non_romm_path(self):
         provider_cls = gamebooks.BookoasisGamebooksMetadataProvider
         provider = provider_cls.__new__(provider_cls)
