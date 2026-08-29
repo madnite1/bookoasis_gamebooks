@@ -15,6 +15,7 @@ from ..db import query_arcade_romset
 from .bios_db import ARCADE_BIOS_SETS, ARCADE_DEVICE_SETS
 from .database import ARCADE_GAMES_CATALOG, BOARD_PREFIX_PATTERNS, lookup_arcade_catalog
 from .dat_matcher import DatMatcher
+from .compatibility import ArcadeCompatibilityManager
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,7 @@ class ArcadeDetector:
 
         # 4. 아케이드 게임 롬셋 데이터베이스 조회 (SQLite DB 우선 조회 -> 메모리 카탈로그 폴백)
         catalog_key = dat_match.rom_name if dat_match and dat_match.rom_name else rom_key
+        canonical_driver = (catalog_key or rom_key).lower().strip()
         catalog_info = query_arcade_romset(catalog_key) or lookup_arcade_catalog(catalog_key)
 
         board_name = None
@@ -213,20 +215,35 @@ class ArcadeDetector:
             board_name = catalog_info.get("board")
             parent_rom = catalog_info.get("parent")
             is_clone = catalog_info.get("is_clone", bool(parent_rom))
-            required_bios = catalog_info.get("bios", [])
+            required_bios = list(catalog_info.get("bios", []))
             needs_chd = catalog_info.get("chd", False)
             chd_name = catalog_info.get("chd_name")
-            recommended_cores = catalog_info.get("cores", recommended_cores)
+            recommended_cores = list(catalog_info.get("cores", recommended_cores))
         else:
-            # DAT CRC로 아케이드 롬셋이 이미 식별된 경우 일반적인 칩 파일 접미사(.c2, .a10 등)를
-            # 기판 판별 근거로 다시 사용하지 않는다. 서로 다른 기판이 같은 접미사를 쓰기 때문에
-            # 강한 DAT 결과를 Neo-Geo/PGM으로 잘못 덮어쓰는 오탐을 방지한다.
-            board_name, inferred_bios = cls._infer_board_from_files(
-                rom_key,
-                [] if dat_match and dat_match.matched_count > 0 else inner_files,
-            )
-            if inferred_bios and inferred_bios not in required_bios:
-                required_bios.append(inferred_bios)
+            # DAT의 romof가 알려진 BIOS 세트를 가리키면 일반 칩 파일명 휴리스틱보다 먼저
+            # 해당 BIOS의 기판을 채택한다. ST-V의 .2/.3/.4 칩을 CPS-2로 오인하는 문제도 막는다.
+            dat_bios = ARCADE_BIOS_SETS.get(dat_match.romof) if dat_match and dat_match.romof else None
+            if dat_bios and dat_match.status != "ambiguous":
+                board_name = dat_bios.get("board")
+                dep = f"{dat_match.romof}.zip"
+                if dep not in required_bios:
+                    required_bios.append(dep)
+            else:
+                # DAT CRC로 아케이드 롬셋이 이미 식별된 경우 일반적인 칩 파일 접미사(.c2, .a10 등)를
+                # 기판 판별 근거로 다시 사용하지 않는다. 서로 다른 기판이 같은 접미사를 쓰기 때문에
+                # 강한 DAT 결과를 잘못된 기판으로 덮어쓰는 오탐을 방지한다.
+                board_name, inferred_bios = cls._infer_board_from_files(
+                    canonical_driver,
+                    [] if dat_match and dat_match.matched_count > 0 else inner_files,
+                )
+                if inferred_bios and inferred_bios not in required_bios:
+                    required_bios.append(inferred_bios)
+
+            # 카탈로그가 없는 DAT 결과는 해당 DAT 출처의 실제 Stable 코어를 우선한다.
+            if dat_match and dat_match.system_name == "MAME2003Plus":
+                recommended_cores = ["mame2003_plus"]
+            elif dat_match and dat_match.system_name == "FBNeo":
+                recommended_cores = ["fbneo"]
 
         # DAT는 파일명보다 강한 식별 근거이며, 카탈로그에 없는 롬셋도 식별 가능하게 한다.
         if dat_match:
@@ -237,10 +254,21 @@ class ArcadeDetector:
                 dep = f"{dat_match.romof}.zip"
                 if dep not in required_bios:
                     required_bios.append(dep)
-                # exact/strong DAT에서 Neo-Geo BIOS 의존성이 확인되면 기판 판정 근거로 사용한다.
-                # ambiguous 후보에서는 다른 기판의 잘못된 romof가 섞일 수 있으므로 승격하지 않는다.
-                if dat_match.romof == "neogeo" and dat_match.status in {"exact", "strong"}:
-                    board_name = "SNK Neo-Geo MVS"
+                # BIOS 의존성은 기판을 직접 나타내는 강한 구조 정보다. 단 ambiguous 후보는 승격하지 않는다.
+                if dat_match.status != "ambiguous":
+                    board_name = ARCADE_BIOS_SETS[dat_match.romof].get("board") or board_name
+
+        # MAME2003 계열은 확장자 지원 여부와 별개로 게임별 드라이버 호환성을 적용한다.
+        core_compatibility = ArcadeCompatibilityManager.get_for_rom(canonical_driver)
+        for core_id in ("mame2003_plus", "mame2003"):
+            compatibility = core_compatibility.get(core_id)
+            if not compatibility:
+                continue
+            if compatibility.supported:
+                if core_id not in recommended_cores:
+                    recommended_cores.append(core_id)
+            else:
+                recommended_cores = [item for item in recommended_cores if item != core_id]
 
         # 아케이드 판별이 되었거나, 내부 칩 파일들이 전형적인 아케이드 롬 구조인 경우
         if dat_match or catalog_info or board_name or (inner_files and cls._has_arcade_rom_structure(inner_files)):
@@ -255,9 +283,11 @@ class ArcadeDetector:
             # NAOMI 기판인 경우 naomi.zip 바이오스 필수 설정
             if "NAOMI" in final_board and "naomi.zip" not in required_bios:
                 required_bios.append("naomi.zip")
-            # ST-V 기판인 경우 stv.zip 바이오스 필수 설정
-            if "ST-V" in final_board and "stv.zip" not in required_bios:
-                required_bios.append("stv.zip")
+            # ST-V의 실제 MAME BIOS 롬셋명은 stvbios.zip이다. 과거 stv.zip 표기는 정규화한다.
+            if "ST-V" in final_board:
+                required_bios = [item for item in required_bios if item != "stv.zip"]
+                if "stvbios.zip" not in required_bios:
+                    required_bios.append("stvbios.zip")
             # Atomiswave 기판인 경우 awbios.zip 바이오스 필수 설정
             if "Atomiswave" in final_board and "awbios.zip" not in required_bios:
                 required_bios.append("awbios.zip")
@@ -293,7 +323,7 @@ class ArcadeDetector:
 
             arcade_info = ArcadeInfo(
                 is_arcade=True,
-                driver=rom_key,
+                driver=canonical_driver,
                 board=final_board,
                 parent_rom=parent_rom,
                 is_clone=is_clone,
@@ -311,7 +341,8 @@ class ArcadeDetector:
                 dat_status=dat_match.status if dat_match else None,
                 dat_score=dat_match.score if dat_match else 0.0,
                 dat_candidate_count=dat_match.candidate_count if dat_match else 0,
-                recommended_cores=recommended_cores
+                recommended_cores=recommended_cores,
+                core_compatibility=core_compatibility,
             )
 
             bios_info = BiosInfo(
@@ -333,6 +364,14 @@ class ArcadeDetector:
                     f"DAT {dat_match.status}: CRC {dat_match.matched_count}/{dat_match.total_roms} "
                     f"(DAT {dat_match.match_rate:.1f}%, archive {dat_match.archive_match_rate:.1f}%)"
                 )
+
+            blocked_compatibility = [
+                f"{core_id}={info.driver_status}"
+                for core_id, info in core_compatibility.items()
+                if not info.supported
+            ]
+            if blocked_compatibility:
+                summary_parts.append(f"MAME2003 호환성 제한: {', '.join(blocked_compatibility)}")
 
             evidence = []
             if dat_match and dat_match.status == "ambiguous":
@@ -388,6 +427,10 @@ class ArcadeDetector:
             )
             if dat_match and dat_match.status == "ambiguous":
                 result.add_warning("DAT CRC 후보 점수가 근접하여 게임 식별이 모호합니다.")
+            if blocked_compatibility:
+                result.add_warning(
+                    f"MAME2003 계열 게임 호환성 제한: {', '.join(blocked_compatibility)}"
+                )
             return result
 
         return None
@@ -405,7 +448,7 @@ class ArcadeDetector:
                 if "NAOMI" in board:
                     return board, "naomi.zip"
                 if "ST-V" in board:
-                    return board, "stv.zip"
+                    return board, "stvbios.zip"
                 if "Atomiswave" in board:
                     return board, "awbios.zip"
                 return board, None

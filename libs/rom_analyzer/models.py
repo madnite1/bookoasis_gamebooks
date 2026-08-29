@@ -20,6 +20,22 @@ class DetectionEvidence:
 
 
 @dataclass
+class ArcadeCoreCompatibility:
+    """특정 아케이드 롬셋과 EmulatorJS 아케이드 코어의 실행 호환성."""
+    core_id: str
+    rom_name: str
+    description: str = ""
+    supported: bool = False
+    driver_status: str = "unknown"
+    color_status: Optional[str] = None
+    sound_status: Optional[str] = None
+    graphics_status: Optional[str] = None
+    samples: Optional[str] = None
+    bios_required: bool = False
+    source_url: Optional[str] = None
+
+
+@dataclass
 class ArcadeInfo:
     """아케이드(MAME / FBNeo) 전용 분석 정보"""
     is_arcade: bool = False
@@ -34,6 +50,7 @@ class ArcadeInfo:
     needs_chd: bool = False                         # CHD(하드디스크/CD 이미지) 필수 여부 (예: sfiii3, naomi 게임 등)
     chd_name: Optional[str] = None                  # 필요한 CHD 파일명 또는 디렉터리
     recommended_cores: List[str] = field(default_factory=list)  # 추천 에뮬레이터 코어 (예: ['fbneo', 'mame2003_plus'])
+    core_compatibility: Dict[str, ArcadeCoreCompatibility] = field(default_factory=dict)  # 코어별 실제 게임 호환성
     matched_count: int = 0
     total_roms: int = 0
     match_rate: float = 0.0

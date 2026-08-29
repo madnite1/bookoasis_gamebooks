@@ -204,14 +204,18 @@ ARCADE_GAMES_CATALOG: Dict[str, Dict[str, Any]] = {
     # =========================================================================
     # 7. Sega ST-V (Sega Titan Video)
     # =========================================================================
-    "diehard": {"title": "Die Hard Arcade / Dynamite Deka", "board": "Sega ST-V", "parent": None, "bios": ["stv.zip"], "chd": False, "cores": ["mame", "kronos"]},
-    "cottonbm": {"title": "Cotton Boomerang", "board": "Sega ST-V", "parent": None, "bios": ["stv.zip"], "chd": False, "cores": ["mame", "kronos"]},
-    "cotton2": {"title": "Cotton 2", "board": "Sega ST-V", "parent": None, "bios": ["stv.zip"], "chd": False, "cores": ["mame", "kronos"]},
-    "groovef": {"title": "Groove On Fight - Gouketsuji Ichizoku 3", "board": "Sega ST-V", "parent": None, "bios": ["stv.zip"], "chd": False, "cores": ["mame", "kronos"]},
-    "rsgun": {"title": "Radiant Silvergun", "board": "Sega ST-V", "parent": None, "bios": ["stv.zip"], "chd": False, "cores": ["mame", "kronos"]},
-    "shienryu": {"title": "Shienryu", "board": "Sega ST-V", "parent": None, "bios": ["stv.zip"], "chd": False, "cores": ["mame", "kronos"]},
-    "suikoen": {"title": "Suiko Enbu / Outlaws of the Lost Dynasty", "board": "Sega ST-V", "parent": None, "bios": ["stv.zip"], "chd": False, "cores": ["mame", "kronos"]},
-    "dnmt": {"title": "Dynamite Deka", "board": "Sega ST-V", "parent": "diehard", "bios": ["stv.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "astrass": {"title": "Astra SuperStars", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "bakubaku": {"title": "Baku Baku Animal", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "diehard": {"title": "Die Hard Arcade / Dynamite Deka", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "decathlt": {"title": "Decathlete", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "ffreveng": {"title": "Final Fight Revenge", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "cottonbm": {"title": "Cotton Boomerang", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "cotton2": {"title": "Cotton 2", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "groovef": {"title": "Groove On Fight - Gouketsuji Ichizoku 3", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "rsgun": {"title": "Radiant Silvergun", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "shienryu": {"title": "Shienryu", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "suikoen": {"title": "Suiko Enbu / Outlaws of the Lost Dynasty", "board": "Sega ST-V", "parent": None, "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
+    "dnmt": {"title": "Dynamite Deka", "board": "Sega ST-V", "parent": "diehard", "bios": ["stvbios.zip"], "chd": False, "cores": ["mame", "kronos"]},
 
     # =========================================================================
     # 8. Sammy Atomiswave
@@ -352,7 +356,7 @@ BOARD_PREFIX_PATTERNS = [
     # NAOMI
     (r"^(naomi|mvc2|ggx|cvs|ikaruga|slashout|spkrthm|vtennis|vf4)", "Sega NAOMI"),
     # ST-V
-    (r"^(diehard|cottonbm|cotton2|groovef|rsgun|shienryu|suikoen|dnmt)", "Sega ST-V"),
+    (r"^(astrass|bakubaku|diehard|decathlt|ffreveng|cottonbm|cotton2|groovef|rsgun|shienryu|suikoen|dnmt)", "Sega ST-V"),
     # Atomiswave
     (r"^(kofxi|mslug6|ngbc|fotns|dolphin|rumblef|demoderm|kov7spir|samsptk)", "Sammy Atomiswave"),
 ]

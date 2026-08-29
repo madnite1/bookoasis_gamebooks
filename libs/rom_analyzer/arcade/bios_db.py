@@ -54,7 +54,7 @@ ARCADE_BIOS_SETS: Dict[str, Dict[str, Any]] = {
         "files": ["epr-21576h.ic27", "dimm_firmware.bin"],
         "description": "세가 나오미 GD-ROM 구동용 펌웨어",
     },
-    "stv": {
+    "stvbios": {
         "name": "Sega Titan Video (ST-V) BIOS",
         "board": "Sega ST-V",
         "system_id": "stv",
@@ -190,6 +190,9 @@ ARCADE_BIOS_SETS: Dict[str, Dict[str, Any]] = {
         "description": "타이토 G-NET 시스템 바이오스",
     }
 }
+
+# 과거 내부 명칭과의 하위 호환. 실제 MAME ROM set 파일명은 stvbios.zip이다.
+ARCADE_BIOS_SETS["stv"] = ARCADE_BIOS_SETS["stvbios"]
 
 # 아케이드 장치 / 오디오 칩 롬셋 목록 (독립 실행 불가, 부모/장치 롬셋)
 ARCADE_DEVICE_SETS: Dict[str, Dict[str, Any]] = {

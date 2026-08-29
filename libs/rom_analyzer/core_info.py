@@ -181,6 +181,13 @@ class CoreInfoManager:
         return all(core.supports_extension(ext) for ext in exts)
 
     @classmethod
+    def _arcade_core_is_compatible(cls, rom_info: RomAnalysisResult, core_id: str) -> bool:
+        if not rom_info.is_arcade:
+            return True
+        compatibility = rom_info.arcade_info.core_compatibility.get(core_id)
+        return compatibility is None or compatibility.supported
+
+    @classmethod
     def get_compatible_cores(cls, rom_info: RomAnalysisResult) -> List[CoreInfo]:
         cores = cls.get_cores_for_system(rom_info.system_id)
         if rom_info.is_arcade and rom_info.arcade_info.recommended_cores:
@@ -193,7 +200,11 @@ class CoreInfoManager:
             if not stable_recommended:
                 return []
             cores = [core for core in cores if core.core_id in stable_recommended]
-        return [core for core in cores if cls._core_supports_result(core, rom_info)]
+        return [
+            core for core in cores
+            if cls._core_supports_result(core, rom_info)
+            and cls._arcade_core_is_compatible(rom_info, core.core_id)
+        ]
 
     @classmethod
     def get_recommended_core(cls, rom_info: RomAnalysisResult) -> Optional[CoreInfo]:
@@ -247,14 +258,28 @@ class CoreInfoManager:
                 ),
             )
         elif all_cores:
-            # 기종은 지원하지만 해당 롬셋의 권장 코어나 파일 형식이 Stable과 맞지 않는다.
+            # 기종은 지원하지만 해당 롬셋의 권장 코어나 파일 형식/게임별 드라이버 상태가 Stable과 맞지 않는다.
             stable_arcade_recommendations = []
-            if rom_info.is_arcade and rom_info.arcade_info.recommended_cores:
+            blocked_arcade_cores = []
+            if rom_info.is_arcade:
                 stable_arcade_recommendations = [
                     core_id for core_id in rom_info.arcade_info.recommended_cores
                     if core_id in EMULATORJS_STABLE_CORES
                 ]
-            if rom_info.is_arcade and rom_info.arcade_info.recommended_cores and not stable_arcade_recommendations:
+                blocked_arcade_cores = [
+                    (core_id, compatibility.driver_status)
+                    for core_id, compatibility in rom_info.arcade_info.core_compatibility.items()
+                    if core_id in EMULATORJS_STABLE_CORES and not compatibility.supported
+                ]
+
+            if blocked_arcade_cores and not stable_arcade_recommendations:
+                game_name = rom_info.header_metadata.title or rom_info.arcade_info.driver or rom_info.file_name
+                details = "; ".join(f"{core_id}: {status}" for core_id, status in blocked_arcade_cores)
+                reason = (
+                    f"{game_name}는 MAME2003 계열 게임별 호환성 표에서 실행 불가로 기록되어 있습니다 "
+                    f"({details})."
+                )
+            elif rom_info.is_arcade and rom_info.arcade_info.recommended_cores and not stable_arcade_recommendations:
                 reason = (
                     f"이 아케이드 롬셋의 권장 코어({', '.join(rom_info.arcade_info.recommended_cores)})가 "
                     f"EmulatorJS Stable {EMULATORJS_STABLE_VERSION}에 없습니다."
