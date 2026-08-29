@@ -254,7 +254,13 @@ class CoreInfoManager:
                 requires_threads=selected.requires_threads,
                 reason=(
                     None if media_ready else
-                    "파일 형식은 EmulatorJS Stable 코어와 호환되지만 ROM/디스크 분석 결과가 불완전하거나 실행 불가 상태입니다."
+                    next(
+                        (
+                            warning for warning in rom_info.warnings
+                            if "코어가 직접 실행할 수 있는 ROM 이미지" in warning
+                        ),
+                        "파일 형식은 EmulatorJS Stable 코어와 호환되지만 ROM/디스크 분석 결과가 불완전하거나 실행 불가 상태입니다.",
+                    )
                 ),
             )
         elif all_cores:

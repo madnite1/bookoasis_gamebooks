@@ -76,6 +76,22 @@ _CONSOLE_DAT_EXTENSIONS = {
     ".sms", ".gg", ".pce", ".sgx", ".ws", ".wsc", ".ngp", ".ngpc",
 }
 
+# DAT로 게임 identity를 식별한 콘솔 아카이브라도 EmulatorJS 코어가 직접 로드할
+# 표준 단일-ROM 이미지가 내부에 있어야 실행 가능하다. MAME Softlist의 분리 PRG/CHR
+# 칩 덤프처럼 게임은 정확히 식별되지만 일반 콘솔 코어가 직접 실행할 수 없는 세트를
+# `is_playable=True`로 오판하지 않기 위한 시스템별 직접 로드 확장자 목록이다.
+_CONSOLE_ARCHIVE_DIRECT_EXTENSIONS = {
+    "nes": {".nes", ".fds", ".unf", ".unif"},
+    "snes": {".sfc", ".smc", ".swc", ".fig", ".bs", ".st"},
+    "gb": {".gb", ".gbc", ".dmg"},
+    "gba": {".gba"},
+    "megadrive": {".md", ".mdx", ".smd", ".gen", ".bin", ".68k", ".sgd"},
+    "n64": {".n64", ".z64", ".v64", ".bin", ".u1"},
+    "gamegear": {".gg", ".bin"},
+    "mastersystem": {".sms", ".bin", ".sg"},
+    "pce": {".pce", ".bin"},
+}
+
 
 class RomAnalyzer:
     """통합 ROM 정밀 분석기 클래스"""
@@ -196,8 +212,43 @@ class RomAnalyzer:
         return result
 
     @classmethod
+    def _inspect_console_archive_playability(
+        cls,
+        file_path: str,
+        system_id: str,
+        system_name: str,
+    ) -> tuple[bool, Optional[str]]:
+        """DAT로 식별된 콘솔 아카이브가 표준 단일-ROM 이미지를 포함하는지 확인한다."""
+        _, _, inner_files = ArcadeDetector.inspect_archive(file_path)
+        allowed_exts = _CONSOLE_ARCHIVE_DIRECT_EXTENSIONS.get(system_id, set())
+        if not inner_files or not allowed_exts:
+            return False, (
+                f"{system_name} 게임으로 DAT CRC 식별되었지만 아카이브 내부의 직접 실행 가능한 "
+                "콘텐츠 형식을 확인할 수 없습니다."
+            )
+
+        direct_files = [
+            name for name in inner_files
+            if os.path.splitext(name)[1].lower() in allowed_exts
+        ]
+        expected = ", ".join(sorted(allowed_exts))
+
+        if len(direct_files) == 1:
+            return True, None
+        if len(direct_files) > 1:
+            return False, (
+                f"{system_name} 게임으로 DAT CRC 식별되었지만 코어가 직접 실행할 수 있는 ROM 이미지가 "
+                f"여러 개 포함되어 단일 실행 콘텐츠를 확정할 수 없습니다: {', '.join(direct_files[:5])}."
+            )
+        return False, (
+            f"{system_name} 게임으로 정확히 식별되었지만 ZIP/7z 내부에 코어가 직접 실행할 수 있는 "
+            f"ROM 이미지({expected})가 없습니다. MAME/소프트리스트의 분리형 칩 덤프일 수 있으며 "
+            "표준 단일 ROM 이미지가 필요합니다."
+        )
+
+    @classmethod
     def _detect_console_archive_dat(cls, file_path: str) -> Optional[RomAnalysisResult]:
-        """다중 파일 콘솔 ZIP/7z를 DAT CRC 근거로 식별한다."""
+        """다중 파일 콘솔 ZIP/7z를 DAT CRC 근거로 식별하되 직접 실행 가능성은 별도로 검증한다."""
         dat_match = DatMatcher.match_archive(file_path)
         if not dat_match or not dat_match.matched or not dat_match.platform:
             return None
@@ -211,6 +262,11 @@ class RomAnalyzer:
             return None
 
         confidence_score = dat_match.confidence_score
+        is_playable, playability_warning = cls._inspect_console_archive_playability(
+            file_path,
+            platform["id"],
+            platform["name"],
+        )
         evidence = [DetectionEvidence(
             method="dat_crc",
             confidence=confidence_score,
@@ -220,7 +276,7 @@ class RomAnalyzer:
             ),
             source=dat_match.system_name or "DAT",
         )]
-        return RomAnalysisResult(
+        result = RomAnalysisResult(
             file_path=file_path,
             file_name=os.path.basename(file_path),
             file_size=os.path.getsize(file_path),
@@ -232,7 +288,7 @@ class RomAnalyzer:
             libretro_system=platform["libretro"],
             is_arcade=False,
             is_disc=False,
-            is_playable=True,
+            is_playable=is_playable,
             confidence="high" if confidence_score >= 0.90 else "medium",
             confidence_score=confidence_score,
             header_metadata=HeaderMetadata(title=dat_match.title or dat_match.rom_name or os.path.splitext(os.path.basename(file_path))[0]),
@@ -250,6 +306,11 @@ class RomAnalyzer:
             ],
             summary=f"콘솔 DAT CRC 아카이브: {platform['name']} ({dat_match.title or dat_match.rom_name})",
         )
+        if playability_warning:
+            result.detection_methods.append("archive_not_directly_loadable")
+            result.add_warning(playability_warning)
+            result.summary += " | 직접 실행 가능한 단일 ROM 이미지 없음"
+        return result
 
     @classmethod
     def _apply_console_dat(cls, file_path: str, result: RomAnalysisResult):
