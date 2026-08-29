@@ -2827,6 +2827,68 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         os.makedirs(default_dir, exist_ok=True)
         return default_dir
 
+    def _cover_platform_prefixes(self, platform_or_core):
+        key = str(platform_or_core or "").lower().replace("-", "").replace("_", "")
+        groups = {
+            "arcade": ["roms_arcade_", "roms_mame2003_", "library_arcade_roms_", "roms_neogeo_"],
+            "mame2003": ["roms_mame2003_", "roms_arcade_", "library_arcade_roms_", "roms_neogeo_"],
+            "neogeo": ["roms_neogeo_", "roms_arcade_", "roms_mame2003_", "library_arcade_roms_"],
+            "genesis": ["roms_megadriv_", "roms_segamd_", "roms_genesis_"],
+            "segamd": ["roms_megadriv_", "roms_segamd_", "roms_genesis_"],
+            "snes": ["roms_snes_"], "nes": ["roms_nes_"], "gba": ["roms_gba_"],
+            "gb": ["roms_gb_"], "gbc": ["roms_gbc_"], "n64": ["roms_n64_"],
+            "ps1": ["roms_psx_", "roms_ps1_"], "psx": ["roms_psx_", "roms_ps1_"],
+            "pce": ["roms_pce_"], "saturn": ["roms_saturn_", "roms_segasaturn_"],
+        }
+        return groups.get(key, [])
+
+    def _resolve_existing_cover(self, game_id, filename="", platform_or_core="", current_cover_path="", update_db=False):
+        """경로 기반 game_id가 바뀐 경우에도 기존 커버 파일을 안전하게 재연결한다."""
+        if current_cover_path and os.path.isfile(current_cover_path):
+            return current_cover_path
+        covers_dir = self._get_covers_dir()
+        for ext in (".png", ".jpg", ".jpeg", ".webp"):
+            exact = os.path.join(covers_dir, f"{game_id}{ext}")
+            if os.path.isfile(exact):
+                if update_db:
+                    self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (exact, game_id))
+                return exact
+        raw_filename = os.path.basename(str(filename or "")).strip().lower()
+        raw_stem = os.path.splitext(raw_filename)[0].strip()
+        if not raw_stem:
+            return None
+        prefixes = self._cover_platform_prefixes(platform_or_core)
+        candidates = []
+        try:
+            for entry in os.scandir(covers_dir):
+                if not entry.is_file():
+                    continue
+                name = entry.name.lower()
+                if os.path.splitext(name)[1] not in (".png", ".jpg", ".jpeg", ".webp"):
+                    continue
+                if raw_filename not in name and raw_stem not in name:
+                    continue
+                if prefixes and not any(name.startswith(prefix) for prefix in prefixes):
+                    continue
+                score = 100 if raw_filename and raw_filename in name else 40
+                for idx, prefix in enumerate(prefixes):
+                    if name.startswith(prefix):
+                        score += max(1, 30 - idx)
+                        break
+                if name.startswith("roms_"):
+                    score += 10
+                candidates.append((score, entry.path))
+        except Exception as e:
+            logger.debug(f"[{SELF_ID}] Existing cover fallback scan error ({filename}): {e}")
+            return None
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (-item[0], item[1].lower()))
+        best_path = candidates[0][1]
+        if update_db:
+            self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (best_path, game_id))
+        return best_path
+
     def _migrate_covers_to_custom_dir(self, new_dir):
         """기존 커버 아트 폴더의 파일들을 새로 설정된 폴더로 이동 및 DB cover_path 경로 갱신"""
         if not new_dir:
@@ -3200,8 +3262,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         try:
             # 이미 커버가 등록되어 있거나 로컬 파일이 존재하는지 검사
             rows = self._db_query("SELECT cover_path FROM games WHERE id = ?", (game_id,))
-            if rows and rows[0]["cover_path"] and os.path.exists(rows[0]["cover_path"]):
-                return rows[0]["cover_path"]
+            current_cover = rows[0]["cover_path"] if rows else ""
+            existing_cover = self._resolve_existing_cover(
+                game_id, filename, platform_or_core, current_cover_path=current_cover, update_db=True
+            )
+            if existing_cover:
+                return existing_cover
 
             covers_dir = self._get_covers_dir()
             for ext in (".png", ".jpg", ".jpeg", ".webp"):
@@ -3338,7 +3404,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             self._db_execute("UPDATE games SET needed_bios = ? WHERE id = ?", (needed_bios, game_id))
             game["needed_bios"] = needed_bios
 
-        cover_path = game.get("cover_path") or ""
+        cover_path = self._resolve_existing_cover(
+            game_id,
+            filename,
+            core,
+            current_cover_path=game.get("cover_path") or "",
+            update_db=True,
+        ) or ""
         cover_ok = bool(cover_path and os.path.exists(cover_path))
         cover_updated = False
 
@@ -3694,12 +3766,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         except Exception:
                             pass
 
-                existing_cover_file = None
-                for c_ext in (".png", ".jpg", ".jpeg", ".webp"):
-                    cand_c = os.path.join(covers_dir, f"{gid}{c_ext}")
-                    if os.path.exists(cand_c):
-                        existing_cover_file = cand_c
-                        break
+                existing_cover_file = self._resolve_existing_cover(
+                    gid,
+                    info["filename"],
+                    rom_info.get("core") or rom_info.get("platform"),
+                    current_cover_path=(existing_games.get(gid) or {}).get("cover_path") or "",
+                    update_db=False,
+                )
 
                 try:
                     if gid not in existing_games:
@@ -4243,25 +4316,22 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         if _get_current_user_id() <= 0:
             abort(401, "Authentication required")
 
-        rows = self._db_query("SELECT cover_path, file_path, normalized_title, title FROM games WHERE id = ?", (game_id,))
-        cover_path = None
-        if rows and rows[0]["cover_path"] and os.path.exists(rows[0]["cover_path"]):
-            cover_path = rows[0]["cover_path"]
-        else:
-            search_dirs = [self._get_covers_dir()]
-            # game_id 매칭
-            for sdir in search_dirs:
-                for ext in (".png", ".jpg", ".jpeg", ".webp"):
-                    p = os.path.join(sdir, f"{game_id}{ext}")
-                    if os.path.exists(p):
-                        cover_path = p
-                        break
-                if cover_path:
-                    break
-
-
-            if not cover_path or not os.path.exists(cover_path):
-                abort(404, "Cover image not found")
+        rows = self._db_query(
+            "SELECT cover_path, file_path, filename, core, platform, normalized_title, title FROM games WHERE id = ?",
+            (game_id,),
+        )
+        if not rows:
+            abort(404, "Cover image not found")
+        game = rows[0]
+        cover_path = self._resolve_existing_cover(
+            game_id,
+            game.get("filename") or os.path.basename(game.get("file_path") or ""),
+            game.get("core") or game.get("platform") or "",
+            current_cover_path=game.get("cover_path") or "",
+            update_db=True,
+        )
+        if not cover_path or not os.path.exists(cover_path):
+            abort(404, "Cover image not found")
 
         ext = os.path.splitext(str(cover_path))[1].lower().replace(".", "")
         mime = "image/png" if ext == "png" else "image/jpeg" if ext in ("jpg", "jpeg") else "image/webp"
@@ -4770,6 +4840,17 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 for g in games:
                     gid = g["id"]
                     file_path = g.get("file_path") or ""
+                    current_cover = g.get("cover_path") or ""
+                    if not current_cover or not os.path.exists(current_cover):
+                        repaired_cover = self._resolve_existing_cover(
+                            gid,
+                            g.get("filename") or "",
+                            g.get("core") or g.get("platform") or "",
+                            current_cover_path=current_cover,
+                            update_db=True,
+                        )
+                        if repaired_cover:
+                            g["cover_path"] = repaired_cover
                     g["relative_path"] = g.get("filename") or ""
                     if file_path:
                         file_abs = os.path.realpath(os.path.abspath(file_path))
@@ -5007,20 +5088,36 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 }
 
             elif action == "fetch_missing_covers":
-                # 커버가 누락된 모든 게임을 조회하여 큐에 일괄 투입
-                rows = self._db_query("SELECT id, core, platform, filename, file_path, title FROM games WHERE cover_path IS NULL OR cover_path = ''")
+                # DB 경로가 비어 있거나 실제 파일이 사라진 게임 모두 검사한다.
+                # 경로 기반 game_id 변경으로 끊긴 기존 커버는 먼저 재연결하고,
+                # 로컬 커버를 찾지 못한 게임만 외부 다운로드 큐에 투입한다.
+                rows = self._db_query("SELECT id, core, platform, filename, file_path, title, cover_path FROM games")
                 missing_items = []
+                repaired_count = 0
                 for r in rows:
                     gid = r["id"]
                     core_p = r.get("core") or r.get("platform")
                     fname = r.get("filename") or ""
                     fpath = r.get("file_path") or ""
                     raw_t = r.get("title") or fname
+                    current_cover = r.get("cover_path") or ""
+                    resolved_cover = self._resolve_existing_cover(
+                        gid,
+                        fname,
+                        core_p,
+                        current_cover_path=current_cover,
+                        update_db=True,
+                    )
+                    if resolved_cover:
+                        if not current_cover or os.path.realpath(current_cover) != os.path.realpath(resolved_cover):
+                            repaired_count += 1
+                        continue
                     missing_items.append((gid, core_p, fname, fpath, raw_t))
                 if missing_items:
                     _enqueue_cover_downloads(self, missing_items)
                 return {
                     "success": True,
+                    "repaired_count": repaired_count,
                     "enqueued_count": len(missing_items),
                     "cover_queue": _get_cover_queue_status(),
                 }
