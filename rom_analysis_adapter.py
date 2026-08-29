@@ -170,6 +170,8 @@ def _convert_result(result):
         "game_code": serial or (str(getattr(arcade, "driver", "") or "") if arcade else ""),
         "maker_code": "",
         "needed_bios": needed_bios,
+        "bios_mandatory": bool(getattr(bios, "mandatory", False)) if bios else False,
+        "bios_needed": bool(getattr(bios, "needs_bios", False)) if bios else False,
         "parent_hint": parent_rom,
         "required_chd": required_chd,
         "matched_count": int(getattr(arcade, "matched_count", 0) or 0) if arcade else 0,
@@ -190,6 +192,7 @@ def _convert_result(result):
         "emulatorjs_supported": bool(getattr(emulatorjs, "supported", False)) if emulatorjs else False,
         "emulatorjs_core": str(getattr(emulatorjs, "core", "") or "") if emulatorjs else "",
         "emulatorjs_system": str(getattr(emulatorjs, "system", "") or "") if emulatorjs else "",
+        "emulatorjs_reason": str(getattr(emulatorjs, "reason", "") or "") if emulatorjs else "",
     }
 
 

@@ -55,13 +55,13 @@
         </button>
         <select id="gbaStatusFilterSelect" class="gba-select gba-sort-select" title="상태 필터">
           <option value="all">상태 전체</option>
-          <option value="pass">정상만</option>
+          <option value="pass">진단 통과</option>
+          <option value="reclassify_required">기종 재분류 필요</option>
           <option value="bios_required">BIOS 필요</option>
-          <option value="parent_required">Parent 필요</option>
-          <option value="chd_required">CHD 필요</option>
-          <option value="incomplete">불완전</option>
-          <option value="bad_dump_or_unknown">재확인 필요</option>
+          <option value="chd_required">CHD/디스크 필요</option>
+          <option value="incomplete">참조 파일 누락</option>
           <option value="unsupported">현재 코어 미지원</option>
+          <option value="unverified">판정 미확인</option>
         </select>
       </div>
 
@@ -82,7 +82,7 @@
         <button id="gbaFullScanBtn" class="gba-btn gba-btn-secondary gba-admin-only" title="모든 롬을 처음부터 전수 정밀 재스캔 (DAT/헤더/바이오스 전체 재동기화)" style="display: none;">
           <i class="fa-solid fa-sync fa-spin-hover"></i> <span>풀 스캔</span>
         </button>
-        <button id="gbaHealthCheckBtn" class="gba-btn gba-btn-secondary gba-admin-only" title="보유 중인 모든 ROM셋의 칩셋/바이오스/구동 가능 여부 전수 무결성 진단" style="display: none;">
+        <button id="gbaHealthCheckBtn" class="gba-btn gba-btn-secondary gba-admin-only" title="rom-analyzer로 모든 ROM을 이동 없이 다시 분석해 파일/BIOS/디스크/코어 호환성 상태 갱신" style="display: none;">
           <i class="fa-solid fa-heart-pulse"></i> <span>무결성 진단</span>
         </button>
         <button id="gbaControlsHelpBtn" class="gba-btn gba-btn-secondary" title="조작키 & 게임패드 컨트롤러 안내">
@@ -527,43 +527,53 @@
       <div class="gba-modal-header" style="border-bottom: 1px solid var(--gba-border);">
         <h3>
           <i class="fa-solid fa-heart-pulse" style="color: #ec4899;"></i>
-          <span>ROM 라이브러리 무결성 & 구동 가능 여부 전수 진단</span>
+          <span>ROM 라이브러리 무결성 & 호환성 재진단</span>
         </h3>
         <button class="gba-modal-close" id="gbaHealthCheckCloseBtn">&times;</button>
       </div>
       <div class="gba-modal-body">
         <div id="gbaHealthCheckLoading" style="text-align: center; padding: 32px 0;">
           <div class="gba-spinner" style="margin: 0 auto 16px;"></div>
-          <p style="color: var(--gba-text-muted); font-size: 0.95rem;">보유 중인 27,000+ DAT DB와 롬 파일 내부 CRC32를 전수 비교 분석 중입니다...</p>
+          <p style="color: var(--gba-text-muted); font-size: 0.95rem;">rom-analyzer로 ROM을 이동하지 않고 최신 상태를 전수 재분석 중입니다...</p>
         </div>
 
         <div id="gbaHealthCheckResult" style="display: none;">
           <!-- 요약 카드들 -->
           <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 18px;">
             <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 8px; padding: 14px; text-align: center;">
-              <div style="font-size: 0.8rem; color: #10b981; font-weight: 600; margin-bottom: 4px;">100% 정상 구동 가능</div>
+              <div style="font-size: 0.8rem; color: #10b981; font-weight: 600; margin-bottom: 4px;">진단 통과</div>
               <div id="gbaHealthPassCount" style="font-size: 1.6rem; font-weight: 700; color: #10b981;">0</div>
             </div>
             <div style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 8px; padding: 14px; text-align: center;">
-              <div style="font-size: 0.8rem; color: #f59e0b; font-weight: 600; margin-bottom: 4px;">불완전 롬셋 / BIOS / Parent</div>
+              <div style="font-size: 0.8rem; color: #f59e0b; font-weight: 600; margin-bottom: 4px;">파일 / BIOS 보완 필요</div>
               <div id="gbaHealthIncompleteCount" style="font-size: 1.6rem; font-weight: 700; color: #f59e0b;">0</div>
             </div>
             <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 8px; padding: 14px; text-align: center;">
-              <div style="font-size: 0.8rem; color: #ef4444; font-weight: 600; margin-bottom: 4px;">CHD 음원 디스크 필요</div>
+              <div style="font-size: 0.8rem; color: #ef4444; font-weight: 600; margin-bottom: 4px;">CHD / 디스크 필요</div>
               <div id="gbaHealthChdCount" style="font-size: 1.6rem; font-weight: 700; color: #ef4444;">0</div>
+            </div>
+            <div style="background: rgba(234, 88, 12, 0.1); border: 1px solid rgba(234, 88, 12, 0.25); border-radius: 8px; padding: 14px; text-align: center;">
+              <div style="font-size: 0.8rem; color: #fb923c; font-weight: 600; margin-bottom: 4px;">기종 재분류 필요</div>
+              <div id="gbaHealthReclassifyCount" style="font-size: 1.6rem; font-weight: 700; color: #fb923c;">0</div>
             </div>
             <div style="background: rgba(124, 58, 237, 0.1); border: 1px solid rgba(124, 58, 237, 0.25); border-radius: 8px; padding: 14px; text-align: center;">
               <div style="font-size: 0.8rem; color: #a78bfa; font-weight: 600; margin-bottom: 4px;">현재 코어 구동 불가</div>
               <div id="gbaHealthUnsupportedCount" style="font-size: 1.6rem; font-weight: 700; color: #a78bfa;">0</div>
+            </div>
+            <div style="background: rgba(107, 114, 128, 0.1); border: 1px solid rgba(107, 114, 128, 0.25); border-radius: 8px; padding: 14px; text-align: center;">
+              <div style="font-size: 0.8rem; color: #9ca3af; font-weight: 600; margin-bottom: 4px;">판정 미확인</div>
+              <div id="gbaHealthUnverifiedCount" style="font-size: 1.6rem; font-weight: 700; color: #9ca3af;">0</div>
             </div>
           </div>
 
           <!-- 필터 탭 & 검색 -->
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px;">
             <div class="gba-btn-group">
-              <button class="gba-btn gba-btn-secondary gba-health-tab-btn active" data-tab="incomplete">보완 필요 롬셋 (<span id="gbaHealthIncompleteTabCount">0</span>)</button>
-              <button class="gba-btn gba-btn-secondary gba-health-tab-btn" data-tab="chd">CHD 필요 (<span id="gbaHealthChdTabCount">0</span>)</button>
+              <button class="gba-btn gba-btn-secondary gba-health-tab-btn active" data-tab="issues">보완 필요 (<span id="gbaHealthIncompleteTabCount">0</span>)</button>
+              <button class="gba-btn gba-btn-secondary gba-health-tab-btn" data-tab="chd">CHD/디스크 (<span id="gbaHealthChdTabCount">0</span>)</button>
+              <button class="gba-btn gba-btn-secondary gba-health-tab-btn" data-tab="reclassify">기종 재분류 (<span id="gbaHealthReclassifyTabCount">0</span>)</button>
               <button class="gba-btn gba-btn-secondary gba-health-tab-btn" data-tab="unsupported">코어 미지원 (<span id="gbaHealthUnsupportedTabCount">0</span>)</button>
+              <button class="gba-btn gba-btn-secondary gba-health-tab-btn" data-tab="unverified">판정 미확인 (<span id="gbaHealthUnverifiedTabCount">0</span>)</button>
             </div>
             <input type="text" id="gbaHealthSearchInput" class="gba-input" placeholder="진단 결과 내 검색..." style="max-width: 200px; font-size: 0.85rem; padding: 6px 10px;">
           </div>
@@ -584,7 +594,7 @@
         </div>
       </div>
       <div class="gba-modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
-        <span style="font-size: 0.8rem; color: var(--gba-text-muted);">💡 코어 미지원 항목은 ROM/BIOS 누락이 아니라 현재 EmulatorJS Stable의 게임별 호환성 제한일 수 있습니다.</span>
+        <span style="font-size: 0.8rem; color: var(--gba-text-muted);">💡 “진단 통과”는 파일·의존성·현재 코어 호환성에 문제가 발견되지 않았다는 뜻이며 실제 플레이 성공을 보증하지는 않습니다.</span>
         <button class="gba-btn gba-btn-secondary" id="gbaHealthCheckOkBtn">닫기</button>
       </div>
     </div>

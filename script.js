@@ -455,10 +455,10 @@
         <div class="gba-card-badges">
           <span class="gba-badge ${sysInfo.colorClass}" title="${escapeHtml(sysInfo.name)}">${escapeHtml(sysInfo.label)}</span>
           ${game.has_save ? `<span class="gba-badge gba-badge-save" title="클라우드 세이브 보관됨"><i class="fa-solid fa-floppy-disk"></i> SAVE</span>` : ''}
-          ${game.health_status === 'incomplete' ? `<span class="gba-badge" style="background: rgba(245, 158, 11, 0.9); color: #000; font-weight: 700;" title="일부 칩셋이 누락된 구형 롬셋입니다."><i class="fa-solid fa-triangle-exclamation"></i> 칩셋 누락</span>` : ''}
+          ${game.health_status === 'incomplete' ? `<span class="gba-badge" style="background: rgba(245, 158, 11, 0.9); color: #000; font-weight: 700;" title="M3U/CUE/GDI 등에서 참조하는 파일이 누락되었습니다."><i class="fa-solid fa-triangle-exclamation"></i> 참조 파일 누락</span>` : ''}
           ${game.health_status === 'bios_required' ? `<span class="gba-badge" style="background: rgba(249, 115, 22, 0.92); color: #fff; font-weight: 700;" title="필수 BIOS 또는 시스템 파일이 누락되었습니다."><i class="fa-solid fa-microchip"></i> BIOS 필요</span>` : ''}
-          ${game.health_status === 'parent_required' ? `<span class="gba-badge" style="background: rgba(234, 88, 12, 0.92); color: #fff; font-weight: 700;" title="필수 부모 롬(Parent ROM)이 누락되었습니다."><i class="fa-solid fa-folder-tree"></i> Parent 필요</span>` : ''}
-          ${game.health_status === 'bad_dump_or_unknown' ? `<span class="gba-badge" style="background: rgba(107, 114, 128, 0.95); color: #fff; font-weight: 700;" title="손상되었거나 DAT와 일치하지 않는 롬셋일 수 있습니다."><i class="fa-solid fa-circle-question"></i> 재확인 필요</span>` : ''}
+          ${game.health_status === 'bad_dump_or_unknown' || game.health_status === 'unverified' ? `<span class="gba-badge" style="background: rgba(107, 114, 128, 0.95); color: #fff; font-weight: 700;" title="rom-analyzer가 충분한 근거로 판정하지 못했습니다."><i class="fa-solid fa-circle-question"></i> 판정 미확인</span>` : ''}
+          ${game.health_status === 'reclassify_required' ? `<span class="gba-badge" style="background: rgba(234, 88, 12, 0.95); color: #fff; font-weight: 700;" title="현재 DB 기종과 최신 rom-analyzer 판정 기종이 다릅니다."><i class="fa-solid fa-shuffle"></i> 재분류 필요</span>` : ''}
           ${game.health_status === 'unsupported' ? `<span class="gba-badge" style="background: rgba(124, 58, 237, 0.95); color: #fff; font-weight: 700;" title="ROM/BIOS는 확인되었지만 현재 EmulatorJS Stable 코어의 게임별 호환성 제한으로 구동할 수 없습니다."><i class="fa-solid fa-ban"></i> 코어 미지원</span>` : ''}
           ${game.health_status === 'chd_required' ? `<span class="gba-badge" style="background: rgba(239, 68, 68, 0.9); color: #fff; font-weight: 700;" title="대용량 CHD 음원 디스크 이미지가 필요합니다."><i class="fa-solid fa-compact-disc"></i> CHD 필요</span>` : ''}
           ${metaConfidenceLabel ? `<span class="gba-badge" style="background: rgba(59, 130, 246, 0.16); color: #bfdbfe; border: 1px solid rgba(96, 165, 250, 0.3);" title="메타 출처: ${escapeHtml(metaSource || '미확인')} / 신뢰도: ${metaConfidence}"><i class="fa-solid fa-database"></i> 메타 ${escapeHtml(metaConfidenceLabel)}</span>` : ''}
@@ -771,175 +771,13 @@
     const biosList = (state.available_bios || []).map((b) => b.toLowerCase());
     const hasNeededBios = !!game.has_needed_bios;
     const filename = (game.filename || '').toLowerCase();
-    const title = (game.title || '').toLowerCase();
     const platform = (game.platform || '').toUpperCase();
     const core = (game.core || '').toLowerCase();
-
-    // 1. Neo-Geo games
-    const neoGeoKeywords = [
-      'kof', 'mslug', 'samsho', 'fatfur', 'garou', 'neogeo', 'snk', 'aof', 'rbff',
-      'maglord', 'nam1975', 'spinmast', 'shocktro', 'pbobbl', 'pulstar', 'blazstar',
-      'sengoku', 'lastblad', 'wh1', 'wh2', 'whp', 'wjammers', 'kotm', 'viewpoin',
-      'strhoop', 'tws96', 'zedblade', 'matrim', 'gururin', 'breakers'
-    ];
-    if (platform === 'NEOGEO' || neoGeoKeywords.some((k) => filename.includes(k) || title.includes(k))) {
-      if (!(hasNeededBios || biosList.includes('neogeo.zip'))) {
-        return {
-          type: 'bios',
-          needed: 'neogeo.zip',
-          systemName: '네오지오 (Neo-Geo)',
-          title: '시스템 바이오스(BIOS) 확인',
-          reason: '이 게임은 <strong>[네오지오 (Neo-Geo)]</strong> 기판 게임으로, 원활한 구동을 위해 <code>neogeo.zip</code> 바이오스가 필요합니다.',
-          notice: '바이오스(<code>neogeo.zip</code>) 없이 실행 시 <strong>Romset is unknown</strong> 오류가 발생할 수 있습니다.',
-          btnText: '바이오스 (neogeo.zip) 업로드',
-          isOptional: false,
-        };
-      }
-    }
-
-    // 2. IGS PGM games
-    const pgmKeywords = ['orlegend', 'kov', 'martmast', 'theglad', 'demonfr', 'drgw', 'oldsplus'];
-    if (pgmKeywords.some((k) => filename.includes(k) || title.includes(k))) {
-      if (!(hasNeededBios || biosList.includes('pgm.zip'))) {
-        return {
-          type: 'bios',
-          needed: 'pgm.zip',
-          systemName: 'IGS PGM (삼국전기/데몬프론트)',
-          title: '시스템 바이오스(BIOS) 확인',
-          reason: '이 게임은 <strong>[IGS PGM 기판]</strong> 게임으로, 원활한 구동을 위해 <code>pgm.zip</code> 바이오스가 필요합니다.',
-          notice: '바이오스(<code>pgm.zip</code>) 없이 실행 시 <strong>Romset is unknown</strong> 오류가 발생할 수 있습니다.',
-          btnText: '바이오스 (pgm.zip) 업로드',
-          isOptional: false,
-        };
-      }
-    }
-
-    // 3. FDS games
-    if (platform === 'FDS' || filename.endsWith('.fds')) {
-      if (!(hasNeededBios || biosList.includes('disksys.rom'))) {
-        return {
-          type: 'bios',
-          needed: 'disksys.rom',
-          systemName: '패미컴 디스크 시스템 (FDS)',
-          title: '시스템 바이오스(BIOS) 확인',
-          reason: '패미컴 디스크 시스템 롬 구동을 위해 <code>disksys.rom</code> 바이오스가 필요합니다.',
-          notice: '바이오스(<code>disksys.rom</code>) 없이 실행 시 게임이 구동되지 않을 수 있습니다.',
-          btnText: '바이오스 (disksys.rom) 업로드',
-          isOptional: false,
-        };
-      }
-    }
-
-    // 4. PCE-CD
-    if (platform === 'PCECD' || (platform === 'PCE' && filename.endsWith('.chd'))) {
-      if (!(hasNeededBios || biosList.includes('syscard3.pce'))) {
-        return {
-          type: 'bios',
-          needed: 'syscard3.pce',
-          systemName: 'PC엔진 CD-ROM²',
-          title: '시스템 카드 바이오스 확인',
-          reason: 'PC엔진 CD 게임을 구동하기 위해 <code>syscard3.pce</code> 시스템 카드가 필요합니다.',
-          notice: '시스템 카드(<code>syscard3.pce</code>) 없이 실행 시 CD 게임이 로드되지 않습니다.',
-          btnText: '시스템 카드 (syscard3.pce) 업로드',
-          isOptional: false,
-        };
-      }
-    }
-
-    // 5. PlayStation 1 (권장 안내)
-    if (platform === 'PS1' || core === 'psx') {
-      const hasPsxBios = hasNeededBios || biosList.some((b) => b.startsWith('scph'));
-      if (!hasPsxBios) {
-        return {
-          type: 'bios',
-          needed: 'scph5501.bin (또는 scph1001.bin)',
-          systemName: 'PlayStation 1 (PS1)',
-          reason: 'PS1 공식 바이오스가 있으면 호환성과 사운드 재생 품질이 향상됩니다.',
-          isOptional: true,
-        };
-      }
-    }
-
-    // 6. 아케이드 클론(Clone) 롬셋 & 부모 롬(Parent ROM) 의존성 검사
-    const ARCADE_CLONE_MAP = {
-      wofj: { parent: 'wof.zip', name: '천지를 먹다 2 (Warriors of Fate)', system: 'CPS-1.5' },
-      wofa: { parent: 'wof.zip', name: '천지를 먹다 2 (Warriors of Fate)', system: 'CPS-1.5' },
-      wofu: { parent: 'wof.zip', name: '천지를 먹다 2 (Warriors of Fate)', system: 'CPS-1.5' },
-      wofr1: { parent: 'wof.zip', name: '천지를 먹다 2 (Warriors of Fate)', system: 'CPS-1.5' },
-      captcommj: { parent: 'captcomm.zip', name: '캡틴 코만도 (Captain Commando)', system: 'CPS-1' },
-      captcommu: { parent: 'captcomm.zip', name: '캡틴 코만도 (Captain Commando)', system: 'CPS-1' },
-      ffightj: { parent: 'ffight.zip', name: '파이널 파이트 (Final Fight)', system: 'CPS-1' },
-      ffightu: { parent: 'ffight.zip', name: '파이널 파이트 (Final Fight)', system: 'CPS-1' },
-      dinoj: { parent: 'dino.zip', name: '캐딜락 & 다이노소어', system: 'CPS-1.5' },
-      dinou: { parent: 'dino.zip', name: '캐딜락 & 다이노소어', system: 'CPS-1.5' },
-      punisherj: { parent: 'punisher.zip', name: '퍼니셔 (The Punisher)', system: 'CPS-1.5' },
-      punisheru: { parent: 'punisher.zip', name: '퍼니셔 (The Punisher)', system: 'CPS-1.5' },
-      avspj: { parent: 'avsp.zip', name: '에이리언 vs 프레데터', system: 'CPS-2' },
-      ddsomj: { parent: 'ddsom.zip', name: '던전 & 드래곤: 섀도 오버 미스타라', system: 'CPS-2' },
-      ddtodj: { parent: 'ddtod.zip', name: '던전 & 드래곤: 타워 오브 둠', system: 'CPS-2' },
-      kodj: { parent: 'kod.zip', name: '원탁의 기사 (Knights of the Round)', system: 'CPS-1' },
-      sf2j: { parent: 'sf2.zip', name: '스트리트 파이터 2', system: 'CPS-1' },
-      sf2cej: { parent: 'sf2ce.zip', name: '스트리트 파이터 2 챔피언 에디션', system: 'CPS-1' },
-      ssf2j: { parent: 'ssf2.zip', name: '슈퍼 스트리트 파이터 2', system: 'CPS-2' },
-      kof97k: { parent: 'kof97.zip', name: '더 킹 오브 파이터즈 97 (한글판)', system: 'Neo-Geo' },
-      kof98k: { parent: 'kof98.zip', name: '더 킹 오브 파이터즈 98 (한글판)', system: 'Neo-Geo' },
-      kof99k: { parent: 'kof99.zip', name: '더 킹 오브 파이터즈 99 (한글판)', system: 'Neo-Geo' },
-      kof2000k: { parent: 'kof2000.zip', name: '더 킹 오브 파이터즈 2000 (한글판)', system: 'Neo-Geo' },
-      kof2002k: { parent: 'kof2002.zip', name: '더 킹 오브 파이터즈 2002 (한글판)', system: 'Neo-Geo' },
-      mslugx: { parent: 'mslug2.zip', name: '메탈슬러그 X', system: 'Neo-Geo' },
-    };
-
     const rawStem = filename.replace(/\.(zip|7z)$/i, '').toLowerCase();
-    const existingGameFiles = (state.games || []).map((g) => (g.filename || '').toLowerCase());
-    const allRoms = [...biosList, ...existingGameFiles];
 
-    if (ARCADE_CLONE_MAP[rawStem]) {
-      const cloneInfo = ARCADE_CLONE_MAP[rawStem];
-      if (!allRoms.includes(cloneInfo.parent.toLowerCase())) {
-        return {
-          type: 'parent',
-          needed: cloneInfo.parent,
-          systemName: `${cloneInfo.system} / ${cloneInfo.name}`,
-          title: '아케이드 부모 롬(Parent ROM) 필요',
-          reason: `이 게임(<code>${escapeHtml(filename)}</code>)은 클론/한글패치 롬셋입니다.<br>에뮬레이터 구동에 필수적인 기본 그래픽/사운드 데이터가 들어있는 원본 부모 롬 <code>${cloneInfo.parent}</code> 파일이 roms 폴더에 함께 있어야 정상 구동됩니다.`,
-          notice: `부모 롬(<code>${cloneInfo.parent}</code>) 없이 실행 시 <strong>Romset is unknown</strong> 오류가 발생합니다.`,
-          btnText: `부모 롬 (${cloneInfo.parent}) 업로드`,
-          isOptional: false,
-        };
-      }
-    } else if (core === 'arcade' || platform === 'Arcade') {
-      const match = rawStem.match(/^([a-z0-9_]+?)([juka-e1-3])$/i);
-      if (match && match[1].length >= 3) {
-        const potentialParent = match[1] + '.zip';
-        if (!allRoms.includes(potentialParent.toLowerCase())) {
-          return {
-            type: 'parent',
-            needed: potentialParent,
-            systemName: '아케이드 클론(Clone) 롬셋',
-            title: '아케이드 부모 롬(Parent ROM) 확인',
-            reason: `이 게임은 변형판(클론) 롬셋일 가능성이 높습니다.<br>실행 시 오류가 발생한다면 원본 부모 롬 <code>${potentialParent}</code>을 함께 넣어주세요.`,
-            notice: `부모 롬(<code>${potentialParent}</code>)이 없으면 게임이 실행되지 않을 수 있습니다.`,
-            btnText: `부모 롬 (${potentialParent}) 업로드`,
-            isOptional: true,
-          };
-        }
-      }
-    }
-
-    // 3. 롬 무결성 정밀 진단 결과 가드 (칩셋 누락 / CHD 필요)
-    if (game.health_status === 'parent_required') {
-      const requiredParent = (game.missing_roms || '').trim() || `${rawStem}.zip`;
-      return {
-        type: 'parent',
-        needed: requiredParent,
-        systemName: '아케이드 클론(Clone) 롬셋',
-        title: '아케이드 부모 롬(Parent ROM) 필요',
-        reason: `이 게임은 단독 실행이 불가능한 클론/파생 롬셋으로 판정되었습니다.<br>필수 부모 롬 <code>${escapeHtml(requiredParent)}</code> 파일이 roms 폴더에 함께 있어야 정상 구동됩니다.`,
-        notice: `부모 롬(<code>${escapeHtml(requiredParent)}</code>) 없이 실행 시 <strong>Romset is unknown</strong> 오류가 발생합니다.`,
-        btnText: `부모 롬 (${requiredParent}) 업로드`,
-        isOptional: false,
-      };
-    } else if (game.health_status === 'bios_required') {
+    // 서버의 rom-analyzer 기반 진단 상태를 단일 진실 공급원으로 사용한다.
+    // 파일명/접미사만으로 Parent, CHD, 기판 BIOS를 추측하지 않는다.
+    if (game.health_status === 'bios_required') {
       if (hasNeededBios) return null;
       const requiredBios = (game.needed_bios || game.missing_roms || '').trim() || '필수 BIOS';
       return {
@@ -947,12 +785,42 @@
         needed: requiredBios,
         systemName: '시스템 BIOS / 기판 파일',
         title: '필수 BIOS 파일 필요',
-        reason: `이 게임은 필수 BIOS 또는 시스템 파일 <code>${escapeHtml(requiredBios)}</code> 이(가) 없으면 정상 구동되지 않습니다.`,
-        notice: `필수 BIOS(<code>${escapeHtml(requiredBios)}</code>) 없이 실행 시 <strong>Romset is unknown</strong> 또는 부팅 실패가 발생할 수 있습니다.`,
+        reason: `rom-analyzer가 이 게임의 필수 BIOS로 <code>${escapeHtml(requiredBios)}</code>을(를) 판정했습니다.`,
+        notice: `필수 BIOS(<code>${escapeHtml(requiredBios)}</code>)가 없으면 부팅 또는 게임 실행이 실패할 수 있습니다.`,
         btnText: `BIOS (${requiredBios}) 업로드`,
         isOptional: false,
       };
-    } else if (game.health_status === 'unsupported') {
+    }
+
+    if (game.health_status === 'reclassify_required') {
+      return {
+        type: 'reclassify',
+        needed: '기종 재분류',
+        systemName: '등록 기종과 최신 분석 결과 불일치',
+        title: '기종 재분류 필요',
+        reason: `${escapeHtml(game.missing_roms || '현재 DB 기종과 최신 rom-analyzer 판정이 다릅니다.')}`,
+        notice: 'ROM을 실제로 이동하는 작업은 <strong>풀 스캔</strong>에서 수행됩니다. 현재 경로로 실행을 강행할 수는 있습니다.',
+        btnText: '',
+        hideUpload: true,
+        isOptional: false,
+      };
+    }
+
+    if (game.health_status === 'unverified' || game.health_status === 'bad_dump_or_unknown' || game.health_status === 'parent_required') {
+      return {
+        type: 'unverified',
+        needed: '추가 판정 근거',
+        systemName: 'rom-analyzer 판정 미확인',
+        title: '실행 가능 여부 미확인',
+        reason: `${escapeHtml(game.missing_roms || 'rom-analyzer가 충분한 근거로 이 ROM을 판정하지 못했습니다.')}`,
+        notice: '손상으로 확정된 것은 아닙니다. 현재 분석 근거가 부족하므로 실행 결과를 보장할 수 없습니다.',
+        btnText: '',
+        hideUpload: true,
+        isOptional: false,
+      };
+    }
+
+    if (game.health_status === 'unsupported') {
       return {
         type: 'unsupported',
         needed: '현재 EmulatorJS Stable 코어',
@@ -964,49 +832,56 @@
         hideUpload: true,
         isOptional: false,
       };
-    } else if (game.health_status === 'bad_dump_or_unknown') {
-      return {
-        type: 'unknown',
-        needed: '최신 Non-Merged 롬셋',
-        systemName: '손상/미지원/미확인 롬셋',
-        title: '롬셋 재확인 필요',
-        reason: `이 롬 파일은 현재 DAT와 일치하지 않거나 손상된 덤프일 가능성이 있습니다.<br>${escapeHtml(game.missing_roms || '최신 Non-Merged 정식 롬셋으로 다시 교체해 확인해 주세요.')}`,
-        notice: `실행을 강행하면 <strong>Romset is unknown</strong> 또는 즉시 종료가 발생할 수 있습니다.`,
-        btnText: `롬 파일 다시 업로드`,
-        isOptional: false,
-      };
-    } else if (game.health_status === 'chd_required') {
+    }
+
+    if (game.health_status === 'chd_required') {
+      const requiredDisk = (game.missing_roms || '').trim() || `${rawStem}.chd`;
       return {
         type: 'chd',
-        needed: `${rawStem}.chd`,
-        systemName: '오락실 대형 체감형 기판',
-        title: '대용량 CHD 디스크 이미지 필요',
-        reason: `이 게임은 오락실 CD-ROM/HDD 음원 디스크 이미지(<code>.chd</code>)가 필수적인 시스템(비트매니아, DDR 등)입니다.<br>단독 롬셋 파일만으로는 브라우저 에뮬레이터에서 <strong>Romset is unknown</strong> 또는 메인메뉴로 진입하게 됩니다.`,
-        notice: `현재 웹 에뮬레이터에서는 단독 기판 아케이드 게임 플레이를 권장합니다.`,
-        btnText: `확인`,
+        needed: requiredDisk,
+        systemName: '필수 디스크 이미지',
+        title: 'CHD / 디스크 이미지 필요',
+        reason: `rom-analyzer가 이 게임의 필수 디스크 이미지 <code>${escapeHtml(requiredDisk)}</code>을(를) 찾지 못했습니다.`,
+        notice: '필수 디스크 이미지가 없으면 부팅 또는 게임 진행이 실패할 수 있습니다.',
+        btnText: '확인',
+        hideUpload: true,
         isOptional: false,
       };
-    } else if (game.health_status === 'incomplete') {
+    }
+
+    if (game.health_status === 'incomplete') {
       let sampleMissing = '';
       try {
         const parsed = JSON.parse(game.missing_roms || '[]');
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          sampleMissing = parsed.slice(0, 3).join(', ');
-        }
+        if (Array.isArray(parsed) && parsed.length > 0) sampleMissing = parsed.slice(0, 3).join(', ');
       } catch (e) {
         sampleMissing = game.missing_roms || '';
       }
-
       return {
         type: 'incomplete',
-        needed: sampleMissing || '최신 Non-Merged 롬셋',
-        systemName: '구형/불완전 아케이드 롬셋',
-        title: '롬셋 칩셋 누락 (구형 덤프)',
-        reason: `이 게임 롬셋은 구형 버전 덤프 파일로, 최신 FBNeo 코어가 요구하는 필수 칩셋(<code>${escapeHtml(sampleMissing || '일부 칩셋')}</code>)이 누락되어 있습니다.<br>최신 Non-Merged 롬 파일로 교체하시면 정상 구동됩니다.`,
-        notice: `실행 시 <strong>Missing files for THIS VERSION of FBNeo</strong> 오류가 발생할 수 있습니다.`,
-        btnText: `롬 파일 교체 업로드`,
+        needed: sampleMissing || '참조 파일',
+        systemName: '디스크/플레이리스트 구성 불완전',
+        title: '참조 파일 누락',
+        reason: `M3U/CUE/GDI 등에서 참조하는 파일(<code>${escapeHtml(sampleMissing || '일부 파일')}</code>)을 찾지 못했습니다.`,
+        notice: '누락된 참조 파일을 같은 게임 번들에 추가한 뒤 무결성 진단을 다시 실행하세요.',
+        btnText: '확인',
+        hideUpload: true,
         isOptional: false,
       };
+    }
+
+    // PS1 BIOS는 현재 코어에서 필수는 아니므로 상태 오류가 아니라 선택 권장만 유지한다.
+    if (platform === 'PS1' || core === 'psx') {
+      const hasPsxBios = hasNeededBios || biosList.some((b) => b.startsWith('scph'));
+      if (!hasPsxBios) {
+        return {
+          type: 'bios',
+          needed: 'scph5501.bin (또는 scph1001.bin)',
+          systemName: 'PlayStation 1 (PS1)',
+          reason: 'PS1 공식 BIOS가 있으면 일부 게임의 호환성과 사운드 품질이 향상될 수 있습니다.',
+          isOptional: true,
+        };
+      }
     }
 
     return null;
@@ -1020,6 +895,8 @@
     }
     const isParent = missing.type === 'parent';
     const isUnsupported = missing.type === 'unsupported';
+    const isReclassify = missing.type === 'reclassify';
+    const isUnverified = missing.type === 'unverified';
     const iconClass = missing.type === 'parent'
       ? 'fa-solid fa-folder-tree'
       : missing.type === 'chd'
@@ -1028,7 +905,11 @@
           ? 'fa-solid fa-circle-question'
           : isUnsupported
             ? 'fa-solid fa-ban'
-            : 'fa-solid fa-microchip';
+            : isReclassify
+              ? 'fa-solid fa-shuffle'
+              : isUnverified
+                ? 'fa-solid fa-circle-question'
+                : 'fa-solid fa-microchip';
 
     if ($('gbaBiosWarningHeaderSpan')) {
       $('gbaBiosWarningHeaderSpan').textContent = missing.title || (isParent ? '아케이드 부모 롬(Parent ROM) 필요' : '시스템 바이오스(BIOS) 확인');
@@ -2899,18 +2780,22 @@
     // ROM 라이브러리 전수 무결성 진단 (Health Check)
     // --------------------------------------------------------------------------
     let healthData = null;
-    let activeHealthTab = 'incomplete';
+    let activeHealthTab = 'issues';
 
     function renderHealthTable() {
       const tbody = $('gbaHealthTableBody');
       if (!tbody || !healthData) return;
 
       const q = ($('gbaHealthSearchInput')?.value || '').trim().toLowerCase();
-      const list = activeHealthTab === 'incomplete'
-        ? (healthData.incomplete_list || [])
+      const list = activeHealthTab === 'issues'
+        ? (healthData.issue_list || [])
         : activeHealthTab === 'chd'
           ? (healthData.chd_list || [])
-          : (healthData.unsupported_list || []);
+          : activeHealthTab === 'reclassify'
+            ? (healthData.reclassify_list || [])
+            : activeHealthTab === 'unverified'
+              ? (healthData.unverified_list || [])
+              : (healthData.unsupported_list || []);
       const confidenceLabel = (score) => metadataConfidenceLabel(score || 0);
       
       const filtered = list.filter((item) => {
@@ -2922,7 +2807,7 @@
         tbody.innerHTML = `
           <tr>
             <td colspan="3" style="text-align: center; padding: 24px; color: var(--gba-text-muted);">
-              ${q ? '검색된 항목이 없습니다.' : (activeHealthTab === 'incomplete' ? '🎉 보완이 필요한 롬셋이 없습니다.' : activeHealthTab === 'chd' ? '🎉 CHD 디스크 이미지가 필요한 게임이 없습니다.' : '🎉 현재 EmulatorJS Stable 코어에서 구동 불가로 판정된 게임이 없습니다.')}
+              ${q ? '검색된 항목이 없습니다.' : (activeHealthTab === 'issues' ? '🎉 파일 또는 BIOS 보완이 필요한 게임이 없습니다.' : activeHealthTab === 'chd' ? '🎉 CHD/디스크 이미지가 필요한 게임이 없습니다.' : activeHealthTab === 'reclassify' ? '🎉 기종 재분류가 필요한 게임이 없습니다.' : activeHealthTab === 'unverified' ? '🎉 판정 미확인 게임이 없습니다.' : '🎉 현재 EmulatorJS Stable 코어에서 구동 불가로 판정된 게임이 없습니다.')}
             </td>
           </tr>
         `;
@@ -2930,13 +2815,19 @@
       }
 
       tbody.innerHTML = filtered.map((item) => {
-        const isInc = activeHealthTab === 'incomplete';
+        const isIssue = activeHealthTab === 'issues';
         const isUnsupported = activeHealthTab === 'unsupported';
-        const badgeColor = isInc
+        const isReclassify = activeHealthTab === 'reclassify';
+        const isUnverified = activeHealthTab === 'unverified';
+        const badgeColor = isIssue
           ? 'background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3);'
           : isUnsupported
             ? 'background: rgba(124, 58, 237, 0.15); color: #a78bfa; border: 1px solid rgba(124, 58, 237, 0.3);'
-            : 'background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);';
+            : isReclassify
+              ? 'background: rgba(234, 88, 12, 0.15); color: #fb923c; border: 1px solid rgba(234, 88, 12, 0.3);'
+              : isUnverified
+                ? 'background: rgba(107, 114, 128, 0.15); color: #9ca3af; border: 1px solid rgba(107, 114, 128, 0.3);'
+                : 'background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);';
         const metaInfo = [];
         if (item.metadata_source) metaInfo.push(`출처: ${item.metadata_source}`);
         if (item.metadata_confidence) metaInfo.push(`신뢰도: ${confidenceLabel(item.metadata_confidence)} (${item.metadata_confidence})`);
@@ -2963,34 +2854,69 @@
     $('gbaHealthCheckBtn')?.addEventListener('click', async () => {
       const modal = $('gbaHealthCheckModal');
       const loading = $('gbaHealthCheckLoading');
+      const loadingText = loading?.querySelector('p');
       const result = $('gbaHealthCheckResult');
 
       if (!modal) return;
       modal.style.display = 'flex';
       if (loading) loading.style.display = 'block';
       if (result) result.style.display = 'none';
+      if (loadingText) loadingText.textContent = 'rom-analyzer 전수 재분석을 시작하는 중입니다...';
 
       try {
-        const res = await apiCall('health_check');
-        if (!res || !res.success) {
-          throw new Error(res && res.error ? res.error : '무결성 진단 실패');
+        const startRes = await apiCall('health_refresh');
+        if (!startRes || !startRes.success) {
+          throw new Error(startRes && startRes.error ? startRes.error : '무결성 재분석 시작 실패');
         }
 
+        let finished = false;
+        for (let attempt = 0; attempt < 1200; attempt += 1) {
+          const progressRes = await apiCall('health_progress');
+          if (!progressRes || !progressRes.success) throw new Error('무결성 진단 진행 상태 확인 실패');
+          const progress = progressRes.progress || {};
+          const current = Number(progress.current || 0);
+          const total = Number(progress.total || 0);
+          const percent = total > 0 ? Math.min(100, Math.round(current * 100 / total)) : 0;
+          if (loadingText) {
+            loadingText.textContent = total > 0
+              ? `rom-analyzer 재분석 중... ${current.toLocaleString()} / ${total.toLocaleString()} (${percent}%) · ${progress.current_file || ''}`
+              : 'rom-analyzer 재분석 준비 중...';
+          }
+          if (!progress.is_running && progress.status === 'completed') {
+            finished = true;
+            break;
+          }
+          if (!progress.is_running && progress.status === 'error') {
+            throw new Error(progress.current_file || '무결성 재분석 중 오류가 발생했습니다.');
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        if (!finished) throw new Error('무결성 진단 시간이 너무 오래 걸려 상태 확인을 중단했습니다.');
+
+        const res = await apiCall('health_check');
+        if (!res || !res.success) {
+          throw new Error(res && res.error ? res.error : '무결성 진단 결과 조회 실패');
+        }
         healthData = res;
 
-        if ($('gbaHealthPassCount')) $('gbaHealthPassCount').textContent = res.summary.pass;
-        if ($('gbaHealthIncompleteCount')) $('gbaHealthIncompleteCount').textContent = res.summary.incomplete;
-        if ($('gbaHealthChdCount')) $('gbaHealthChdCount').textContent = res.summary.chd;
+        if ($('gbaHealthPassCount')) $('gbaHealthPassCount').textContent = res.summary.pass || 0;
+        if ($('gbaHealthIncompleteCount')) $('gbaHealthIncompleteCount').textContent = res.summary.issues || 0;
+        if ($('gbaHealthChdCount')) $('gbaHealthChdCount').textContent = res.summary.chd || 0;
+        if ($('gbaHealthReclassifyCount')) $('gbaHealthReclassifyCount').textContent = res.summary.reclassify || 0;
         if ($('gbaHealthUnsupportedCount')) $('gbaHealthUnsupportedCount').textContent = res.summary.unsupported || 0;
+        if ($('gbaHealthUnverifiedCount')) $('gbaHealthUnverifiedCount').textContent = res.summary.unverified || 0;
 
-        if ($('gbaHealthIncompleteTabCount')) $('gbaHealthIncompleteTabCount').textContent = res.summary.incomplete;
-        if ($('gbaHealthChdTabCount')) $('gbaHealthChdTabCount').textContent = res.summary.chd;
+        if ($('gbaHealthIncompleteTabCount')) $('gbaHealthIncompleteTabCount').textContent = res.summary.issues || 0;
+        if ($('gbaHealthChdTabCount')) $('gbaHealthChdTabCount').textContent = res.summary.chd || 0;
+        if ($('gbaHealthReclassifyTabCount')) $('gbaHealthReclassifyTabCount').textContent = res.summary.reclassify || 0;
         if ($('gbaHealthUnsupportedTabCount')) $('gbaHealthUnsupportedTabCount').textContent = res.summary.unsupported || 0;
+        if ($('gbaHealthUnverifiedTabCount')) $('gbaHealthUnverifiedTabCount').textContent = res.summary.unverified || 0;
 
         if (loading) loading.style.display = 'none';
         if (result) result.style.display = 'block';
-
         renderHealthTable();
+        await loadLibrary(true);
+        showToast(`무결성 재진단 완료: ${res.summary.total || 0}개 분석`);
       } catch (err) {
         console.error('[GBA] Health check error:', err);
         showToast('무결성 진단 중 오류가 발생했습니다: ' + (err.message || err), true);

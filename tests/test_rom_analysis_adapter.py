@@ -32,14 +32,17 @@ class RomAnalysisAdapterTests(unittest.TestCase):
                 warnings=[], conflicts=[], detection_methods=["m3u_playlist"],
                 arcade_info=SimpleNamespace(required_bios=[], parent_rom=None, chd_name=None, matched_count=0, total_roms=0, match_rate=0.0, driver=None),
                 disc_info=SimpleNamespace(referenced_files=["Disc 1.chd"], missing_files=[], disc_count=1, track_count=1),
-                bios_info=SimpleNamespace(bios_files=["scph5500.bin", "scph5501.bin"]),
+                bios_info=SimpleNamespace(bios_files=["scph5500.bin", "scph5501.bin"], mandatory=False, needs_bios=False),
                 header_metadata=SimpleNamespace(title="Game", serial="SLUS-00001"),
-                emulatorjs=SimpleNamespace(supported=True, core="pcsx_rearmed", system="psx"),
+                emulatorjs=SimpleNamespace(supported=True, core="pcsx_rearmed", system="psx", reason=None),
             )
             converted = adapter._convert_result(result)
             self.assertEqual(converted["core"], "psx")
             self.assertEqual(converted["platform"], "PS1")
             self.assertEqual(converted["needed_bios"], "scph5501.bin")
+            self.assertFalse(converted["bios_mandatory"])
+            self.assertFalse(converted["bios_needed"])
+            self.assertEqual(converted["emulatorjs_reason"], "")
             self.assertEqual(converted["resolved_disk_files"], [str(disc)])
             self.assertEqual(converted["metadata_confidence"], 97)
 

@@ -129,6 +129,18 @@ _SCAN_PROGRESS = {
 }
 _SCAN_PROGRESS_LOCK = threading.Lock()
 
+_HEALTH_PROGRESS = {
+    "is_running": False,
+    "current": 0,
+    "total": 0,
+    "current_file": "",
+    "status": "idle",
+    "changed": 0,
+    "failed": 0,
+    "updated_at": 0,
+}
+_HEALTH_PROGRESS_LOCK = threading.Lock()
+
 # 백그라운드 커버 아트 다운로드 전역 큐 매니저
 _COVER_QUEUE = []
 _COVER_QUEUE_SET = set()  # 중복 등록 방지 (gid 기준)
@@ -236,6 +248,25 @@ def _update_scan_progress(current=None, total=None, current_file=None, status=No
         if is_running is not None:
             _SCAN_PROGRESS["is_running"] = is_running
         _SCAN_PROGRESS["updated_at"] = time.time()
+
+
+def _update_health_progress(current=None, total=None, current_file=None, status=None, is_running=None, changed=None, failed=None):
+    with _HEALTH_PROGRESS_LOCK:
+        if current is not None:
+            _HEALTH_PROGRESS["current"] = current
+        if total is not None:
+            _HEALTH_PROGRESS["total"] = total
+        if current_file is not None:
+            _HEALTH_PROGRESS["current_file"] = current_file
+        if status is not None:
+            _HEALTH_PROGRESS["status"] = status
+        if is_running is not None:
+            _HEALTH_PROGRESS["is_running"] = is_running
+        if changed is not None:
+            _HEALTH_PROGRESS["changed"] = changed
+        if failed is not None:
+            _HEALTH_PROGRESS["failed"] = failed
+        _HEALTH_PROGRESS["updated_at"] = time.time()
 
 
 def _get_kst_now_str():
@@ -2915,6 +2946,125 @@ def _mame_compatibility_health(rom_name):
     return ("unsupported", f"MAME2003 계열 게임 호환성 제한: {details}")
 
 
+def _health_core_key(value):
+    return str(value or "").strip().lower().replace("-", "").replace("_", "")
+
+
+def _health_core_equivalent(db_core, db_platform, detected_core, detected_platform):
+    """실행 코어의 호환 별칭은 같은 기종으로 취급하되 실제 기종 변경은 구분한다."""
+    left_core = _health_core_key(db_core)
+    right_core = _health_core_key(detected_core)
+    left_platform = _health_core_key(db_platform)
+    right_platform = _health_core_key(detected_platform)
+    arcade_cores = {"arcade", "mame", "mame2003", "mame2003plus"}
+    arcade_platforms = {"arcade", "neogeo"}
+    if left_core in arcade_cores and right_core in arcade_cores and left_platform in arcade_platforms and right_platform in arcade_platforms:
+        return True
+    if left_core and right_core:
+        return left_core == right_core
+    return bool(left_platform and right_platform and left_platform == right_platform)
+
+
+def _is_required_chd_available(file_path, required_chd):
+    req = str(required_chd or "").strip().replace("\\", "/")
+    if not req or not file_path:
+        return False
+    req = req.lstrip("/")
+    if ".." in req.split("/"):
+        return False
+    base_dir = os.path.dirname(os.path.abspath(file_path))
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    candidates = [
+        os.path.join(base_dir, req),
+        os.path.join(base_dir, stem, req),
+    ]
+    if not os.path.splitext(req)[1]:
+        candidates.extend([
+            os.path.join(base_dir, f"{req}.chd"),
+            os.path.join(base_dir, req, f"{req}.chd"),
+            os.path.join(base_dir, stem, f"{req}.chd"),
+        ])
+    return any(os.path.exists(path) for path in candidates)
+
+
+def _derive_health_status_from_analysis(rom_info, file_path, db_core="", db_platform="", db_game_code="", available_bios_names=None, bios_dir=""):
+    """rom-analyzer의 명시적 근거만 사용해 Game Books 진단 상태를 계산한다.
+
+    clone/CHD 파일명 추측 같은 legacy 휴리스틱은 사용하지 않는다.
+    """
+    if not isinstance(rom_info, dict) or rom_info.get("metadata_source") != "rom-analyzer":
+        return "unverified", "rom-analyzer의 최신 판정 결과를 얻지 못했습니다."
+
+    missing_files = [str(item).strip() for item in (rom_info.get("disk_missing_files") or []) if str(item).strip()]
+    if missing_files:
+        return "incomplete", json.dumps(missing_files[:8], ensure_ascii=False)
+
+    identity = str(rom_info.get("identity_status") or "unknown").strip().lower()
+    confidence = int(rom_info.get("metadata_confidence") or 0)
+    core = str(rom_info.get("core") or "").strip()
+    platform = str(rom_info.get("platform") or "").strip()
+    conflicts = [str(item).strip() for item in (rom_info.get("analysis_conflicts") or []) if str(item).strip()]
+    warnings = [str(item).strip() for item in (rom_info.get("analysis_warnings") or []) if str(item).strip()]
+    ejs_reason = str(rom_info.get("emulatorjs_reason") or "").strip()
+    explicit_compatibility_block = (
+        rom_info.get("emulatorjs_supported") is False
+        and any(
+            token in (" ".join(warnings + [ejs_reason])).lower()
+            for token in ("game not working", "호환성 제한", "실행 불가로 기록", "unemulated protection")
+        )
+    )
+
+    # exact/strong 근거로 다른 기종이 확인된 경우 현재 실행 코어의 호환성 표보다 재분류가 우선한다.
+    if core and platform and identity in ("exact", "strong") and (db_core or db_platform):
+        if not _health_core_equivalent(db_core, db_platform, core, platform):
+            return "reclassify_required", f"현재 등록: {db_platform or db_core} / 최신 판정: {platform or core} ({core})"
+
+    # 현재 등록 코어가 MAME2003 계열이면 공식 게임별 호환성 스냅샷의 명시적 차단을
+    # partial/ambiguous 식별보다 강한 실행 가능성 근거로 취급한다.
+    if _health_core_key(db_core) in {"mame", "mame2003", "mame2003plus"}:
+        compatibility_health = _mame_compatibility_health(
+            rom_info.get("game_code") or db_game_code or os.path.basename(file_path or "")
+        )
+        if compatibility_health and compatibility_health[0] == "unsupported":
+            return compatibility_health
+
+    if not core or not platform or identity in ("unknown", "ambiguous"):
+        reason = conflicts[0] if conflicts else f"rom-analyzer 판정이 {identity or 'unknown'} 상태입니다. 충분한 식별 근거가 없습니다."
+        return "unverified", reason
+
+    # analyzer 자체가 게임별 호환성 제한을 명시했다면 일반 신뢰도 등급보다 우선한다.
+    if explicit_compatibility_block:
+        return "unsupported", _emulatorjs_unsupported_reason(rom_info) or ejs_reason
+
+    if identity == "partial":
+        return "unverified", f"rom-analyzer가 부분 판정만 확보했습니다. 신뢰도 {confidence}%."
+
+    # partial이 아닌 새 근거에서 기종 불일치가 남아 있으면 보수적으로 재분류 대상으로 둔다.
+    if db_core or db_platform:
+        if not _health_core_equivalent(db_core, db_platform, core, platform):
+            return "reclassify_required", f"현재 등록: {db_platform or db_core} / 최신 판정: {platform or core} ({core})"
+
+    required_bios = _normalize_required_archive(rom_info.get("needed_bios") or "")
+    bios_mandatory = bool(rom_info.get("bios_mandatory") or rom_info.get("bios_needed"))
+    if required_bios and bios_mandatory and not _is_optional_runtime_bios(required_bios):
+        bios_names = available_bios_names or set()
+        if not _is_required_bios_available(required_bios, bios_names, bios_dir):
+            return "bios_required", required_bios
+
+    required_chd = str(rom_info.get("required_chd") or "").strip()
+    if required_chd and not _is_required_chd_available(file_path, required_chd):
+        return "chd_required", required_chd
+
+    unsupported_reason = _emulatorjs_unsupported_reason(rom_info)
+    if unsupported_reason:
+        return "unsupported", unsupported_reason
+
+    if rom_info.get("is_playable") is False:
+        return "unsupported", "rom-analyzer가 이 파일을 직접 실행 가능한 게임 ROM으로 판정하지 않았습니다."
+
+    return "pass", ""
+
+
 class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
     id = "bookoasis_gamebooks"
     name = "Game Books"
@@ -3716,6 +3866,108 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "cover_url": f"{ROUTE_BASE}/cover/{game_id}" if (cover_path and os.path.exists(cover_path)) else None,
         }
 
+    def _refresh_health_statuses(self):
+        """파일을 이동하지 않고 전체 라이브러리의 진단 상태만 rom-analyzer로 재계산한다."""
+        with _HEALTH_PROGRESS_LOCK:
+            if _HEALTH_PROGRESS.get("is_running"):
+                return
+            _HEALTH_PROGRESS.update({
+                "is_running": True, "current": 0, "total": 0, "current_file": "",
+                "status": "preparing", "changed": 0, "failed": 0, "updated_at": time.time(),
+            })
+
+        try:
+            rows = self._db_query(
+                "SELECT id, filename, file_path, core, platform, game_code, health_status, missing_roms FROM games ORDER BY id"
+            )
+            total = len(rows)
+            bios_dir = self._get_bios_dir()
+            try:
+                available_bios_names = {name.lower() for name in os.listdir(bios_dir) if not name.startswith(".")} if os.path.isdir(bios_dir) else set()
+            except Exception:
+                available_bios_names = set()
+
+            _update_health_progress(current=0, total=total, current_file="진단 준비 중...", status="analyzing", is_running=True, changed=0, failed=0)
+            changed = 0
+            failed = 0
+            counter = [0]
+            counter_lock = threading.Lock()
+
+            def analyze_one(game):
+                gid = game.get("id")
+                filename = game.get("filename") or ""
+                path = self._resolve_existing_rom_path(
+                    gid, filename, game.get("file_path") or "",
+                    core=game.get("core") or "", platform=game.get("platform") or "", update_db=True,
+                )
+                if not path or not os.path.isfile(path):
+                    result = (gid, "unverified", "ROM 파일 경로를 확인할 수 없습니다.", None)
+                else:
+                    try:
+                        from rom_analysis_adapter import analyze_rom
+                        analysis = analyze_rom(path)
+                        status, reason = _derive_health_status_from_analysis(
+                            analysis, path,
+                            db_core=game.get("core") or "", db_platform=game.get("platform") or "",
+                            db_game_code=game.get("game_code") or "",
+                            available_bios_names=available_bios_names, bios_dir=bios_dir,
+                        )
+                        result = (gid, status, reason, analysis)
+                    except Exception as exc:
+                        logger.debug(f"[{SELF_ID}] health reanalysis failed ({filename}): {exc}")
+                        result = (gid, "unverified", f"rom-analyzer 재분석 오류: {exc}", None)
+                with counter_lock:
+                    counter[0] += 1
+                    _update_health_progress(current=counter[0], total=total, current_file=filename, status="analyzing", is_running=True)
+                return result
+
+            results = []
+            if rows:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = [executor.submit(analyze_one, row) for row in rows]
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            results.append(future.result())
+                        except Exception as exc:
+                            failed += 1
+                            logger.debug(f"[{SELF_ID}] health worker error: {exc}")
+
+            updates = []
+            old_by_id = {row.get("id"): row for row in rows}
+            for gid, status, reason, analysis in results:
+                old = old_by_id.get(gid) or {}
+                old_status = str(old.get("health_status") or "pass")
+                old_reason = str(old.get("missing_roms") or "")
+                if old_status != status or old_reason != reason:
+                    changed += 1
+                if analysis:
+                    updates.append((
+                        status, reason,
+                        analysis.get("metadata_source") or "rom-analyzer",
+                        int(analysis.get("metadata_confidence") or 0),
+                        analysis.get("source_system") or "rom_analyzer",
+                        gid,
+                    ))
+                else:
+                    updates.append((status, reason, "rom-analyzer", 0, "unverified", gid))
+
+            if updates:
+                with _DB_LOCK:
+                    conn = self._get_db_conn(timeout=60)
+                    try:
+                        conn.executemany(
+                            "UPDATE games SET health_status=?, missing_roms=?, metadata_source=?, metadata_confidence=?, source_system=? WHERE id=?",
+                            updates,
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+
+            _update_health_progress(current=total, total=total, current_file="완료", status="completed", is_running=False, changed=changed, failed=failed)
+        except Exception as exc:
+            logger.exception(f"[{SELF_ID}] health refresh error: {exc}")
+            _update_health_progress(status="error", is_running=False, failed=1, current_file=str(exc))
+
     def _scan_roms(self, new_only=False, force_full=False):
         """기본 roms 폴더 및 설정된 추가 경로의 ROM을 스캔하여 DB에 동기화합니다.
         - new_only: 새로 발견된 게임만 등록 및 커버 검색
@@ -4005,67 +4257,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         except Exception as merge_err:
                             logger.debug(f"[{SELF_ID}] Bios merge error during scan: {merge_err}")
 
-                # 무결성 자동 진단 (Health Status 계산)
-                health_status = "pass"
-                missing_roms_str = ""
-                stem = os.path.splitext(info["filename"])[0].lower()
-                r_core = (rom_info.get("core") or "").lower()
-                r_plat = rom_info.get("platform") or ""
-                gcode = rom_info.get("game_code") or ""
-                required_bios = _normalize_required_archive(rom_info.get("needed_bios") or "")
-                required_parent = _normalize_required_archive(rom_info.get("parent_hint") or "")
-                required_chd = rom_info.get("required_chd") or ""
-                is_arcade = (r_core in ("arcade", "mame2003") or r_plat in ("Arcade", "Neo-Geo"))
-                bios_ready = _is_required_bios_available(required_bios, available_bios_names, bios_dir)
-
-                disk_missing_files = rom_info.get("disk_missing_files") or []
-                if disk_missing_files:
-                    health_status = "incomplete"
-                    missing_roms_str = json.dumps(disk_missing_files[:6], ensure_ascii=False)
-                elif required_chd:
-                    health_status = "chd_required"
-                    missing_roms_str = required_chd
-                elif required_parent and required_parent not in available_rom_names:
-                    health_status = "parent_required"
-                    missing_roms_str = required_parent
-                elif required_bios and not bios_ready:
-                    health_status = "bios_required"
-                    missing_roms_str = required_bios
-                elif is_arcade and curr_file_path.endswith(".zip"):
-                    dat_db_p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arcade_dat.db")
-                    if os.path.isfile(dat_db_p):
-                        try:
-                            with zipfile.ZipFile(curr_file_path, "r") as z_chk:
-                                file_crcs = {f"{z_chk.getinfo(n).CRC:08x}".lower() for n in z_chk.namelist() if not n.startswith(".") and z_chk.getinfo(n).file_size > 0}
-                            
-                            c_dat = sqlite3.connect(dat_db_p, timeout=5)
-                            cur_dat = c_dat.cursor()
-                            target_sys = "MAME2003Plus" if r_core == "mame2003" else "FBNeo"
-                            cur_dat.execute("SELECT r.rom_name, r.crc32 FROM games g JOIN roms r ON g.id = r.game_id WHERE g.name = ? AND g.system_name = ?", (gcode or stem, target_sys))
-                            expected = cur_dat.fetchall()
-                            if not expected and target_sys == "FBNeo":
-                                cur_dat.execute("SELECT r.rom_name, r.crc32 FROM games g JOIN roms r ON g.id = r.game_id WHERE g.name = ? AND g.system_name = 'MAME2003Plus'", (gcode or stem,))
-                                expected = cur_dat.fetchall()
-                            c_dat.close()
-
-                            if expected:
-                                m_roms = [r[0] for r in expected if r[1] not in file_crcs]
-                                if m_roms:
-                                    health_status = "incomplete"
-                                    missing_roms_str = json.dumps(m_roms[:6], ensure_ascii=False)
-                            else:
-                                health_status = "bad_dump_or_unknown"
-                                missing_roms_str = "DAT 미일치 또는 미지원/손상 의심 롬셋"
-                        except Exception:
-                            pass
-
-                # 파일/BIOS/DAT 무결성이 정상이더라도 현재 EmulatorJS Stable 코어에서
-                # 게임별 드라이버 호환성이 차단된 경우는 정상(pass)으로 표시하지 않는다.
-                if health_status == "pass":
-                    unsupported_reason = _emulatorjs_unsupported_reason(rom_info)
-                    if unsupported_reason:
-                        health_status = "unsupported"
-                        missing_roms_str = unsupported_reason
+                # 무결성 자동 진단: 최신 rom-analyzer의 명시적 근거만 사용한다.
+                health_source = rom_info if rom_info.get("metadata_source") == "rom-analyzer" else {}
+                health_status, missing_roms_str = _derive_health_status_from_analysis(
+                    health_source, curr_file_path,
+                    db_core=rom_info.get("core") or "", db_platform=rom_info.get("platform") or "",
+                    available_bios_names=available_bios_names, bios_dir=bios_dir,
+                )
 
                 existing_cover_file = self._resolve_existing_cover(
                     gid,
@@ -5075,7 +5273,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "check_game",
             "get_cover_migration_candidates", "get_bios_migration_candidates",
             "migrate_bios_batch", "migrate_cover_batch",
-            "scan_new_roms", "scan_roms", "full_scan", "health_check",
+            "scan_new_roms", "scan_roms", "full_scan", "health_check", "health_refresh", "health_progress",
             "fetch_missing_covers", "delete_game", "update_title", "save_settings", "search_artwork", "set_artwork",
         }
         if action in admin_actions and not is_admin:
@@ -5154,6 +5352,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 path_roots.sort(key=len, reverse=True)
 
                 for g in games:
+                    # 구버전 DB의 휴리스틱 상태는 새 드롭다운에 그대로 노출하지 않는다.
+                    if g.get("health_status") in ("parent_required", "bad_dump_or_unknown"):
+                        g["health_status"] = "unverified"
+                        if not g.get("missing_roms"):
+                            g["missing_roms"] = "최신 rom-analyzer 재진단이 필요한 기존 상태입니다."
                     gid = g["id"]
                     file_path = g.get("file_path") or ""
                     current_cover = g.get("cover_path") or ""
@@ -5441,153 +5644,105 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             elif action == "full_scan":
                 if not _is_current_user_admin():
                     return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
+                with _HEALTH_PROGRESS_LOCK:
+                    health_busy = bool(_HEALTH_PROGRESS.get("is_running")) or _HEALTH_PROGRESS.get("status") == "queued"
+                if health_busy:
+                    return {"success": False, "error": "무결성 재진단이 진행 중입니다. 완료 후 풀 스캔을 실행하세요."}
                 with _SCAN_PROGRESS_LOCK:
                     is_running = _SCAN_PROGRESS.get("is_running", False)
                 if not is_running:
                     threading.Thread(target=self._scan_roms, kwargs={"force_full": True}, daemon=True).start()
                 return {"success": True, "message": "모든 ROM 파일의 전체 재스캔이 시작되었습니다."}
 
+            elif action == "health_refresh":
+                with _SCAN_PROGRESS_LOCK:
+                    scan_running = bool(_SCAN_PROGRESS.get("is_running"))
+                if scan_running:
+                    return {"success": False, "error": "ROM 스캔이 진행 중입니다. 스캔 완료 후 무결성 진단을 실행하세요."}
+                launch = False
+                with _HEALTH_PROGRESS_LOCK:
+                    running = bool(_HEALTH_PROGRESS.get("is_running"))
+                    queued = _HEALTH_PROGRESS.get("status") == "queued"
+                    if not running and not queued:
+                        _HEALTH_PROGRESS.update({
+                            "is_running": False, "current": 0, "total": 0, "current_file": "",
+                            "status": "queued", "changed": 0, "failed": 0, "updated_at": time.time(),
+                        })
+                        launch = True
+                    progress = dict(_HEALTH_PROGRESS)
+                if launch:
+                    threading.Thread(target=self._refresh_health_statuses, daemon=True).start()
+                return {"success": True, "progress": progress}
+
+            elif action == "health_progress":
+                with _HEALTH_PROGRESS_LOCK:
+                    progress = dict(_HEALTH_PROGRESS)
+                return {"success": True, "progress": progress}
+
             elif action == "health_check":
-                if not _is_current_user_admin():
-                    return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
-                
-                dat_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arcade_dat.db")
-                if not os.path.isfile(dat_db_path):
-                    return {"success": False, "error": "DAT 데이터베이스가 존재하지 않습니다."}
+                all_games = self._db_query(
+                    "SELECT id, filename, file_path, core, platform, title, game_code, needed_bios, "
+                    "metadata_source, metadata_confidence, source_system, "
+                    "COALESCE(health_status, 'unverified') AS health_status, "
+                    "COALESCE(missing_roms, '') AS missing_roms FROM games ORDER BY title ASC"
+                )
 
-                conn_dat = sqlite3.connect(dat_db_path, timeout=10)
-                cur_dat = conn_dat.cursor()
+                buckets = {
+                    "pass": [], "bios_required": [], "chd_required": [], "incomplete": [],
+                    "unsupported": [], "unverified": [], "reclassify_required": [],
+                }
+                for game in all_games:
+                    status = str(game.get("health_status") or "unverified").strip()
+                    if status in ("parent_required", "bad_dump_or_unknown"):
+                        status = "unverified"
+                    if status not in buckets:
+                        status = "unverified"
+                    item = {
+                        "id": game.get("id"),
+                        "title": game.get("title") or game.get("filename") or "",
+                        "filename": game.get("filename") or "",
+                        "core": game.get("core") or "",
+                        "platform": game.get("platform") or "",
+                        "health_status": status,
+                        "metadata_source": game.get("metadata_source") or "",
+                        "metadata_confidence": game.get("metadata_confidence") or 0,
+                        "source_system": game.get("source_system") or "",
+                        "reason": game.get("missing_roms") or "",
+                    }
+                    if status == "bios_required" and not item["reason"]:
+                        item["reason"] = f"필수 BIOS {game.get('needed_bios') or '알 수 없음'} 누락"
+                    elif status == "chd_required" and not item["reason"]:
+                        item["reason"] = "필수 CHD/디스크 이미지가 없습니다."
+                    elif status == "incomplete" and not item["reason"]:
+                        item["reason"] = "M3U/CUE/GDI 등에서 참조하는 파일이 누락되었습니다."
+                    elif status == "unsupported" and not item["reason"]:
+                        item["reason"] = "현재 EmulatorJS Stable 코어에서 구동할 수 없습니다."
+                    elif status == "unverified" and not item["reason"]:
+                        item["reason"] = "rom-analyzer가 충분한 근거로 판정하지 못했습니다."
+                    buckets[status].append(item)
 
-                all_games = self._db_query("SELECT id, filename, file_path, core, platform, title, game_code, needed_bios, metadata_source, metadata_confidence, source_system, COALESCE(health_status, 'pass') AS health_status, COALESCE(missing_roms, '') AS missing_roms FROM games ORDER BY title ASC")
-                
-                pass_count = 0
-                incomplete_list = []
-                chd_list = []
-                unsupported_list = []
-
-                for g in all_games:
-                    gid = g["id"]
-                    fname = g["filename"] or ""
-                    fpath = g["file_path"] or ""
-                    core = (g["core"] or "").lower()
-                    plat = g["platform"] or ""
-                    title = g["title"] or fname
-                    health_status = (g.get("health_status") or "pass").strip() or "pass"
-                    missing_roms = g.get("missing_roms") or ""
-                    needed_bios = _normalize_required_archive(g.get("needed_bios") or "")
-
-                    if not os.path.exists(fpath):
-                        continue
-
-                    # 기존 DB가 예전 스캔 결과(pass)를 가지고 있어도 무결성 진단을 누르는 즉시
-                    # MAME2003 계열 호환성 스냅샷을 조회해 별도 풀스캔 없이 상태를 보정한다.
-                    compatibility_health = None
-                    if health_status in ("pass", "unsupported") and (
-                        core in ("mame", "mame2003", "mame2003_plus") or health_status == "unsupported"
-                    ):
-                        compatibility_health = _mame_compatibility_health(g.get("game_code") or fname)
-                    if compatibility_health:
-                        compat_status, compat_reason = compatibility_health
-                        should_update = False
-                        if compat_status == "unsupported":
-                            should_update = health_status != "unsupported" or missing_roms != compat_reason
-                            health_status = "unsupported"
-                            missing_roms = compat_reason
-                        elif (
-                            compat_status == "pass"
-                            and health_status == "unsupported"
-                            and missing_roms.startswith("MAME2003 계열 게임 호환성 제한:")
-                        ):
-                            should_update = True
-                            health_status = "pass"
-                            missing_roms = ""
-                        if should_update:
-                            self._db_execute(
-                                "UPDATE games SET health_status = ?, missing_roms = ? WHERE id = ?",
-                                (health_status, missing_roms, gid),
-                            )
-
-                    if health_status == "pass":
-                        pass_count += 1
-                        continue
-
-                    if health_status == "unsupported":
-                        unsupported_list.append({
-                            "id": gid,
-                            "title": title,
-                            "filename": fname,
-                            "core": core,
-                            "platform": plat,
-                            "health_status": health_status,
-                            "metadata_source": g.get("metadata_source") or "",
-                            "metadata_confidence": g.get("metadata_confidence") or 0,
-                            "source_system": g.get("source_system") or "",
-                            "reason": missing_roms or "현재 EmulatorJS Stable 코어에서 구동할 수 없습니다.",
-                        })
-                        continue
-
-                    if health_status == "chd_required":
-                        chd_list.append({
-                            "id": gid,
-                            "title": title,
-                            "filename": fname,
-                            "core": core,
-                            "platform": plat,
-                            "metadata_source": g.get("metadata_source") or "",
-                            "metadata_confidence": g.get("metadata_confidence") or 0,
-                            "source_system": g.get("source_system") or "",
-                            "reason": "대용량 CD-ROM/음원 디스크 이미지(.chd)가 필요한 기판 롬셋입니다."
-                        })
-                        continue
-
-                    if health_status == "incomplete":
-                        try:
-                            parsed_missing = json.loads(missing_roms) if missing_roms else []
-                            missing_samples = parsed_missing[:4] if isinstance(parsed_missing, list) else []
-                        except Exception:
-                            missing_samples = []
-                        reason = f"필수 칩셋 누락 ({', '.join(missing_samples[:3])}...)" if missing_samples else "필수 칩셋 누락이 있는 불완전 롬셋입니다."
-                    elif health_status == "bios_required":
-                        reason = f"필수 BIOS/시스템 파일 {needed_bios or missing_roms or '알 수 없음'} 누락"
-                        missing_samples = []
-                    elif health_status == "parent_required":
-                        reason = f"필수 부모 롬 {missing_roms or '알 수 없음'} 누락"
-                        missing_samples = []
-                    elif health_status == "bad_dump_or_unknown":
-                        reason = missing_roms or "DAT 미일치 또는 미지원/손상 의심 롬셋"
-                        missing_samples = []
-                    else:
-                        pass_count += 1
-                        continue
-
-                    incomplete_list.append({
-                        "id": gid,
-                        "title": title,
-                        "filename": fname,
-                        "core": core,
-                        "platform": plat,
-                        "health_status": health_status,
-                        "missing_samples": missing_samples,
-                        "metadata_source": g.get("metadata_source") or "",
-                        "metadata_confidence": g.get("metadata_confidence") or 0,
-                        "source_system": g.get("source_system") or "",
-                        "reason": reason,
-                    })
-
-                conn_dat.close()
-
+                issue_list = buckets["bios_required"] + buckets["incomplete"]
+                with _HEALTH_PROGRESS_LOCK:
+                    progress = dict(_HEALTH_PROGRESS)
                 return {
                     "success": True,
                     "summary": {
                         "total": len(all_games),
-                        "pass": pass_count,
-                        "incomplete": len(incomplete_list),
-                        "chd": len(chd_list),
-                        "unsupported": len(unsupported_list)
+                        "pass": len(buckets["pass"]),
+                        "issues": len(issue_list),
+                        "bios": len(buckets["bios_required"]),
+                        "incomplete": len(buckets["incomplete"]),
+                        "chd": len(buckets["chd_required"]),
+                        "unsupported": len(buckets["unsupported"]),
+                        "unverified": len(buckets["unverified"]),
+                        "reclassify": len(buckets["reclassify_required"]),
                     },
-                    "incomplete_list": incomplete_list,
-                    "chd_list": chd_list,
-                    "unsupported_list": unsupported_list
+                    "issue_list": issue_list,
+                    "chd_list": buckets["chd_required"],
+                    "unsupported_list": buckets["unsupported"],
+                    "unverified_list": buckets["unverified"],
+                    "reclassify_list": buckets["reclassify_required"],
+                    "progress": progress,
                 }
 
             elif action == "scan_roms":

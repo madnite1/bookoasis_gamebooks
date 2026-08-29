@@ -106,6 +106,89 @@ class SecurityHelperTests(unittest.TestCase):
         self.assertIn('game not working', reason)
         self.assertEqual(gamebooks._emulatorjs_unsupported_reason({'emulatorjs_supported': True}), '')
 
+    def test_health_derivation_ignores_legacy_parent_guess(self):
+        status, reason = gamebooks._derive_health_status_from_analysis({
+            "metadata_source": "rom-analyzer",
+            "identity_status": "exact",
+            "metadata_confidence": 99,
+            "core": "arcade",
+            "platform": "Arcade",
+            "parent_hint": "194.zip",
+            "disk_missing_files": [],
+            "needed_bios": "",
+            "required_chd": "",
+            "emulatorjs_supported": True,
+            "is_playable": True,
+        }, "/tmp/1941.zip", db_core="arcade", db_platform="Arcade")
+        self.assertEqual((status, reason), ("pass", ""))
+
+    def test_health_derivation_detects_platform_reclassification(self):
+        status, reason = gamebooks._derive_health_status_from_analysis({
+            "metadata_source": "rom-analyzer",
+            "identity_status": "exact",
+            "metadata_confidence": 99,
+            "core": "n64",
+            "platform": "N64",
+            "disk_missing_files": [],
+            "needed_bios": "",
+            "required_chd": "",
+            "emulatorjs_supported": True,
+            "is_playable": True,
+        }, "/tmp/fighter.zip", db_core="arcade", db_platform="Arcade")
+        self.assertEqual(status, "reclassify_required")
+        self.assertIn("N64", reason)
+
+    def test_health_derivation_marks_partial_as_unverified(self):
+        status, reason = gamebooks._derive_health_status_from_analysis({
+            "metadata_source": "rom-analyzer",
+            "identity_status": "partial",
+            "metadata_confidence": 68,
+            "core": "arcade",
+            "platform": "Arcade",
+            "disk_missing_files": [],
+        }, "/tmp/unknown.zip", db_core="arcade", db_platform="Arcade")
+        self.assertEqual(status, "unverified")
+        self.assertIn("68", reason)
+
+    def test_health_optional_bios_does_not_fail(self):
+        status, reason = gamebooks._derive_health_status_from_analysis({
+            "metadata_source": "rom-analyzer",
+            "identity_status": "exact",
+            "metadata_confidence": 100,
+            "core": "gba",
+            "platform": "GBA",
+            "disk_missing_files": [],
+            "needed_bios": "gba_bios.bin",
+            "bios_mandatory": False,
+            "bios_needed": False,
+            "emulatorjs_supported": True,
+            "is_playable": True,
+        }, "/tmp/game.gba", db_core="gba", db_platform="GBA", available_bios_names=set())
+        self.assertEqual((status, reason), ("pass", ""))
+
+    def test_health_mame_compatibility_overrides_partial_identity(self):
+        status, reason = gamebooks._derive_health_status_from_analysis({
+            "metadata_source": "rom-analyzer",
+            "identity_status": "partial",
+            "metadata_confidence": 87,
+            "core": "arcade",
+            "platform": "Arcade",
+            "game_code": "astrass",
+            "disk_missing_files": [],
+            "needed_bios": "stvbios.zip",
+            "bios_mandatory": True,
+            "emulatorjs_supported": False,
+            "emulatorjs_reason": "Astra SuperStars game not working",
+            "analysis_warnings": ["MAME2003 계열 게임 호환성 제한: mame2003=game not working"],
+            "is_playable": True,
+        }, "/tmp/astrass.zip", db_core="mame2003", db_platform="Arcade", db_game_code="astrass")
+        self.assertEqual(status, "unsupported")
+        self.assertIn("game not working", reason)
+
+    def test_health_arcade_core_alias_is_not_reclassification(self):
+        self.assertTrue(gamebooks._health_core_equivalent("mame2003", "Arcade", "arcade", "Arcade"))
+        self.assertFalse(gamebooks._health_core_equivalent("arcade", "Arcade", "n64", "N64"))
+
     def test_cover_fallback_prefers_platform_and_non_romm_path(self):
         provider_cls = gamebooks.BookoasisGamebooksMetadataProvider
         provider = provider_cls.__new__(provider_cls)
