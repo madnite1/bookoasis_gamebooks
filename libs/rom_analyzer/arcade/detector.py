@@ -337,6 +337,8 @@ class ArcadeDetector:
                 total_roms=dat_match.total_roms if dat_match else 0,
                 match_rate=dat_match.match_rate if dat_match else 0.0,
                 archive_match_rate=dat_match.archive_match_rate if dat_match else 0.0,
+                dat_missing_count=dat_match.missing_count if dat_match else 0,
+                dat_extra_count=dat_match.extra_count if dat_match else 0,
                 dat_system=dat_match.system_name if dat_match else None,
                 dat_status=dat_match.status if dat_match else None,
                 dat_score=dat_match.score if dat_match else 0.0,
@@ -364,6 +366,8 @@ class ArcadeDetector:
                     f"DAT {dat_match.status}: CRC {dat_match.matched_count}/{dat_match.total_roms} "
                     f"(DAT {dat_match.match_rate:.1f}%, archive {dat_match.archive_match_rate:.1f}%)"
                 )
+                if dat_match.extra_count > 0:
+                    summary_parts.append(f"DAT 외 추가 CRC: {dat_match.extra_count}개")
 
             blocked_compatibility = [
                 f"{core_id}={info.driver_status}"
@@ -385,6 +389,7 @@ class ArcadeDetector:
                     detail=(
                         f"{dat_match.status}/{dat_match.match_basis}: {dat_match.matched_count}/{dat_match.total_roms} ROM CRC matched; "
                         f"DAT coverage={dat_match.match_rate:.2f}%, archive coverage={dat_match.archive_match_rate:.2f}%, "
+                        f"missing={dat_match.missing_count}, extra={dat_match.extra_count}, "
                         f"rank score={dat_match.score:.3f}"
                     ),
                     source=dat_match.system_name,
@@ -427,6 +432,12 @@ class ArcadeDetector:
             )
             if dat_match and dat_match.status == "ambiguous":
                 result.add_warning("DAT CRC 후보 점수가 근접하여 게임 식별이 모호합니다.")
+            if dat_match and dat_match.extra_count > 0 and dat_match.missing_count == 0:
+                result.add_warning(
+                    f"DAT 필수 ROM {dat_match.matched_count}/{dat_match.total_roms}은 모두 일치하지만 "
+                    f"DAT에 없는 추가 ROM CRC {dat_match.extra_count}개가 아카이브에 포함되어 있습니다. "
+                    "필수 ROM 누락은 없어 게임 식별 신뢰도는 유지합니다."
+                )
             if blocked_compatibility:
                 result.add_warning(
                     f"MAME2003 계열 게임 호환성 제한: {', '.join(blocked_compatibility)}"

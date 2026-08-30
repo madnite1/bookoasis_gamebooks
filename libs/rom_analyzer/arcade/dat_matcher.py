@@ -55,6 +55,8 @@ class DatMatchResult:
     match_rate: float = 0.0
     archive_crc_count: int = 0
     archive_match_rate: float = 0.0
+    missing_count: int = 0
+    extra_count: int = 0
     matched_crcs: List[str] = field(default_factory=list)
     match_basis: str = ""
     score: float = 0.0
@@ -323,6 +325,8 @@ class DatMatcher:
             match_rate=round(best.dat_coverage * 100.0, 2),
             archive_crc_count=best.archive_crc_count,
             archive_match_rate=round(best.archive_coverage * 100.0, 2),
+            missing_count=max(0, best.total_roms - best.matched_count),
+            extra_count=max(0, best.archive_crc_count - best.matched_count),
             matched_crcs=best.matched_crcs,
             match_basis=basis,
             score=best.score,
@@ -371,8 +375,18 @@ class DatMatcher:
                 )
                 if ambiguous:
                     status = "ambiguous"
-                elif best.dat_coverage >= 0.999 and best.archive_coverage >= 0.95:
+                elif (
+                    best.dat_coverage >= 0.999
+                    and (
+                        best.archive_coverage >= 0.95
+                        or (best.exact_name and best.matched_count >= 2)
+                    )
+                ):
                     status = "exact"
+                elif best.dat_coverage >= 0.999 and best.matched_count >= 2:
+                    # 필수 DAT ROM이 모두 있으면 추가 파일 때문에 archive coverage가 낮아져도
+                    # 게임 identity 자체는 강하게 유지한다. exact 파일명까지 맞을 때만 exact로 승격한다.
+                    status = "strong"
                 elif (
                     best.matched_count >= 2
                     and best.dat_coverage >= 0.85

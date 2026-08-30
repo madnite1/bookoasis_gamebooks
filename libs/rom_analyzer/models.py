@@ -55,6 +55,8 @@ class ArcadeInfo:
     total_roms: int = 0
     match_rate: float = 0.0
     archive_match_rate: float = 0.0
+    dat_missing_count: int = 0
+    dat_extra_count: int = 0
     dat_system: Optional[str] = None
     dat_status: Optional[str] = None
     dat_score: float = 0.0
