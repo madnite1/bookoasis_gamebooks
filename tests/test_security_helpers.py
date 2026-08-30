@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 import bookoasis_gamebooks as gamebooks
 
 class SecurityHelperTests(unittest.TestCase):
@@ -219,6 +220,28 @@ class SecurityHelperTests(unittest.TestCase):
                 '젤다의전설.zip',
                 'gba',
             )
+            self.assertEqual(os.path.realpath(resolved), os.path.realpath(expected))
+
+    def test_cover_fallback_reuses_prebuilt_index_without_rescan(self):
+        provider_cls = gamebooks.BookoasisGamebooksMetadataProvider
+        provider = provider_cls.__new__(provider_cls)
+        with tempfile.TemporaryDirectory() as td:
+            expected = Path(td, 'roms_arcade_avspirit.zip_22222222.png')
+            expected.write_bytes(b'cover')
+            Path(td, 'ignored.txt').write_text('not a cover', encoding='utf-8')
+            provider._get_covers_dir = lambda: td
+            provider._db_execute = lambda *args, **kwargs: 1
+
+            cover_index = provider._build_cover_file_index()
+            self.assertEqual(len(cover_index['entries']), 1)
+            provider._get_covers_dir = mock.Mock(side_effect=AssertionError('커버 경로를 다시 조회하면 안 됩니다.'))
+            with mock.patch.object(gamebooks.os, 'scandir', side_effect=AssertionError('커버 폴더를 다시 스캔하면 안 됩니다.')):
+                resolved = provider._resolve_existing_cover(
+                    'roms_mame2003_avspirit.zip_deadbeef',
+                    'avspirit.zip',
+                    'mame2003',
+                    cover_index=cover_index,
+                )
             self.assertEqual(os.path.realpath(resolved), os.path.realpath(expected))
 
     def test_available_bios_list_returns_only_file_basenames(self):
