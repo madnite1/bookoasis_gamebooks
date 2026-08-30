@@ -3403,6 +3403,21 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         os.makedirs(bios_dir, exist_ok=True)
         return bios_dir
 
+    def _list_available_bios_names(self):
+        """BIOS 관리/클라이언트 판정용 파일명 목록을 경로 노출 없이 반환한다."""
+        bios_dir = self._get_bios_dir()
+        if not bios_dir or not os.path.isdir(bios_dir):
+            return []
+        try:
+            return sorted({
+                entry.name.lower()
+                for entry in os.scandir(bios_dir)
+                if entry.is_file() and not entry.name.startswith(".")
+            })
+        except OSError as e:
+            logger.warning(f"[{SELF_ID}] BIOS file list error ({bios_dir}): {e}")
+            return []
+
     def _get_runtime_bios_candidates(self, required_bios):
         req = _normalize_required_archive(required_bios)
         if not req:
@@ -5408,7 +5423,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "success": True,
                     "games": visible_games,
                     "total_count": len(visible_games),
-                    "available_bios": [],
+                    # 절대 경로/파일 내용은 노출하지 않고 실제 BIOS 파일명만 전달한다.
+                    "available_bios": self._list_available_bios_names(),
                     "user_id": user_id,
                     "is_admin": is_admin,
                     "config": {

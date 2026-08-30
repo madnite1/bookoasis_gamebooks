@@ -221,6 +221,21 @@ class SecurityHelperTests(unittest.TestCase):
             )
             self.assertEqual(os.path.realpath(resolved), os.path.realpath(expected))
 
+    def test_available_bios_list_returns_only_file_basenames(self):
+        provider_cls = gamebooks.BookoasisGamebooksMetadataProvider
+        provider = provider_cls.__new__(provider_cls)
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, 'NeoGeo.ZIP').write_bytes(b'bios')
+            Path(td, 'scph5501.bin').write_bytes(b'bios')
+            Path(td, '.hidden.bin').write_bytes(b'hidden')
+            Path(td, 'subdir').mkdir()
+            provider._get_bios_dir = lambda: td
+
+            self.assertEqual(
+                provider._list_available_bios_names(),
+                ['neogeo.zip', 'scph5501.bin'],
+            )
+
 
 
 if __name__ == '__main__':
