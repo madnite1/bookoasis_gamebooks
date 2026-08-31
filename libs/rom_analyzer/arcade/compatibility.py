@@ -1,78 +1,65 @@
 # -*- coding: utf-8 -*-
-"""MAME2003 계열 게임별 실행 호환성 조회.
+"""MAME2003 계열 게임별 실행 호환성 해석 래퍼.
 
-런타임에서는 네트워크를 사용하지 않고 패키지에 포함된 SQLite 스냅샷만 조회한다.
-DB는 프로젝트 루트의 ``build_mame_compatibility_db.py``로 공식 Libretro
-호환성 표에서 갱신할 수 있다.
+원시 SQLite 조회는 rom_database가 담당하고, 이 모듈은 기존 Analyzer 공개 모델로
+변환하여 하위 호환 API를 유지한다.
 """
 
 from functools import lru_cache
-import os
-import sqlite3
 from typing import Dict, Optional
 
+from rom_database.paths import DatabasePaths
+from rom_database.repositories.compatibility import CompatibilityRepository, CORE_SOURCE_URLS
+
+from ..database_context import get_active_database
 from ..models import ArcadeCoreCompatibility
 
 
-_COMPAT_DB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "data", "mame_compatibility.db"
-)
-
-CORE_SOURCE_URLS = {
-    "mame2003": "https://buildbot.libretro.com/compatibility_lists/cores/mame2003/mame2003.html",
-    "mame2003_plus": "https://buildbot.libretro.com/compatibility_lists/cores/mame2003-plus/mame2003-plus.html",
-}
-
+_DEFAULT_COMPAT_DB_PATH = str(DatabasePaths.default().compatibility)
+_COMPAT_DB_PATH = _DEFAULT_COMPAT_DB_PATH
 _WORKING_DRIVER_STATUS = "good"
 
 
 class ArcadeCompatibilityManager:
-    """패키지 내 MAME2003 호환성 스냅샷 조회기."""
+    """MAME2003 호환성 raw record를 Analyzer 결과 모델로 변환한다."""
+
+    @classmethod
+    def _repository(cls) -> CompatibilityRepository:
+        # 과거 _COMPAT_DB_PATH 교체 계약은 유지하되, 기본 경로일 때는 현재 분석 컨텍스트의 DB를 쓴다.
+        if _COMPAT_DB_PATH != _DEFAULT_COMPAT_DB_PATH:
+            return CompatibilityRepository(_COMPAT_DB_PATH)
+        return get_active_database().compatibility
 
     @classmethod
     def is_available(cls) -> bool:
-        return os.path.isfile(_COMPAT_DB_PATH)
+        return cls._repository().is_available()
 
     @classmethod
-    def _connect(cls):
-        con = sqlite3.connect(f"file:{_COMPAT_DB_PATH}?mode=ro&immutable=1", uri=True)
-        con.row_factory = sqlite3.Row
-        return con
+    def get(cls, rom_name: str, core_id: str) -> Optional[ArcadeCoreCompatibility]:
+        repository = cls._repository()
+        database_key = str(repository.db_path.resolve())
+        return cls._get_cached(database_key, rom_name, core_id)
 
     @classmethod
     @lru_cache(maxsize=4096)
-    def get(cls, rom_name: str, core_id: str) -> Optional[ArcadeCoreCompatibility]:
-        rom = (rom_name or "").lower().strip()
-        core = (core_id or "").lower().strip()
-        if not rom or core not in CORE_SOURCE_URLS or not cls.is_available():
+    def _get_cached(
+        cls, database_key: str, rom_name: str, core_id: str
+    ) -> Optional[ArcadeCoreCompatibility]:
+        record = CompatibilityRepository(database_key).find(rom_name, core_id)
+        if record is None:
             return None
-        try:
-            with cls._connect() as con:
-                row = con.execute(
-                    """SELECT core_id, rom_name, description, driver_status,
-                              color_status, sound_status, graphics_status,
-                              samples, bios_required
-                       FROM compatibility
-                       WHERE core_id=? AND rom_name=?""",
-                    (core, rom),
-                ).fetchone()
-        except (OSError, sqlite3.Error):
-            return None
-        if not row:
-            return None
-        driver_status = (row["driver_status"] or "unknown").strip().lower()
         return ArcadeCoreCompatibility(
-            core_id=row["core_id"],
-            rom_name=row["rom_name"],
-            description=row["description"] or "",
-            supported=driver_status == _WORKING_DRIVER_STATUS,
-            driver_status=driver_status,
-            color_status=row["color_status"] or None,
-            sound_status=row["sound_status"] or None,
-            graphics_status=row["graphics_status"] or None,
-            samples=row["samples"] or None,
-            bios_required=bool(row["bios_required"]),
-            source_url=CORE_SOURCE_URLS.get(core),
+            core_id=record.core_id,
+            rom_name=record.rom_name,
+            description=record.description,
+            supported=record.driver_status == _WORKING_DRIVER_STATUS,
+            driver_status=record.driver_status,
+            color_status=record.color_status,
+            sound_status=record.sound_status,
+            graphics_status=record.graphics_status,
+            samples=record.samples,
+            bios_required=record.bios_required,
+            source_url=record.source_url,
         )
 
     @classmethod
@@ -86,4 +73,4 @@ class ArcadeCompatibilityManager:
 
     @classmethod
     def clear_cache(cls) -> None:
-        cls.get.cache_clear()
+        cls._get_cached.cache_clear()

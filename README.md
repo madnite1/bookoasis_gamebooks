@@ -55,6 +55,7 @@
 * **📁 커버 이미지 저장 폴더 사용자 지정 및 실시간 마이그레이션**: 설정에서 커버 저장 폴더(예: NAS 마운트 경로)를 지정하면, 기존 커버 이미지들을 새 폴더로 자동 이동하며 실시간 프로그레스바로 진행 상태를 안내합니다.
 
 ### 4. 🗄️ 27,000+ 통합 DAT DB 및 롬 자동 변환 / 재배치 파이프라인
+* **`rom_database` 참조 계층 분리**: `rom-analyzer` 1.3.0과 함께 독립 `rom_database` 패키지를 vendor하며, ROM 메타데이터·DAT·MAME 호환성 SQLite DB는 `libs/rom_database/data/`에서 관리합니다. `rom_database`는 원시 참조 사실을 제공하고 최종 식별·실행 가능성 판정은 `rom-analyzer`가 담당합니다.
 * **정밀 CRC32 분석 & 클론셋 최적화**: MAME/FBNeo 및 주요 콘솔 기종의 27,000여 개 롬셋 정보를 내장한 초경량 SQLite DAT DB(`arcade_dat.db`)를 탑재하여 파일명이 영문 약칭이거나 `.7z` 압축이어도 정확한 한글 타이틀과 기종을 100% 감지하며, 클론 롬셋(예: 1944u)을 정확히 매칭합니다.
 * **⚡ 초고속 비동기 풀스캔 (Non-blocking Full Scan)**: 수천 개의 롬도 브라우저 타임아웃 없이 백그라운드 워커 스레드에서 초고속으로 병렬 분석하며, 고스트(Ghost) 레코드를 완벽히 자동 정리하고 진행률을 실시간 제공합니다.
 * **기종별 자동 폴더 재배치**: 스캔 시 롬이 잘못된 기종 폴더에 위치해 있으면 올바른 코어 하위 폴더(예: `snes/`, `gba/`, `arcade/` 등)로 안전하게 물리적 이동을 진행합니다.
@@ -137,12 +138,14 @@
 │       ├── __init__.py                    # 모듈 패키지 진입점
 │       ├── bookoasis_gamebooks.py         # 플러그인 백엔드 (Flask 라우트 & 멀티 코어 감지)
 │       ├── arcade_dat.db                  # 27,000+ 게임 내장 All-In-One DAT DB (CRC32 정밀 매칭)
-│       ├── VERSION                        # 버전 정보 (v1.9.17)
+│       ├── VERSION                        # 버전 정보 (v1.9.18)
 │       ├── LICENSE                        # 오픈소스 라이선스 (GNU AGPL-3.0)
 │       ├── index.html                     # UI 레이아웃, 조작키, 설정 & 바이오스 모달
 │       ├── style.css                      # 모던 레트로 다크 테마 & 반응형 스타일
 │       ├── script.js                      # 에뮬레이터 코어 제어, 커버 큐 모니터링 & 바이오스 페이징
 │       ├── requirements.txt               # 의존성 라이브러리 목록 (py7zr)
+│       ├── libs/rom_analyzer/             # ROM 식별·판정 엔진 vendor 스냅샷
+│       ├── libs/rom_database/             # 메타데이터·DAT·코어 호환성 참조 DB 계층
 │       └── README.md                      # 플러그인 상세 안내 문서
 │
 └── data/

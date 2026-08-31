@@ -11,6 +11,8 @@ import hashlib
 from typing import Union, Optional, Dict, Any
 from pathlib import Path
 
+from rom_database import RomDatabase
+
 from .models import RomAnalysisResult, ArcadeInfo, DiscInfo, BiosInfo, HeaderMetadata, DetectionEvidence
 from .arcade.detector import ArcadeDetector
 from .arcade.dat_matcher import DatMatcher
@@ -18,6 +20,7 @@ from .disc.inspector import DiscInspector
 from .headers.detector import ConsoleHeaderDetector
 from .evidence import EvidenceScorer
 from .core_info import CoreInfoManager
+from .database_context import use_database
 
 
 # 일반 확장자 기반 기본 시스템 매핑 테이블 (헤더 미인식 시 폴백)
@@ -94,10 +97,48 @@ _CONSOLE_ARCHIVE_DIRECT_EXTENSIONS = {
 
 
 class RomAnalyzer:
-    """통합 ROM 정밀 분석기 클래스"""
+    """통합 ROM 정밀 분석기.
+
+    기본 생성자는 패키지 기본 참조 DB를 사용하며, RomDatabase를 주입하면 해당
+    분석 인스턴스의 실행 컨텍스트에서만 커스텀 DB가 사용된다.
+    """
+
+    def __init__(self, database: Optional[RomDatabase] = None):
+        self.database = database or RomDatabase.default()
+
+    def analyze(
+        self,
+        file_path: Optional[Union[str, Path, bool]] = None,
+        compute_hashes: bool = False,
+    ) -> RomAnalysisResult:
+        """ROM을 분석한다.
+
+        ``RomAnalyzer(database=db).analyze(path)`` 인스턴스 호출을 기본으로 하며,
+        1.2.x 이전의 ``RomAnalyzer.analyze(path)`` 클래스 직접 호출도 호환한다.
+        """
+        if isinstance(self, RomAnalyzer):
+            if file_path is None or isinstance(file_path, bool):
+                raise TypeError("분석할 ROM 파일 경로가 필요합니다.")
+            database = self.database
+            target = file_path
+            hashes = compute_hashes
+        else:
+            # 일반 메서드를 클래스에서 직접 호출하면 첫 번째 인수에 경로가 전달된다.
+            # 과거 두 번째 positional 인수는 compute_hashes였으므로 bool인 경우 보존한다.
+            target = self
+            database = RomDatabase.default()
+            if isinstance(file_path, bool):
+                hashes = file_path
+            elif file_path is None:
+                hashes = compute_hashes
+            else:
+                raise TypeError("RomAnalyzer.analyze()의 인수가 올바르지 않습니다.")
+
+        with use_database(database):
+            return RomAnalyzer._analyze(target, compute_hashes=hashes)
 
     @classmethod
-    def analyze(cls, file_path: Union[str, Path], compute_hashes: bool = False) -> RomAnalysisResult:
+    def _analyze(cls, file_path: Union[str, Path], compute_hashes: bool = False) -> RomAnalysisResult:
         """
         주어진 롬 파일 경로를 정밀 분석하여 RomAnalysisResult 객체로 반환.
 
@@ -429,12 +470,15 @@ class RomAnalyzer:
             result.add_warning(f"해시 계산 실패: {e}")
 
 
+_DEFAULT_ANALYZER = RomAnalyzer()
+
+
 def analyze(file_path: Union[str, Path], compute_hashes: bool = False) -> RomAnalysisResult:
-    """ROM 분석 기본 진입 함수"""
-    return RomAnalyzer.analyze(file_path, compute_hashes=compute_hashes)
+    """기본 참조 DB를 사용하는 ROM 분석 진입 함수."""
+    return _DEFAULT_ANALYZER.analyze(file_path, compute_hashes=compute_hashes)
 
 
 # 유저 요청 별칭 함수 (모듈.analyzer(패스) 지원)
 def analyzer(file_path: Union[str, Path], compute_hashes: bool = False) -> RomAnalysisResult:
-    """ROM 분석 별칭 함수 (analyzer)"""
-    return RomAnalyzer.analyze(file_path, compute_hashes=compute_hashes)
+    """기본 참조 DB를 사용하는 ROM 분석 별칭 함수."""
+    return _DEFAULT_ANALYZER.analyze(file_path, compute_hashes=compute_hashes)

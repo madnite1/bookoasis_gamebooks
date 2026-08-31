@@ -11,14 +11,23 @@ sys.path[:0] = [str(ROOT), str(LIBS)]
 
 import bookoasis_gamebooks as gamebooks
 import rom_analysis_adapter as adapter
+import rom_analyzer
+import rom_database
 
 
 class RomAnalysisAdapterTests(unittest.TestCase):
     def test_vendored_analyzer_imports(self):
         self.assertTrue(adapter.is_analyzer_available())
         info = adapter.get_vendor_info()
-        self.assertEqual(info.get("version"), "1.1.0")
+        self.assertEqual(info.get("version"), rom_analyzer.__version__)
         self.assertTrue(info.get("git_commit"))
+        self.assertIn("rom_analyzer", info.get("packages", []))
+        self.assertIn("rom_database", info.get("packages", []))
+        self.assertEqual(Path(rom_database.__file__).resolve().parent, (LIBS / "rom_database").resolve())
+        db_paths = rom_database.DatabasePaths.default()
+        self.assertTrue(db_paths.metadata.is_file())
+        self.assertTrue(db_paths.dat.is_file())
+        self.assertTrue(db_paths.compatibility.is_file())
 
     def test_result_conversion_keeps_gamebooks_contract(self):
         with tempfile.TemporaryDirectory() as td:

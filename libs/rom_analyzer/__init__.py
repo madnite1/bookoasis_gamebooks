@@ -11,7 +11,7 @@ from .evidence import EvidenceScorer
 from .core_info import CoreInfoManager, CoreInfo, CoreFirmwareRequirement, LIBRETRO_CORES_CATALOG, EMULATORJS_STABLE_CORES, EMULATORJS_STABLE_VERSION, EJS_SYSTEM_ALIAS_BY_ROM_SYSTEM
 from .providers import ScreenScraperProvider, IGDBProvider, LibretroProvider, ScrapedGameMetadata, ScrapedArtwork
 
-__version__ = "1.1.0"
+__version__ = "1.3.0"
 __all__ = [
     "analyze",
     "analyzer",

@@ -1,5 +1,6 @@
 *.db
 !arcade_dat.db
+!libs/rom_database/data/*.db
 *.db-wal
 *.db-shm
 __pycache__/

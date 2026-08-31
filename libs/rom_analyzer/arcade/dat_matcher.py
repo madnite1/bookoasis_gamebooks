@@ -6,13 +6,19 @@ from functools import lru_cache
 import logging
 import math
 import os
-import sqlite3
 import zipfile
 import zlib
 from typing import Dict, List, Optional, Sequence
 
+from rom_database.paths import DatabasePaths
+from rom_database.repositories.dat import DatRepository
+
+from ..database_context import get_active_database
+
 logger = logging.getLogger(__name__)
-_DAT_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "arcade_dat.db")
+# 테스트/외부 도구의 기존 경로 주입 계약을 유지하면서 기본값만 rom_database로 이동한다.
+_DEFAULT_DAT_DB_PATH = str(DatabasePaths.default().dat)
+_DAT_DB_PATH = _DEFAULT_DAT_DB_PATH
 _SOURCE_PRIORITY = {"FBNeo": 1.0, "MAME2003Plus": 0.8, "MAME": 0.7, "MAME_Softlist": 0.6}
 _AMBIGUOUS_GAP = 0.035
 _MAX_CRC_CANDIDATES = 64
@@ -84,7 +90,7 @@ class DatMatchResult:
 class DatMatcher:
     @classmethod
     def is_available(cls) -> bool:
-        return os.path.isfile(_DAT_DB_PATH)
+        return cls._repository().is_available()
 
     @classmethod
     def collect_archive_crcs(cls, file_path: str) -> List[str]:
@@ -118,11 +124,16 @@ class DatMatcher:
             stat = os.stat(file_path)
         except OSError:
             return None
-        return cls._match_archive_cached(os.path.abspath(file_path), stat.st_size, stat.st_mtime_ns)
+        database_key = str(cls._repository().db_path.resolve())
+        return cls._match_archive_cached(
+            os.path.abspath(file_path), stat.st_size, stat.st_mtime_ns, database_key
+        )
 
     @classmethod
     @lru_cache(maxsize=256)
-    def _match_archive_cached(cls, file_path: str, _size: int, _mtime_ns: int) -> Optional[DatMatchResult]:
+    def _match_archive_cached(
+        cls, file_path: str, _size: int, _mtime_ns: int, _database_key: str
+    ) -> Optional[DatMatchResult]:
         stem = os.path.splitext(os.path.basename(file_path))[0].lower().strip()
         return cls.match(stem, cls.collect_archive_crcs(file_path))
 
@@ -150,11 +161,16 @@ class DatMatcher:
             stat = os.stat(file_path)
         except OSError:
             return None
-        return cls._match_file_cached(os.path.abspath(file_path), stat.st_size, stat.st_mtime_ns)
+        database_key = str(cls._repository().db_path.resolve())
+        return cls._match_file_cached(
+            os.path.abspath(file_path), stat.st_size, stat.st_mtime_ns, database_key
+        )
 
     @classmethod
     @lru_cache(maxsize=256)
-    def _match_file_cached(cls, file_path: str, _size: int, _mtime_ns: int) -> Optional[DatMatchResult]:
+    def _match_file_cached(
+        cls, file_path: str, _size: int, _mtime_ns: int, _database_key: str
+    ) -> Optional[DatMatchResult]:
         crc = cls.collect_file_crc(file_path)
         if not crc:
             return None
@@ -175,21 +191,21 @@ class DatMatcher:
         return cls._match((stem or "").lower().strip(), [str(c).lower() for c in crcs if c])
 
     @classmethod
-    def _connect(cls):
-        con = sqlite3.connect(f"file:{_DAT_DB_PATH}?mode=ro&immutable=1", uri=True)
-        con.row_factory = sqlite3.Row
-        return con
+    def _repository(cls) -> DatRepository:
+        # 기존 테스트가 _DAT_DB_PATH를 임시 DB로 교체하는 계약은 유지한다.
+        # 기본 경로일 때는 현재 분석 컨텍스트에 주입된 RomDatabase의 DAT 저장소를 사용한다.
+        if _DAT_DB_PATH != _DEFAULT_DAT_DB_PATH:
+            return DatRepository(_DAT_DB_PATH)
+        return get_active_database().dat
 
     @classmethod
-    def _crc_frequencies(cls, con, crcs: Sequence[str]) -> Dict[str, int]:
-        if not crcs:
-            return {}
-        marks = ",".join("?" for _ in crcs)
-        rows = con.execute(
-            f"SELECT crc32, COUNT(DISTINCT game_id) AS n FROM roms WHERE crc32 IN ({marks}) GROUP BY crc32",
-            list(crcs),
-        ).fetchall()
-        return {str(r["crc32"]).lower(): int(r["n"] or 0) for r in rows}
+    def _connect(cls) -> DatRepository:
+        """과거 내부 호출 형태를 유지하는 repository 별칭."""
+        return cls._repository()
+
+    @classmethod
+    def _crc_frequencies(cls, repository: DatRepository, crcs: Sequence[str]) -> Dict[str, int]:
+        return repository.crc_frequencies(crcs)
 
     @staticmethod
     def _rarity_weight(freq: int) -> float:
@@ -199,29 +215,16 @@ class DatMatcher:
         return 1.0 / math.log2(freq + 1.0)
 
     @classmethod
-    def _expected_crc_map(cls, con, rows) -> Dict[int, set]:
+    def _expected_crc_map(cls, repository: DatRepository, rows) -> Dict[int, set]:
         game_ids = [int(row["id"]) for row in rows]
-        if not game_ids:
-            return {}
-        marks = ",".join("?" for _ in game_ids)
-        result: Dict[int, set] = {gid: set() for gid in game_ids}
-        for row in con.execute(
-            f"SELECT game_id, crc32 FROM roms WHERE game_id IN ({marks}) AND crc32 IS NOT NULL AND crc32!=''",
-            game_ids,
-        ).fetchall():
-            result[int(row["game_id"])].add(str(row["crc32"]).lower())
-        return result
+        return repository.expected_crc_map(game_ids)
 
     @classmethod
-    def _build_candidate(cls, con, row, archive_crcs: Sequence[str], stem: str,
+    def _build_candidate(cls, repository: DatRepository, row, archive_crcs: Sequence[str], stem: str,
                          crc_freq: Dict[str, int], expected_crcs=None) -> DatCandidate:
         gid = int(row["id"])
         if expected_crcs is None:
-            expected = con.execute(
-                "SELECT crc32 FROM roms WHERE game_id=? AND crc32 IS NOT NULL AND crc32!=''",
-                (gid,),
-            ).fetchall()
-            expected_crcs = {str(r[0]).lower() for r in expected}
+            expected_crcs = repository.expected_crc_map([gid]).get(gid, set())
         archive_set = set(archive_crcs)
         matched = sorted(expected_crcs & archive_set)
         total = len(expected_crcs)
@@ -266,47 +269,19 @@ class DatMatcher:
         )
 
     @classmethod
-    def _candidate_rows(cls, con, stem: str, crcs: Sequence[str], unique_crcs: Sequence[str]):
-        rows = {}
-        # Exact archive name always remains a candidate, even with zero/one CRC hit.
-        for row in con.execute("SELECT * FROM games WHERE name=?", (stem,)).fetchall():
-            rows[int(row["id"])] = row
-        if crcs:
-            marks = ",".join("?" for _ in crcs)
-            # 먼저 roms 테이블에서 game_id별 hit만 집계하고, games 정보는 결과에
-            # 필요한 후보만 후속 조회한다. 큰 g.* JOIN/GROUP BY보다 훨씬 저렴하다.
-            hit_rows = con.execute(
-                f"""SELECT game_id, COUNT(DISTINCT crc32) AS hits
-                    FROM roms
-                    WHERE crc32 IN ({marks})
-                    GROUP BY game_id HAVING hits >= 2""",
-                list(crcs),
-            ).fetchall()
-            hit_map = {int(r["game_id"]): int(r["hits"] or 0) for r in hit_rows}
-            game_ids = list(hit_map)
-            game_rows = []
-            for start in range(0, len(game_ids), 800):
-                chunk = game_ids[start:start + 800]
-                chunk_marks = ",".join("?" for _ in chunk)
-                game_rows.extend(con.execute(
-                    f"SELECT * FROM games WHERE id IN ({chunk_marks})", chunk
-                ).fetchall())
-            game_rows.sort(key=lambda r: (
-                -hit_map.get(int(r["id"]), 0),
-                str(r["name"] or ""),
-                str(r["system_name"] or ""),
-            ))
-            for row in game_rows[:_MAX_CRC_CANDIDATES]:
-                rows[int(row["id"])] = row
-        if unique_crcs:
-            marks = ",".join("?" for _ in unique_crcs)
-            # A globally unique CRC can identify a renamed single-ROM image by itself.
-            for row in con.execute(
-                f"SELECT DISTINCT g.* FROM roms r JOIN games g ON r.game_id=g.id WHERE r.crc32 IN ({marks})",
-                list(unique_crcs),
-            ).fetchall():
-                rows[int(row["id"])] = row
-        return list(rows.values())
+    def _candidate_rows(
+        cls,
+        repository: DatRepository,
+        stem: str,
+        crcs: Sequence[str],
+        unique_crcs: Sequence[str],
+    ):
+        return repository.candidate_rows(
+            stem,
+            crcs,
+            unique_crcs,
+            max_crc_candidates=_MAX_CRC_CANDIDATES,
+        )
 
     @classmethod
     def _to_result(cls, best: DatCandidate, candidates: List[DatCandidate], status: str) -> DatMatchResult:
