@@ -5345,44 +5345,118 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         try:
             if action == "list_games":
-                # DB에 게임 데이터가 한 건도 없을 때만 최초 1회 자동 초기 스캔
+                # 목록 화면은 서버 페이징을 사용한다. 브라우저가 전체 라이브러리를 한 번에
+                # 내려받지 않도록 검색/필터/정렬까지 SQL에 적용한 뒤 필요한 페이지만 반환한다.
                 game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
-                if not game_count_row or game_count_row[0]["cnt"] == 0:
+                library_total_count = int(game_count_row[0]["cnt"] if game_count_row else 0)
+                if library_total_count == 0:
                     self._scan_roms()
+                    game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
+                    library_total_count = int(game_count_row[0]["cnt"] if game_count_row else 0)
+
+                def _request_int(name, default, minimum, maximum):
+                    try:
+                        value = int(request.args.get(name, str(default)))
+                    except (TypeError, ValueError):
+                        value = default
+                    return max(minimum, min(maximum, value))
+
+                page_limit = _request_int("limit", 40, 1, 100)
+                page_offset = _request_int("offset", 0, 0, 100000000)
+                category = str(request.args.get("category", "all") or "all").strip().lower()
+                sort_mode = str(request.args.get("sort", "newest") or "newest").strip().lower()
+                status_filter = str(request.args.get("status", "all") or "all").strip().lower()
+                favorite_only = str(request.args.get("favorite_only", "0") or "0").strip().lower() in ("1", "true", "yes", "on")
+                search_query = str(request.args.get("q", "") or "").strip().casefold()
+
+                where_parts = []
+                where_args = []
+
+                if favorite_only:
+                    where_parts.append("COALESCE(u.is_favorite, 0) = 1")
+
+                allowed_statuses = {
+                    "pass", "bios_required", "chd_required", "incomplete",
+                    "unsupported", "unverified", "reclassify_required",
+                }
+                if status_filter in allowed_statuses:
+                    if status_filter == "unverified":
+                        where_parts.append(
+                            "COALESCE(g.health_status, 'unverified') IN ('unverified', 'parent_required', 'bad_dump_or_unknown')"
+                        )
+                    else:
+                        where_parts.append("COALESCE(g.health_status, 'unverified') = ?")
+                        where_args.append(status_filter)
+
+                core_expr = "LOWER(COALESCE(g.core, ''))"
+                platform_expr = "LOWER(COALESCE(g.platform, ''))"
+                category_sql = {
+                    "snes": f"({core_expr} = 'snes' OR {platform_expr} = 'snes')",
+                    "gba": f"({core_expr} = 'gba' OR {platform_expr} = 'gba')",
+                    "nes": f"({core_expr} = 'nes' OR {platform_expr} IN ('nes', 'fds'))",
+                    "gb": f"({core_expr} IN ('gb', 'gbc') OR {platform_expr} IN ('gb', 'gbc'))",
+                    "nds": f"({core_expr} = 'nds' OR {platform_expr} = 'nds')",
+                    "n64": f"({core_expr} = 'n64' OR {platform_expr} = 'n64')",
+                    "genesis": f"({core_expr} IN ('segamd', 'segams', 'segagg', 'sega32x', 'segacd', 'segasaturn') OR {platform_expr} IN ('genesis', 'mastersystem', 'gamegear', 'sega32x', 'saturn'))",
+                    "psx": f"({core_expr} = 'psx' OR {platform_expr} = 'ps1')",
+                    "psp": f"({core_expr} = 'psp' OR {platform_expr} = 'psp')",
+                    "arcade": f"({core_expr} IN ('arcade', 'mame2003') OR {platform_expr} IN ('arcade', 'neo-geo'))",
+                    "neogeo": f"({platform_expr} IN ('neo-geo', 'neogeo'))",
+                    "other": f"({platform_expr} NOT IN ('snes', 'gba', 'nes', 'fds', 'gb', 'gbc', 'nds', 'n64', 'genesis', 'mastersystem', 'gamegear', 'sega32x', 'saturn', 'ps1', 'psp', 'arcade', 'neo-geo', 'neogeo'))",
+                }
+                if category in category_sql:
+                    where_parts.append(category_sql[category])
+
+                if search_query:
+                    escaped = search_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    pattern = f"%{escaped}%"
+                    where_parts.append(
+                        "(LOWER(COALESCE(g.title, '')) LIKE ? ESCAPE '\\' "
+                        "OR LOWER(COALESCE(g.filename, '')) LIKE ? ESCAPE '\\' "
+                        "OR LOWER(COALESCE(g.game_code, '')) LIKE ? ESCAPE '\\')"
+                    )
+                    where_args.extend((pattern, pattern, pattern))
+
+                where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
+                join_sql = " LEFT JOIN user_game_data u ON g.id = u.game_id AND u.user_id = ?"
+                base_args = [user_id] + where_args
+
+                filtered_count_row = self._db_query(
+                    "SELECT COUNT(*) AS cnt FROM games g" + join_sql + where_sql,
+                    tuple(base_args),
+                )
+                filtered_total_count = int(filtered_count_row[0]["cnt"] if filtered_count_row else 0)
+
+                if sort_mode == "title":
+                    order_sql = " ORDER BY LOWER(COALESCE(g.title, '')) ASC, g.id ASC"
+                elif sort_mode == "recent":
+                    order_sql = (
+                        " ORDER BY CASE WHEN COALESCE(u.last_played_at, '') = '' THEN 1 ELSE 0 END ASC, "
+                        "u.last_played_at DESC, g.added_at DESC, g.id ASC"
+                    )
+                else:
+                    sort_mode = "newest"
+                    order_sql = " ORDER BY g.added_at DESC, g.id ASC"
 
                 games = self._db_query(
-                    """SELECT g.id, g.filename, g.file_path, g.title, g.game_code, g.maker_code,
-                              g.size_bytes, g.added_at, g.cover_path, g.core, g.platform, g.needed_bios,
+                    """SELECT g.id, g.filename, g.file_path, g.title, g.game_code,
+                              g.size_bytes, g.cover_path, g.core, g.platform, g.needed_bios,
                               COALESCE(g.health_status, 'pass') AS health_status,
                               COALESCE(g.missing_roms, '') AS missing_roms,
-                              COALESCE(g.rom_crc32, '') AS rom_crc32,
-                              COALESCE(g.rom_md5, '') AS rom_md5,
-                              COALESCE(g.rom_sha1, '') AS rom_sha1,
-                              COALESCE(g.serial_code, '') AS serial_code,
-                              COALESCE(g.normalized_title, '') AS normalized_title,
-                              COALESCE(g.source_system, '') AS source_system,
                               COALESCE(g.metadata_source, '') AS metadata_source,
                               COALESCE(g.metadata_confidence, 0) AS metadata_confidence,
-                              COALESCE(g.canonical_title, '') AS canonical_title,
-                              COALESCE(g.alt_titles, '') AS alt_titles,
-                              COALESCE(g.region, '') AS region,
-                              COALESCE(g.genre, '') AS genre,
-                              COALESCE(g.developer, '') AS developer,
-                              COALESCE(g.publisher, '') AS publisher,
-                              COALESCE(g.release_year, '') AS release_year,
-                              COALESCE(g.players, 0) AS players,
-                              COALESCE(g.description, '') AS description,
                               COALESCE(g.region_tag, '') AS region_tag,
                               COALESCE(g.revision_tag, '') AS revision_tag,
                               COALESCE(g.disc_number, 0) AS disc_number,
                               COALESCE(g.content_flags, '') AS content_flags,
                               COALESCE(u.is_favorite, 0) AS is_favorite,
-                              u.last_played_at,
-                              COALESCE(u.play_count, 0) AS play_count
-                       FROM games g
-                       LEFT JOIN user_game_data u ON g.id = u.game_id AND u.user_id = ?
-                       ORDER BY is_favorite DESC, u.last_played_at DESC, added_at DESC""",
-                    (user_id,),
+                              u.last_played_at
+                       FROM games g"""
+                    + join_sql
+                    + where_sql
+                    + order_sql
+                    + " LIMIT ? OFFSET ?",
+                    tuple(base_args + [page_limit, page_offset]),
                 )
 
                 user_saves_dir = self._get_user_saves_dir(user_id)
@@ -5401,9 +5475,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         pass
 
                 visible_games = []
-                # 누락 커버가 있을 때만 요청당 한 번 커버 폴더를 인덱싱한다.
+                # 현재 페이지에 커버 누락 항목이 있을 때만 한 번 인덱싱한다.
                 cover_index = None
-                # 카드에는 서버 절대경로 대신 활성 라이브러리 루트 기준 상대경로만 노출한다.
                 path_roots = []
                 for candidate in (
                     self._get_setting("EXTRA_ROMS_PATH", "").strip(),
@@ -5414,11 +5487,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         root_abs = os.path.realpath(os.path.abspath(candidate))
                         if root_abs not in path_roots:
                             path_roots.append(root_abs)
-                # 중첩된 경로라면 가장 구체적인(긴) 루트를 우선한다.
                 path_roots.sort(key=len, reverse=True)
 
                 for g in games:
-                    # 구버전 DB의 휴리스틱 상태는 새 드롭다운에 그대로 노출하지 않는다.
                     if g.get("health_status") in ("parent_required", "bad_dump_or_unknown"):
                         g["health_status"] = "unverified"
                         if not g.get("missing_roms"):
@@ -5439,6 +5510,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         )
                         if repaired_cover:
                             g["cover_path"] = repaired_cover
+
                     g["relative_path"] = g.get("filename") or ""
                     if file_path:
                         file_abs = os.path.realpath(os.path.abspath(file_path))
@@ -5449,40 +5521,46 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                     break
                             except (ValueError, OSError):
                                 continue
+
                     has_sav = f"{gid}.sav" in existing_saves
                     has_state = f"{gid}.state" in existing_saves or f"{gid}_slot1.state" in existing_saves
-
                     g["has_save"] = 1 if (has_sav or has_state) else 0
                     g["has_state"] = 1 if has_state else 0
+
                     url_fname = g["filename"]
                     if url_fname.lower().endswith(".7z"):
                         url_fname = os.path.splitext(url_fname)[0] + ".zip"
                     elif os.path.splitext(url_fname)[1].lower() in (".cue", ".gdi"):
                         url_fname = os.path.splitext(url_fname)[0] + ".zip"
                     g["rom_url"] = f"{ROUTE_BASE}/rom/{gid}/{urllib.parse.quote(url_fname)}"
-                    g["disk_file_urls"] = {}
                     g["save_url"] = f"{ROUTE_BASE}/save/{gid}"
                     g["state_url"] = f"{ROUTE_BASE}/state/{gid}"
                     g["cover_url"] = f"{ROUTE_BASE}/cover/{gid}"
                     g["has_needed_bios"] = 1
-                    if not is_admin:
-                        g["cover_path"] = bool(g.get("cover_path"))
-                    # 관리자 여부와 관계없이 브라우저에는 서버 절대경로를 보내지 않는다.
+                    # 목록 화면은 커버의 실제 서버 경로가 필요하지 않다.
+                    g["cover_path"] = bool(g.get("cover_path"))
                     g.pop("file_path", None)
                     visible_games.append(g)
 
-                return {
+                response = {
                     "success": True,
                     "games": visible_games,
-                    "total_count": len(visible_games),
-                    # 절대 경로/파일 내용은 노출하지 않고 실제 BIOS 파일명만 전달한다.
-                    "available_bios": self._list_available_bios_names(),
+                    "total_count": filtered_total_count,
+                    "library_total_count": library_total_count,
+                    "offset": page_offset,
+                    "limit": page_limit,
+                    "next_offset": page_offset + len(visible_games),
+                    "has_more": page_offset + len(visible_games) < filtered_total_count,
                     "user_id": user_id,
                     "is_admin": is_admin,
-                    "config": {
+                }
+
+                # BIOS/설정 메타는 첫 페이지에서만 내려 다음 페이지 응답을 가볍게 유지한다.
+                if page_offset == 0:
+                    response["available_bios"] = self._list_available_bios_names()
+                    response["config"] = {
                         "cloud_save_enabled": str(self._get_setting("CLOUD_SAVE_ENABLED", "1")).lower() in ("1", "true", "yes", "on"),
                         "auto_save_interval_sec": int(self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")),
-                        # 서버 경로와 외부 서비스 자격증명은 관리자 화면에만 전달합니다.
                         "emulatorjs_root": str(self._get_setting("EMULATORJS_ROOT", "") or self._get_emulatorjs_root() or "").strip() if is_admin else "",
                         "extra_roms_path": str(self._get_setting("EXTRA_ROMS_PATH", "") or "").strip() if is_admin else "",
                         "covers_path": str(self._get_setting("COVERS_PATH", "") or "").strip() if is_admin else "",
@@ -5495,8 +5573,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "igdb_client_secret": str(self._get_setting("IGDB_CLIENT_SECRET", "") or "").strip() if is_admin else "",
                         "max_content_length_mb": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100),
                         "max_upload_bytes": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100) * 1024 * 1024,
-                    },
-                }
+                    }
+                return response
 
             elif action == "check_game":
                 game_id = request.args.get("game_id", "").strip()

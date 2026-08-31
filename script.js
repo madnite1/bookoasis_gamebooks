@@ -51,9 +51,13 @@
       meta: '',
       percent: null,
     },
-    renderedCount: 40,
     pageSize: 40,
-    filteredGames: [],
+    totalCount: 0,
+    libraryTotalCount: 0,
+    nextOffset: 0,
+    hasMore: false,
+    isLoadingMore: false,
+    libraryRequestSeq: 0,
     scrollObserver: null,
     coverQueuePollTimer: null,
     coverQueueSeenActive: false,
@@ -112,24 +116,36 @@
   // --------------------------------------------------------------------------
   // 데이터 로드 & 렌더링
   // --------------------------------------------------------------------------
+  function libraryQueryParams(offset = 0) {
+    return {
+      offset,
+      limit: state.pageSize,
+      category: state.category,
+      sort: state.sort,
+      favorite_only: state.isFavoriteOnly ? 1 : 0,
+      status: state.statusFilter,
+      q: state.searchQuery,
+    };
+  }
+
   async function loadLibrary(silent = false) {
+    const requestSeq = ++state.libraryRequestSeq;
+    state.isLoadingMore = false;
     if (!silent) showLoading(true);
     try {
-      const data = await apiCall('list_games');
+      const data = await apiCall('list_games', libraryQueryParams(0));
+      if (requestSeq !== state.libraryRequestSeq) return;
       if (data.success) {
         state.games = data.games || [];
-        if (data.user_id) {
-          state.userId = data.user_id;
-        }
-        if (data.config) {
-          state.config = Object.assign(state.config, data.config);
-        }
-
-        state.available_bios = data.available_bios || [];
-
+        state.totalCount = Number(data.total_count || 0);
+        state.libraryTotalCount = Number(data.library_total_count ?? state.totalCount);
+        state.nextOffset = Number(data.next_offset ?? state.games.length);
+        state.hasMore = !!data.has_more;
+        if (data.user_id) state.userId = data.user_id;
+        if (data.config) state.config = Object.assign(state.config, data.config);
+        if (Array.isArray(data.available_bios)) state.available_bios = data.available_bios;
         state.isAdmin = !!data.is_admin;
 
-        // 관리자 전용 UI 제어 (ROM 업로드, 바이오스 업로드, 홈브류 허브, 설정)
         document.querySelectorAll('.gba-admin-only').forEach((el) => {
           if (el.tagName === 'BUTTON') {
             el.style.display = state.isAdmin ? 'inline-flex' : 'none';
@@ -147,22 +163,20 @@
           }
         }
 
-        renderGames();
+        renderGames(true);
         if ($('gbaBiosModal') && $('gbaBiosModal').style.display === 'flex') {
           renderBiosModal();
         }
-
-        // 백그라운드 커버 큐 감시 시작
         startCoverQueueMonitor();
-
       } else {
         showToast('게임 목록을 불러오지 못했습니다: ' + (data.error || '알 수 없는 오류'), true);
       }
     } catch (err) {
+      if (requestSeq !== state.libraryRequestSeq) return;
       console.error('[GBA] Load library error:', err);
       showToast('서버와 통신 중 오류가 발생했습니다.', true);
     } finally {
-      if (!silent) showLoading(false);
+      if (requestSeq === state.libraryRequestSeq && !silent) showLoading(false);
     }
   }
 
@@ -225,71 +239,15 @@
     const emptyState = $('gbaEmptyState');
     const countEl = $('gbaGameCount');
     const sentinel = $('gbaScrollSentinel');
-
     if (!grid) return;
 
-    if (resetPaging) {
-      state.renderedCount = state.pageSize;
+    if (resetPaging) grid.innerHTML = '';
 
-      // 검색 및 필터 적용
-      state.filteredGames = state.games.filter((g) => {
-        // 즐겨찾기 단독 필터
-        if (state.isFavoriteOnly && !g.is_favorite) return false;
-
-        if (state.statusFilter !== 'all' && (g.health_status || 'pass') !== state.statusFilter) return false;
-
-        // 기종 드롭다운 카테고리 필터
-        if (state.category === 'snes' && g.core !== 'snes' && g.platform !== 'SNES') return false;
-        if (state.category === 'gba' && g.core !== 'gba' && g.platform !== 'GBA') return false;
-        if (state.category === 'nes' && g.core !== 'nes' && g.platform !== 'NES' && g.platform !== 'FDS') return false;
-        if (state.category === 'gb' && g.core !== 'gb' && g.core !== 'gbc' && g.platform !== 'GB' && g.platform !== 'GBC') return false;
-        if (state.category === 'nds' && g.core !== 'nds' && g.platform !== 'NDS') return false;
-        if (state.category === 'n64' && g.core !== 'n64' && g.platform !== 'N64') return false;
-        if (state.category === 'genesis' && !['segaMD', 'segaMS', 'segaGG', 'sega32x', 'segaCD', 'segaSaturn'].includes(g.core) && !['Genesis', 'MasterSystem', 'GameGear', 'Sega32X', 'Saturn'].includes(g.platform)) return false;
-        if (state.category === 'psx' && g.core !== 'psx' && g.platform !== 'PS1') return false;
-        if (state.category === 'psp' && g.core !== 'psp' && g.platform !== 'PSP') return false;
-        if (state.category === 'arcade' && g.core !== 'arcade' && g.core !== 'mame2003' && g.platform !== 'Arcade' && g.platform !== 'Neo-Geo') return false;
-        if (state.category === 'neogeo' && g.platform !== 'Neo-Geo' && g.platform !== 'NEOGEO') return false;
-        if (state.category === 'other') {
-          const mainPlatforms = ['SNES', 'GBA', 'NES', 'FDS', 'GB', 'GBC', 'NDS', 'N64', 'Genesis', 'MasterSystem', 'GameGear', 'Sega32X', 'Saturn', 'PS1', 'PSP', 'Arcade', 'Neo-Geo', 'NEOGEO'];
-          if (mainPlatforms.includes(g.platform)) return false;
-        }
-
-        // 검색어
-        if (state.searchQuery) {
-          const q = state.searchQuery.toLowerCase();
-          const titleMatch = (g.title || '').toLowerCase().includes(q);
-          const fileMatch = (g.filename || '').toLowerCase().includes(q);
-          const codeMatch = (g.game_code || '').toLowerCase().includes(q);
-          if (!titleMatch && !fileMatch && !codeMatch) return false;
-        }
-        return true;
-      });
-
-      // 정렬 (최신 등록순 / 가나다순 / 최근 플레이순)
-      state.filteredGames.sort((a, b) => {
-        if (state.sort === 'title') {
-          return (a.title || '').localeCompare(b.title || '', 'ko');
-        }
-        if (state.sort === 'recent') {
-          const tA = a.last_played_at || '';
-          const tB = b.last_played_at || '';
-          if (tA && !tB) return -1;
-          if (!tA && tB) return 1;
-          if (tA && tB) return tB.localeCompare(tA);
-          return (b.added_at || '').localeCompare(a.added_at || '');
-        }
-        // default: newest
-        return (b.added_at || '').localeCompare(a.added_at || '');
-      });
-
-      grid.innerHTML = '';
+    if (countEl) {
+      countEl.textContent = `${state.totalCount}개의 게임 (전체 ${state.libraryTotalCount}개)`;
     }
 
-    const filtered = state.filteredGames;
-    if (countEl) countEl.textContent = `${filtered.length}개의 게임 (전체 ${state.games.length}개)`;
-
-    if (filtered.length === 0) {
+    if (state.totalCount === 0) {
       grid.style.display = 'none';
       if (sentinel) sentinel.style.display = 'none';
       if (emptyState) emptyState.style.display = 'flex';
@@ -299,35 +257,46 @@
     if (emptyState) emptyState.style.display = 'none';
     grid.style.display = 'grid';
 
-    // 현재 렌더링할 범위 (Paging Window)
-    const currentLength = grid.children.length;
-    const targetSlice = filtered.slice(currentLength, state.renderedCount);
-
+    const currentLength = resetPaging ? 0 : grid.children.length;
+    const targetSlice = state.games.slice(currentLength);
     const fragment = document.createDocumentFragment();
-    targetSlice.forEach((game) => {
-      const card = createGameCard(game);
-      fragment.appendChild(card);
-    });
+    targetSlice.forEach((game) => fragment.appendChild(createGameCard(game)));
     grid.appendChild(fragment);
 
-    // 다음 페이지가 남아있으면 센티넬 활성화
     if (sentinel) {
-      if (grid.children.length < filtered.length) {
-        sentinel.style.display = 'block';
-        initScrollObserver();
-      } else {
-        sentinel.style.display = 'none';
-      }
+      sentinel.style.display = state.hasMore ? 'block' : 'none';
+      if (state.hasMore) initScrollObserver();
     }
   }
 
-  function loadMoreGames() {
-    if (!state.filteredGames) return;
-    const grid = $('gbaGameGrid');
-    if (!grid || grid.children.length >= state.filteredGames.length) return;
-
-    state.renderedCount += state.pageSize;
-    renderGames(false);
+  async function loadMoreGames() {
+    if (state.isLoadingMore || !state.hasMore) return;
+    state.isLoadingMore = true;
+    const requestSeq = state.libraryRequestSeq;
+    const offset = state.nextOffset;
+    try {
+      const data = await apiCall('list_games', libraryQueryParams(offset));
+      if (requestSeq !== state.libraryRequestSeq || !data.success) return;
+      const incoming = data.games || [];
+      const known = new Set(state.games.map((g) => g.id));
+      incoming.forEach((game) => {
+        if (!known.has(game.id)) {
+          state.games.push(game);
+          known.add(game.id);
+        }
+      });
+      state.totalCount = Number(data.total_count ?? state.totalCount);
+      state.libraryTotalCount = Number(data.library_total_count ?? state.libraryTotalCount);
+      state.nextOffset = Number(data.next_offset ?? (offset + incoming.length));
+      state.hasMore = !!data.has_more;
+      renderGames(false);
+    } catch (err) {
+      if (requestSeq === state.libraryRequestSeq) {
+        console.error('[GBA] Load more games error:', err);
+      }
+    } finally {
+      if (requestSeq === state.libraryRequestSeq) state.isLoadingMore = false;
+    }
   }
 
   function initScrollObserver() {
@@ -2183,7 +2152,7 @@
         const g = state.games.find((item) => item.id === gameId);
         if (g) {
           g.is_favorite = res.is_favorite;
-          renderGames();
+          await loadLibrary(true);
         }
       }
     } catch (e) {
@@ -2199,7 +2168,7 @@
       const res = await apiCall('update_title', { game_id: game.id, title: newTitle.trim() });
       if (res.success) {
         game.title = newTitle.trim();
-        renderGames();
+        await loadLibrary(true);
         showToast('게임 제목이 변경되었습니다.');
       }
     } catch (e) {
@@ -2216,7 +2185,7 @@
       const res = await apiCall('delete_game', { game_id: game.id });
       if (res.success) {
         state.games = state.games.filter((g) => g.id !== game.id);
-        renderGames();
+        await loadLibrary(true);
         showToast('게임이 삭제되었습니다.');
       } else {
         showToast(res.error || '삭제 실패', true);
@@ -2446,22 +2415,25 @@
     // 검색창 입력 & 초기화
     const searchInput = $('gbaSearchInput');
     const clearBtn = $('gbaSearchClear');
+    let searchReloadTimer = null;
     searchInput.addEventListener('input', (e) => {
       state.searchQuery = e.target.value.trim();
       clearBtn.style.display = state.searchQuery ? 'block' : 'none';
-      renderGames();
+      if (searchReloadTimer) clearTimeout(searchReloadTimer);
+      searchReloadTimer = setTimeout(() => loadLibrary(true), 250);
     });
     clearBtn.addEventListener('click', () => {
+      if (searchReloadTimer) clearTimeout(searchReloadTimer);
       searchInput.value = '';
       state.searchQuery = '';
       clearBtn.style.display = 'none';
-      renderGames();
+      loadLibrary(true);
     });
 
     // 기종 카테고리 드롭다운 변경
     $('gbaCategorySelect')?.addEventListener('change', (e) => {
       state.category = e.target.value;
-      renderGames();
+      loadLibrary(true);
     });
 
     // 라이브러리 정렬 선택
@@ -2471,13 +2443,13 @@
       sortSelect.addEventListener('change', (e) => {
         state.sort = e.target.value;
         localStorage.setItem('gba_library_sort', state.sort);
-        renderGames();
+        loadLibrary(true);
       });
     }
 
     $('gbaStatusFilterSelect')?.addEventListener('change', (e) => {
       state.statusFilter = e.target.value || 'all';
-      renderGames();
+      loadLibrary(true);
     });
 
     // 즐겨찾기 필터 토글 버튼
@@ -2495,7 +2467,7 @@
           if (icon) icon.className = 'fa-regular fa-star';
         }
       }
-      renderGames();
+      loadLibrary(true);
     });
 
     // 무료 홈브류 모달 바인딩
