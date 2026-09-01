@@ -128,6 +128,7 @@ _SCAN_PROGRESS = {
     "updated_at": 0,
 }
 _SCAN_PROGRESS_LOCK = threading.Lock()
+_LIBRARY_SYNC_LOCK = threading.Lock()
 
 _HEALTH_PROGRESS = {
     "is_running": False,
@@ -4036,6 +4037,125 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             logger.exception(f"[{SELF_ID}] health refresh error: {exc}")
             _update_health_progress(status="error", is_running=False, failed=1, current_file=str(exc))
 
+    @staticmethod
+    def _relocation_identity_matches(old_game, identity_info):
+        """유일한 파일명+크기 이동 후보가 실제 같은 ROM인지 저장된 해시로 추가 검증한다."""
+        old_game = old_game or {}
+        identity_info = identity_info or {}
+        for key in ("rom_sha1", "rom_md5", "rom_crc32"):
+            old_hash = str(old_game.get(key) or "").strip().lower()
+            new_hash = str(identity_info.get(key) or "").strip().lower()
+            if old_hash and new_hash:
+                return old_hash == new_hash
+        return True
+
+    def _merge_game_user_state(self, old_game_id, new_game_id):
+        """ROM 경로/기종 재배치로 game_id가 바뀔 때 유저 기록과 세이브를 보존한다."""
+        old_game_id = str(old_game_id or "").strip()
+        new_game_id = str(new_game_id or "").strip()
+        if not old_game_id or not new_game_id or old_game_id == new_game_id:
+            return True
+
+        try:
+            rows = self._db_query(
+                "SELECT user_id, is_favorite, last_played_at, play_count FROM user_game_data WHERE game_id = ?",
+                (old_game_id,),
+            )
+            for row in rows:
+                user_id = int(row.get("user_id") or 0)
+                target_rows = self._db_query(
+                    "SELECT is_favorite, last_played_at, play_count FROM user_game_data WHERE user_id = ? AND game_id = ?",
+                    (user_id, new_game_id),
+                )
+                if target_rows:
+                    target = target_rows[0]
+                    favorite = max(int(row.get("is_favorite") or 0), int(target.get("is_favorite") or 0))
+                    play_count = max(int(row.get("play_count") or 0), int(target.get("play_count") or 0))
+                    last_old = str(row.get("last_played_at") or "")
+                    last_new = str(target.get("last_played_at") or "")
+                    last_played = max(last_old, last_new) if last_old and last_new else (last_old or last_new)
+                    self._db_execute(
+                        "UPDATE user_game_data SET is_favorite = ?, last_played_at = ?, play_count = ? WHERE user_id = ? AND game_id = ?",
+                        (favorite, last_played, play_count, user_id, new_game_id),
+                    )
+                    self._db_execute(
+                        "DELETE FROM user_game_data WHERE user_id = ? AND game_id = ?",
+                        (user_id, old_game_id),
+                    )
+                else:
+                    self._db_execute(
+                        "UPDATE user_game_data SET game_id = ? WHERE user_id = ? AND game_id = ?",
+                        (new_game_id, user_id, old_game_id),
+                    )
+
+                # 세이브/상태 파일도 game_id를 파일명으로 사용하므로 같은 시점에 함께 이동한다.
+                try:
+                    saves_dir = self._get_user_saves_dir(user_id)
+                    suffixes = [".sav", ".state", "_slot1.state", "_slot2.state", "_slot3.state"]
+                    for suffix in suffixes:
+                        src = os.path.join(saves_dir, f"{old_game_id}{suffix}")
+                        dst = os.path.join(saves_dir, f"{new_game_id}{suffix}")
+                        if not os.path.isfile(src):
+                            continue
+                        if not os.path.exists(dst):
+                            os.replace(src, dst)
+                        elif os.path.getmtime(src) > os.path.getmtime(dst):
+                            os.replace(src, dst)
+                        else:
+                            os.remove(src)
+                except Exception as exc:
+                    logger.warning(f"[{SELF_ID}] Save migration failed ({old_game_id} -> {new_game_id}): {exc}")
+            return True
+        except Exception as exc:
+            logger.warning(f"[{SELF_ID}] User state migration failed ({old_game_id} -> {new_game_id}): {exc}")
+            return False
+
+    def _run_library_sync(self, mode="sync"):
+        """Game Books 라이브러리 처리의 공통 진입점.
+
+        - ingest: 업로드/외부 유입 후 신규·변경 ROM만 동기화
+        - sync: 일반 라이브러리 동기화
+        - rebuild: 모든 ROM을 최신 분석 기준으로 강제 재분석
+        - diagnose: 파일을 변경하지 않고 전체 health 상태만 재계산
+        """
+        mode = str(mode or "sync").strip().lower()
+        if mode not in {"ingest", "sync", "rebuild", "diagnose"}:
+            raise ValueError(f"지원하지 않는 라이브러리 동기화 모드입니다: {mode}")
+
+        if not _LIBRARY_SYNC_LOCK.acquire(blocking=False):
+            return {
+                "success": False,
+                "busy": True,
+                "mode": mode,
+                "error": "다른 라이브러리 작업이 진행 중입니다.",
+            }
+
+        try:
+            if mode == "ingest":
+                return self._scan_roms(new_only=True)
+            if mode == "sync":
+                return self._scan_roms()
+            if mode == "rebuild":
+                return self._scan_roms(force_full=True)
+            self._refresh_health_statuses()
+            return {"success": True, "mode": mode}
+        finally:
+            _LIBRARY_SYNC_LOCK.release()
+
+    def _run_library_sync_background(self, mode):
+        """백그라운드 공통 엔진 실행. 잠금 경합 시 queued 상태가 남지 않게 정리한다."""
+        result = self._run_library_sync(mode)
+        if isinstance(result, dict) and result.get("busy"):
+            logger.warning(f"[{SELF_ID}] Library sync background busy ({mode})")
+            if mode == "diagnose":
+                _update_health_progress(
+                    status="error",
+                    is_running=False,
+                    failed=1,
+                    current_file=result.get("error") or "다른 라이브러리 작업이 진행 중입니다.",
+                )
+        return result
+
     def _scan_roms(self, new_only=False, force_full=False):
         """기본 roms 폴더 및 설정된 추가 경로의 ROM을 스캔하여 DB에 동기화합니다.
         - new_only: 새로 발견된 게임만 등록 및 커버 검색
@@ -4099,6 +4219,31 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         found_files, claimed_disk_paths = _filter_m3u_claimed_files(found_files)
 
         existing_games = {g["id"]: g for g in self._db_query("SELECT * FROM games")}
+
+        # 외부에서 ROM을 다른 폴더로 옮긴 경우 경로 기반 game_id가 바뀐다.
+        # 파일명+크기가 같은 이전 항목이 유일할 때만 동일 게임의 이동으로 간주한다.
+        missing_by_signature = {}
+        for old_gid, old_game in existing_games.items():
+            if old_gid in found_files:
+                continue
+            signature = (
+                str(old_game.get("filename") or "").lower(),
+                int(old_game.get("size_bytes") or 0),
+            )
+            missing_by_signature.setdefault(signature, []).append(old_gid)
+
+        relocation_sources = {}
+        for found_gid, found_info in found_files.items():
+            if found_gid in existing_games:
+                continue
+            signature = (
+                str(found_info.get("filename") or "").lower(),
+                int(found_info.get("size_bytes") or 0),
+            )
+            candidates = missing_by_signature.get(signature) or []
+            if len(candidates) == 1:
+                relocation_sources[found_gid] = candidates[0]
+
         now_str = _get_kst_now_str()
         available_rom_names = {str(v.get("filename") or "").lower() for v in found_files.values() if v.get("filename")}
         available_bios_names = set()
@@ -4172,8 +4317,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     rom_info["source_system"] = "sidecar"
                 identity_info = _collect_identity_fields(info["file_path"], rom_info, clean_title, info["size_bytes"])
 
+                source_gid = relocation_sources.get(gid) or gid
+                if source_gid != gid and not self._relocation_identity_matches(existing_games.get(source_gid) or {}, identity_info):
+                    source_gid = gid
+
                 return {
                     "gid": gid,
+                    "source_gid": source_gid,
                     "info": info,
                     "rom_info": rom_info,
                     "clean_title": clean_title,
@@ -4185,6 +4335,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 return None
 
         # ThreadPoolExecutor를 이용한 멀티스레드 병렬 바이너리 분석
+        failed_relocations = set()
         if files_to_process:
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                 results = list(executor.map(_process_single_rom, files_to_process))
@@ -4197,6 +4348,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 if not res:
                     continue
                 gid = res["gid"]
+                source_gid = res.get("source_gid") or gid
                 info = res["info"]
                 rom_info = res["rom_info"]
                 clean_title = res["clean_title"]
@@ -4205,7 +4357,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                 curr_file_path = info["file_path"]
                 curr_dir = os.path.dirname(os.path.abspath(curr_file_path))
-                base_dir = os.path.dirname(curr_dir)
+                scan_root = os.path.abspath(info.get("sdir") or curr_dir)
 
                 target_core_folder = (rom_info.get("core") or rom_info.get("platform") or "other").lower()
                 target_core_folder = re.sub(r"[^a-zA-Z0-9_\-]", "_", target_core_folder).strip() or "other"
@@ -4217,7 +4369,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     try:
                         import py7zr
                         zip_fname = os.path.splitext(info["filename"])[0] + ".zip"
-                        ideal_dir = os.path.join(base_dir, target_core_folder)
+                        ideal_dir = os.path.join(scan_root, target_core_folder)
                         os.makedirs(ideal_dir, exist_ok=True)
                         dest_zip_path = os.path.join(ideal_dir, zip_fname)
                         work_zip_path = dest_zip_path + ".part"
@@ -4254,7 +4406,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         info["size_bytes"] = os.path.getsize(dest_zip_path)
                         info["mtime"] = os.path.getmtime(dest_zip_path)
 
-                        sdir = info.get("sdir") or base_dir
+                        sdir = info.get("sdir") or scan_root
                         rel = os.path.relpath(dest_zip_path, sdir)
                         new_gid = _sanitize_id(f"{os.path.basename(sdir)}_{rel}")
                         if gid in found_files:
@@ -4263,9 +4415,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         gid = new_gid
                     except Exception as conv_ex:
                         logger.error(f"[{SELF_ID}] Scan 7z convert error: {conv_ex}")
-                elif f_ext in (".cue", ".gdi", ".m3u") or (current_folder_name != target_core_folder and current_folder_name not in ("roms", "")):
+                elif f_ext in (".cue", ".gdi", ".m3u") or current_folder_name != target_core_folder:
                     try:
-                        ideal_dir = os.path.join(base_dir, target_core_folder)
+                        ideal_dir = os.path.join(scan_root, target_core_folder)
                         os.makedirs(ideal_dir, exist_ok=True)
                         original_path = curr_file_path
                         move_result = _move_disk_bundle(curr_file_path, ideal_dir, related_infos=found_files.values())
@@ -4275,7 +4427,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             info["file_path"] = dest_file_path
                             info["filename"] = os.path.basename(dest_file_path)
 
-                            sdir = info.get("sdir") or base_dir
+                            sdir = info.get("sdir") or scan_root
                             rel = os.path.relpath(dest_file_path, sdir)
                             new_gid = _sanitize_id(f"{os.path.basename(sdir)}_{rel}")
 
@@ -4337,7 +4489,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     gid,
                     info["filename"],
                     rom_info.get("core") or rom_info.get("platform"),
-                    current_cover_path=(existing_games.get(gid) or {}).get("cover_path") or "",
+                    current_cover_path=((existing_games.get(gid) or existing_games.get(source_gid) or {}).get("cover_path") or ""),
                     update_db=False,
                 )
 
@@ -4357,7 +4509,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 rom_info["platform"],
                                 info["size_bytes"],
                                 info["mtime"],
-                                now_str,
+                                (existing_games.get(source_gid) or {}).get("added_at") or now_str,
                                 existing_cover_file,
                                 rom_info.get("needed_bios") or "",
                                 health_status,
@@ -4403,18 +4555,24 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                     curr_file_path,
                                     mapped_header or clean_title
                                 ))
+
+                    if source_gid != gid and source_gid in existing_games:
+                        if not self._merge_game_user_state(source_gid, gid):
+                            failed_relocations.add(source_gid)
                 except Exception as dbe:
                     logger.warning(f"[{SELF_ID}] Game DB update error ({gid}): {dbe}")
 
-            # 삭제된 게임 정리
-            for gid in existing_games:
-                if gid not in found_files:
-                    try:
-                        self._db_execute("DELETE FROM games WHERE id = ?", (gid,))
-                        self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (gid,))
-                        deleted_count += 1
-                    except Exception:
-                        pass
+        # 삭제된 게임 정리. 신규/변경 파일이 하나도 없어도 디스크와 DB의 삭제 상태는 항상 맞춘다.
+        for gid in existing_games:
+            if gid in failed_relocations:
+                continue
+            if gid not in found_files:
+                try:
+                    self._db_execute("DELETE FROM games WHERE id = ?", (gid,))
+                    self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (gid,))
+                    deleted_count += 1
+                except Exception:
+                    pass
 
         # 누락된 커버 이미지를 전역 백그라운드 다운로드 큐에 추가
         if covers_to_fetch:
@@ -4993,66 +5151,20 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "error": f"지원되지 않거나 유효하지 않은 롬 파일({safe_filename})입니다. 지원 기종(SFC, GBA, NES, GB, MD, NDS, N64, PS1, PSP, Arcade 등)을 확인해 주세요.",
                 }), 400
 
-            # 코어/시스템 이름별 하위 폴더 결정 (예: snes, gba, nes, segaMD, psx, arcade 등)
-            core_name = rom_info.get("core") or rom_info.get("platform") or "other"
-            core_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(core_name).strip()).lower() or "other"
-            target_sub_dir = os.path.join(dest_dir, core_name)
-            os.makedirs(target_sub_dir, exist_ok=True)
-
-            dest_path = os.path.join(target_sub_dir, safe_filename)
+            # 업로드 핸들러는 파일 수신까지만 담당한다. 실제 기종 폴더 배치,
+            # 7z→ZIP 변환, 디스크 번들 이동, DB 등록은 Library Sync Engine에서 일관되게 처리한다.
+            dest_path = os.path.join(dest_dir, safe_filename)
             counter = 1
             while os.path.exists(dest_path):
-                dest_path = os.path.join(target_sub_dir, f"{base_n}_{counter}{ext_n}")
+                dest_path = os.path.join(dest_dir, f"{base_n}_{counter}{ext_n}")
                 counter += 1
+            shutil.move(temp_dest, dest_path)
+            safe_filename = os.path.basename(dest_path)
 
-            # 모든 .7z 압축 롬 업로드 시: 브라우저 WebAssembly 에뮬레이터 호환성을 위해 표준 .zip으로 영구 자동 변환
-            if ext == ".7z":
-                try:
-                    import py7zr
-                    zip_safe_filename = f"{base_n}.zip"
-                    dest_zip_path = os.path.join(target_sub_dir, zip_safe_filename)
-                    z_counter = 1
-                    while os.path.exists(dest_zip_path):
-                        dest_zip_path = os.path.join(target_sub_dir, f"{base_n}_{z_counter}.zip")
-                        z_counter += 1
-
-                    work_zip_path = dest_zip_path + ".part"
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        _safe_7z_extract(temp_dest, tmpdir)
-                        extracted_files = []
-                        with zipfile.ZipFile(work_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-                            for root, _dirs, files in os.walk(tmpdir):
-                                for ef in files:
-                                    full_ef = os.path.join(root, ef)
-                                    arc_ef = os.path.relpath(full_ef, tmpdir).replace(os.sep, "/")
-                                    if arc_ef.startswith("."):
-                                        continue
-                                    extracted_files.append(arc_ef)
-                                    zout.write(full_ef, arc_ef)
-                                if rom_info.get("platform") == "Neo-Geo" or rom_info.get("needed_bios") == "neogeo.zip":
-                                    bios_p = os.path.join(self._get_bios_dir(), "neogeo.zip")
-                                    if os.path.exists(bios_p):
-                                        with zipfile.ZipFile(bios_p, "r") as zb:
-                                            existing = set(extracted_files)
-                                            for b_info in zb.infolist():
-                                                if b_info.filename not in existing and not b_info.filename.startswith("."):
-                                                    zout.writestr(b_info.filename, zb.read(b_info.filename))
-                    if not _validate_zip_file(work_zip_path):
-                        raise ValueError("converted ZIP validation failed")
-                    os.replace(work_zip_path, dest_zip_path)
-                    if os.path.exists(temp_dest):
-                        os.remove(temp_dest)
-                    safe_filename = os.path.basename(dest_zip_path)
-                except Exception as conv_ex:
-                    logger.error(f"[{SELF_ID}] Upload 7z convert error: {conv_ex}")
-                    shutil.move(temp_dest, dest_path)
-            else:
-                shutil.move(temp_dest, dest_path)
-                bundle_result = _move_disk_bundle(dest_path, target_sub_dir)
-                dest_path = bundle_result.get("primary_path") or dest_path
-                safe_filename = os.path.basename(dest_path)
-
-            self._scan_roms()
+            defer_sync = str(request.form.get("defer_sync", "0") or "0").strip().lower() in ("1", "true", "yes", "on")
+            if not defer_sync:
+                # 구버전 프런트 호환: 단일 업로드 요청은 즉시 공통 ingest 파이프라인으로 반영한다.
+                self._run_library_sync("ingest")
 
             # 아케이드 / 네오지오 롬 감지 시 바이오스 안내 생성
             notice = None
@@ -5269,7 +5381,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         dest_name = self._hh_dest_name(slug, rel)
         dest_path = os.path.join(self._get_roms_dir(), dest_name)
         if os.path.exists(dest_path):
-            self._scan_roms()
+            self._run_library_sync("ingest")
             return True, f"이미 등록되어 있습니다: {entry.get('title') or slug}"
         data, _ct = _hh_http_get(file_url, timeout=60)
         if not data or len(data) < 256:
@@ -5280,7 +5392,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         with open(tmp_path, "wb") as fh:
             fh.write(data)
         os.replace(tmp_path, dest_path)
-        self._scan_roms()
+        self._run_library_sync("ingest")
         rows = self._db_query("SELECT id FROM games WHERE filename = ?", (dest_name,))
         game_id = rows[0]["id"] if rows else None
         shots = entry.get("screenshots") or []
@@ -5341,7 +5453,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "check_game",
             "get_cover_migration_candidates", "get_bios_migration_candidates",
             "migrate_bios_batch", "migrate_cover_batch",
-            "scan_new_roms", "scan_roms", "full_scan", "health_check", "health_refresh", "health_progress",
+            "library_sync", "scan_new_roms", "scan_roms", "full_scan", "health_check", "health_refresh", "health_progress",
             "fetch_missing_covers", "delete_game", "update_title", "save_settings", "search_artwork", "set_artwork",
         }
         if action in admin_actions and not is_admin:
@@ -5354,7 +5466,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
                 library_total_count = int(game_count_row[0]["cnt"] if game_count_row else 0)
                 if library_total_count == 0:
-                    self._scan_roms()
+                    self._run_library_sync("sync")
                     game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
                     library_total_count = int(game_count_row[0]["cnt"] if game_count_row else 0)
 
@@ -5735,8 +5847,56 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                 return {"success": True, "moved_count": moved_count}
 
+            elif action == "library_sync":
+                mode = str(request.args.get("mode", "sync") or "sync").strip().lower()
+                if mode not in {"ingest", "sync", "rebuild", "diagnose"}:
+                    return {"success": False, "error": f"지원하지 않는 라이브러리 동기화 모드입니다: {mode}"}
+
+                with _SCAN_PROGRESS_LOCK:
+                    scan_busy = bool(_SCAN_PROGRESS.get("is_running")) or _SCAN_PROGRESS.get("status") == "queued"
+                with _HEALTH_PROGRESS_LOCK:
+                    health_busy = bool(_HEALTH_PROGRESS.get("is_running")) or _HEALTH_PROGRESS.get("status") == "queued"
+
+                if mode == "diagnose":
+                    if scan_busy:
+                        return {"success": False, "error": "라이브러리 동기화가 진행 중입니다. 완료 후 무결성 진단을 실행하세요."}
+                    launch = False
+                    with _HEALTH_PROGRESS_LOCK:
+                        running = bool(_HEALTH_PROGRESS.get("is_running"))
+                        queued = _HEALTH_PROGRESS.get("status") == "queued"
+                        if not running and not queued:
+                            _HEALTH_PROGRESS.update({
+                                "is_running": False, "current": 0, "total": 0, "current_file": "",
+                                "status": "queued", "changed": 0, "failed": 0, "updated_at": time.time(),
+                            })
+                            launch = True
+                        progress = dict(_HEALTH_PROGRESS)
+                    if launch:
+                        threading.Thread(target=self._run_library_sync_background, args=("diagnose",), daemon=True).start()
+                    return {"success": True, "mode": mode, "progress": progress}
+
+                if health_busy:
+                    return {"success": False, "error": "무결성 진단이 진행 중입니다. 완료 후 라이브러리 작업을 실행하세요."}
+
+                if mode == "rebuild":
+                    if not scan_busy:
+                        threading.Thread(target=self._run_library_sync_background, args=("rebuild",), daemon=True).start()
+                    return {"success": True, "mode": mode, "message": "라이브러리 전체 재구축이 시작되었습니다."}
+
+                if scan_busy:
+                    return {"success": False, "error": "다른 라이브러리 동기화 작업이 진행 중입니다."}
+                stats = self._run_library_sync(mode)
+                if isinstance(stats, dict) and stats.get("busy"):
+                    return stats
+                return {
+                    "success": True,
+                    "mode": mode,
+                    "message": "라이브러리 동기화가 완료되었습니다.",
+                    "stats": stats,
+                }
+
             elif action == "scan_new_roms":
-                res = self._scan_roms(new_only=True)
+                res = self._run_library_sync("ingest")
                 new_cnt = res.get("new_count", 0) if isinstance(res, dict) else 0
                 new_sample = res.get("new_games", []) if isinstance(res, dict) else []
                 msg = f"신규 ROM {new_cnt}개가 성공적으로 등록되었습니다." if new_cnt > 0 else "새로 추가된 ROM 파일이 없습니다."
@@ -5805,7 +5965,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 with _SCAN_PROGRESS_LOCK:
                     is_running = _SCAN_PROGRESS.get("is_running", False)
                 if not is_running:
-                    threading.Thread(target=self._scan_roms, kwargs={"force_full": True}, daemon=True).start()
+                    threading.Thread(target=self._run_library_sync_background, args=("rebuild",), daemon=True).start()
                 return {"success": True, "message": "모든 ROM 파일의 전체 재스캔이 시작되었습니다."}
 
             elif action == "health_refresh":
@@ -5825,7 +5985,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         launch = True
                     progress = dict(_HEALTH_PROGRESS)
                 if launch:
-                    threading.Thread(target=self._refresh_health_statuses, daemon=True).start()
+                    threading.Thread(target=self._run_library_sync_background, args=("diagnose",), daemon=True).start()
                 return {"success": True, "progress": progress}
 
             elif action == "health_progress":
@@ -5900,7 +6060,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 }
 
             elif action == "scan_roms":
-                res = self._scan_roms()
+                res = self._run_library_sync("sync")
                 return {"success": True, "message": "ROM 디스크 스캔 및 DB 동기화가 완료되었습니다.", "stats": res}
 
             elif action == "homebrew_search":
@@ -6060,7 +6220,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         logger.error(f"[{SELF_ID}] Bios migration during save_settings error: {e}")
 
                 # ROM 디렉토리 스캔을 백그라운드로 실행하여 저장 응답 타임아웃 방지
-                threading.Thread(target=self._scan_roms, daemon=True).start()
+                threading.Thread(target=self._run_library_sync_background, args=("sync",), daemon=True).start()
                 return {"success": True, "message": "설정이 성공적으로 저장되었습니다."}
 
             elif action == "search_artwork":
