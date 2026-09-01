@@ -90,10 +90,11 @@ class ListPaginationTests(unittest.TestCase):
         self.assertTrue(first["has_more"])
         self.assertEqual(second["next_offset"], 4)
         self.assertTrue(second["has_more"])
-        self.assertIn("config", first)
-        self.assertIn("available_bios", first)
+        self.assertNotIn("config", first)
+        self.assertNotIn("available_bios", first)
         self.assertNotIn("config", second)
         self.assertNotIn("available_bios", second)
+        self.assertTrue(all(game["runtime_state_loaded"] is False for game in first["games"]))
 
     def test_server_filters_apply_before_pagination(self):
         arcade = self._call("offset=0&limit=40&sort=title&category=arcade&status=all")
@@ -106,6 +107,33 @@ class ListPaginationTests(unittest.TestCase):
         self.assertEqual([g["id"] for g in unverified["games"]], ["g3"])
         self.assertEqual(unverified["games"][0]["health_status"], "unverified")
         self.assertEqual([g["id"] for g in search["games"]], ["g2"])
+
+    def test_list_games_does_not_touch_runtime_filesystem_helpers(self):
+        with mock.patch.object(self.provider, "_scan_roms", side_effect=AssertionError("scan must not run")), \
+             mock.patch.object(self.provider, "_list_available_bios_names", side_effect=AssertionError("bios scan must not run")), \
+             mock.patch.object(self.provider, "_get_user_saves_dir", side_effect=AssertionError("save dir must not be read")), \
+             mock.patch.object(self.provider, "_get_bios_dir", side_effect=AssertionError("bios dir must not be read")), \
+             mock.patch.object(self.provider, "_get_covers_dir", side_effect=AssertionError("cover dir must not be read")), \
+             mock.patch.object(self.provider, "_get_emulatorjs_root", side_effect=AssertionError("runtime root must not be read")):
+            data = self._call("offset=0&limit=2&sort=newest&category=all&status=all")
+
+        self.assertTrue(data["success"])
+        self.assertEqual([g["id"] for g in data["games"]], ["g5", "g4"])
+
+    def test_runtime_state_returns_filesystem_state_separately(self):
+        (self.saves / "g2.sav").write_bytes(b"save")
+        (self.bios / "gba_bios.bin").write_bytes(b"bios")
+
+        with self.app.test_request_context("/?action=runtime_state&game_ids=g2,g5&include_globals=1"), \
+             mock.patch.object(gamebooks, "_get_current_user_id", return_value=1), \
+             mock.patch.object(gamebooks, "_is_current_user_admin", return_value=True):
+            data = self.provider.get_dashboard_data("general")
+
+        self.assertTrue(data["success"])
+        self.assertEqual(data["game_states"]["g2"]["has_save"], 1)
+        self.assertEqual(data["game_states"]["g5"]["has_save"], 0)
+        self.assertIn("gba_bios.bin", data["available_bios"])
+        self.assertIn("config", data)
 
     def test_list_payload_omits_heavy_unused_fields(self):
         data = self._call("offset=0&limit=1&sort=newest&category=all&status=all")

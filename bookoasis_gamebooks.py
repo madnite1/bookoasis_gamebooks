@@ -5461,14 +5461,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         try:
             if action == "list_games":
-                # 목록 화면은 서버 페이징을 사용한다. 브라우저가 전체 라이브러리를 한 번에
-                # 내려받지 않도록 검색/필터/정렬까지 SQL에 적용한 뒤 필요한 페이지만 반환한다.
+                # 목록 화면은 DB-only 서버 페이징을 사용한다. 최초 진입이 rclone/GDrive,
+                # 커버/BIOS/세이브 디렉터리 상태에 영향을 받지 않도록 이 경로에서는
+                # 파일시스템 조회/복구/자동 스캔을 수행하지 않는다.
                 game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
                 library_total_count = int(game_count_row[0]["cnt"] if game_count_row else 0)
-                if library_total_count == 0:
-                    self._run_library_sync("sync")
-                    game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
-                    library_total_count = int(game_count_row[0]["cnt"] if game_count_row else 0)
 
                 def _request_int(name, default, minimum, maximum):
                     try:
@@ -5555,7 +5552,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     order_sql = " ORDER BY g.added_at DESC, g.id ASC"
 
                 games = self._db_query(
-                    """SELECT g.id, g.filename, g.file_path, g.title, g.game_code,
+                    """SELECT g.id, g.filename, g.title, g.game_code,
                               g.size_bytes, g.cover_path, g.core, g.platform, g.needed_bios,
                               COALESCE(g.health_status, 'pass') AS health_status,
                               COALESCE(g.missing_roms, '') AS missing_roms,
@@ -5575,73 +5572,19 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     tuple(base_args + [page_limit, page_offset]),
                 )
 
-                user_saves_dir = self._get_user_saves_dir(user_id)
-                existing_saves = set()
-                if os.path.exists(user_saves_dir):
-                    try:
-                        for sf in os.listdir(user_saves_dir):
-                            if not sf.startswith("."):
-                                full_sf = os.path.join(user_saves_dir, sf)
-                                try:
-                                    if os.path.getsize(full_sf) > 0:
-                                        existing_saves.add(sf)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-
                 visible_games = []
-                # 현재 페이지에 커버 누락 항목이 있을 때만 한 번 인덱싱한다.
-                cover_index = None
-                path_roots = []
-                for candidate in (
-                    self._get_setting("EXTRA_ROMS_PATH", "").strip(),
-                    self._get_roms_dir(),
-                    self._get_emulatorjs_root(),
-                ):
-                    if candidate:
-                        root_abs = os.path.realpath(os.path.abspath(candidate))
-                        if root_abs not in path_roots:
-                            path_roots.append(root_abs)
-                path_roots.sort(key=len, reverse=True)
-
                 for g in games:
                     if g.get("health_status") in ("parent_required", "bad_dump_or_unknown"):
                         g["health_status"] = "unverified"
                         if not g.get("missing_roms"):
                             g["missing_roms"] = "최신 rom-analyzer 재진단이 필요한 기존 상태입니다."
                     gid = g["id"]
-                    file_path = g.get("file_path") or ""
-                    current_cover = g.get("cover_path") or ""
-                    if not current_cover or not os.path.exists(current_cover):
-                        if cover_index is None:
-                            cover_index = self._build_cover_file_index()
-                        repaired_cover = self._resolve_existing_cover(
-                            gid,
-                            g.get("filename") or "",
-                            g.get("core") or g.get("platform") or "",
-                            current_cover_path=current_cover,
-                            update_db=True,
-                            cover_index=cover_index,
-                        )
-                        if repaired_cover:
-                            g["cover_path"] = repaired_cover
-
+                    # 목록 응답은 DB에 저장된 값만 사용한다. 실제 파일 상태는 목록 렌더 후
+                    # runtime_state 액션이 비동기로 보정한다.
                     g["relative_path"] = g.get("filename") or ""
-                    if file_path:
-                        file_abs = os.path.realpath(os.path.abspath(file_path))
-                        for root_abs in path_roots:
-                            try:
-                                if os.path.commonpath([file_abs, root_abs]) == root_abs:
-                                    g["relative_path"] = os.path.relpath(file_abs, root_abs).replace(os.sep, "/")
-                                    break
-                            except (ValueError, OSError):
-                                continue
-
-                    has_sav = f"{gid}.sav" in existing_saves
-                    has_state = f"{gid}.state" in existing_saves or f"{gid}_slot1.state" in existing_saves
-                    g["has_save"] = 1 if (has_sav or has_state) else 0
-                    g["has_state"] = 1 if has_state else 0
+                    g["has_save"] = 0
+                    g["has_state"] = 0
+                    g["runtime_state_loaded"] = False
 
                     url_fname = g["filename"]
                     if url_fname.lower().endswith(".7z"):
@@ -5671,10 +5614,58 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "is_admin": is_admin,
                 }
 
-                # BIOS/설정 메타는 첫 페이지에서만 내려 다음 페이지 응답을 가볍게 유지한다.
-                if page_offset == 0:
-                    response["available_bios"] = self._list_available_bios_names()
-                    response["config"] = {
+                return response
+
+            elif action == "runtime_state":
+                # 최초 목록 렌더와 분리된 실제 파일 상태 조회. rclone/GDrive 메타데이터
+                # 접근이 느려도 게임 카드 자체는 이미 DB 응답으로 표시된 뒤다.
+                raw_ids = str(request.args.get("game_ids", "") or "")
+                game_ids = []
+                seen_game_ids = set()
+                for raw_id in raw_ids.split(","):
+                    game_id = raw_id.strip()
+                    if not game_id or game_id in seen_game_ids:
+                        continue
+                    seen_game_ids.add(game_id)
+                    game_ids.append(game_id)
+                    if len(game_ids) >= 100:
+                        break
+
+                existing_saves = set()
+                if game_ids:
+                    try:
+                        user_saves_dir = self._get_user_saves_dir(user_id)
+                        if os.path.isdir(user_saves_dir):
+                            for entry in os.scandir(user_saves_dir):
+                                if entry.name.startswith(".") or not entry.is_file():
+                                    continue
+                                try:
+                                    if entry.stat().st_size > 0:
+                                        existing_saves.add(entry.name)
+                                except OSError:
+                                    continue
+                    except OSError as e:
+                        logger.warning(f"[{SELF_ID}] Save runtime state list error: {e}")
+
+                game_states = {}
+                for game_id in game_ids:
+                    has_sav = f"{game_id}.sav" in existing_saves
+                    has_state = (
+                        f"{game_id}.state" in existing_saves
+                        or f"{game_id}_slot1.state" in existing_saves
+                    )
+                    game_states[game_id] = {
+                        "has_save": 1 if (has_sav or has_state) else 0,
+                        "has_state": 1 if has_state else 0,
+                    }
+
+                result = {"success": True, "game_states": game_states}
+                include_globals = str(request.args.get("include_globals", "0") or "0").strip().lower() in (
+                    "1", "true", "yes", "on"
+                )
+                if include_globals:
+                    result["available_bios"] = self._list_available_bios_names()
+                    result["config"] = {
                         "cloud_save_enabled": str(self._get_setting("CLOUD_SAVE_ENABLED", "1")).lower() in ("1", "true", "yes", "on"),
                         "auto_save_interval_sec": int(self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")),
                         "emulatorjs_root": str(self._get_setting("EMULATORJS_ROOT", "") or self._get_emulatorjs_root() or "").strip() if is_admin else "",
@@ -5690,7 +5681,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "max_content_length_mb": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100),
                         "max_upload_bytes": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100) * 1024 * 1024,
                     }
-                return response
+                return result
 
             elif action == "check_game":
                 game_id = request.args.get("game_id", "").strip()

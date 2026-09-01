@@ -39,6 +39,8 @@
       aspectRatio: localStorage.getItem('gba_aspect_ratio') || '3/2',
     },
     available_bios: [],
+    runtimeGlobalsLoaded: false,
+    runtimeGlobalsPromise: null,
     biosPage: 1,
     biosPageSize: 10,
     biosSearch: '',
@@ -128,6 +130,119 @@
     };
   }
 
+  function refreshRuntimeCards(gameIds) {
+    const ids = new Set((gameIds || []).map((id) => String(id)));
+    if (!ids.size) return;
+    document.querySelectorAll('.gba-card[data-id]').forEach((card) => {
+      const id = String(card.dataset.id || '');
+      if (!ids.has(id)) return;
+      const game = state.games.find((item) => String(item.id) === id);
+      if (game) card.replaceWith(createGameCard(game));
+    });
+  }
+
+  async function loadRuntimeState(games = [], includeGlobals = false) {
+    const gameIds = [...new Set((games || [])
+      .map((game) => String(game && game.id ? game.id : '').trim())
+      .filter(Boolean))];
+    const data = await apiCall('runtime_state', {
+      game_ids: gameIds.join(','),
+      include_globals: includeGlobals ? 1 : 0,
+    });
+    if (!data || !data.success) {
+      throw new Error((data && data.error) || '실행 상태 조회 실패');
+    }
+
+    const gameStates = data.game_states || {};
+    const changedIds = [];
+    state.games.forEach((game) => {
+      const id = String(game.id);
+      if (!Object.prototype.hasOwnProperty.call(gameStates, id)) return;
+      const runtime = gameStates[id] || {};
+      game.has_save = Number(runtime.has_save || 0);
+      game.has_state = Number(runtime.has_state || 0);
+      game.runtime_state_loaded = true;
+      changedIds.push(id);
+    });
+
+    if (includeGlobals) {
+      if (Array.isArray(data.available_bios)) state.available_bios = data.available_bios;
+      if (data.config) state.config = Object.assign(state.config, data.config);
+      state.runtimeGlobalsLoaded = true;
+    }
+
+    const refreshIds = includeGlobals
+      ? state.games.map((game) => String(game.id))
+      : changedIds;
+    refreshRuntimeCards(refreshIds);
+    if (includeGlobals && $('gbaBiosModal') && $('gbaBiosModal').style.display === 'flex') {
+      renderBiosModal();
+    }
+    return data;
+  }
+
+  function startRuntimeGlobalsLoad(games = []) {
+    if (state.runtimeGlobalsLoaded) return Promise.resolve();
+    if (state.runtimeGlobalsPromise) return state.runtimeGlobalsPromise;
+
+    let task = null;
+    task = loadRuntimeState(games, true)
+      .catch((err) => {
+        console.warn('[GBA] Runtime globals load error:', err);
+        throw err;
+      })
+      .finally(() => {
+        if (state.runtimeGlobalsPromise === task) state.runtimeGlobalsPromise = null;
+      });
+    state.runtimeGlobalsPromise = task;
+    return task;
+  }
+
+  function queueRuntimeStateRefresh(games = [], includeGlobals = false) {
+    const targets = (games || []).filter((game) => game && !game.runtime_state_loaded);
+    if (includeGlobals && !state.runtimeGlobalsLoaded && !state.runtimeGlobalsPromise) {
+      startRuntimeGlobalsLoad(targets).catch(() => {});
+      return;
+    }
+    if (targets.length) {
+      loadRuntimeState(targets, false).catch((err) => {
+        console.warn('[GBA] Runtime save state load error:', err);
+      });
+    }
+  }
+
+  async function ensureRuntimeState(game) {
+    if (!game) return;
+    if (!state.runtimeGlobalsLoaded && state.runtimeGlobalsPromise) {
+      try {
+        await state.runtimeGlobalsPromise;
+      } catch (e) {}
+    }
+    if (!state.runtimeGlobalsLoaded) {
+      await startRuntimeGlobalsLoad([game]);
+    } else if (!game.runtime_state_loaded) {
+      await loadRuntimeState([game], false);
+    }
+    if (!game.runtime_state_loaded) {
+      await loadRuntimeState([game], false);
+    }
+  }
+
+  async function ensureRuntimeGlobals() {
+    if (state.runtimeGlobalsLoaded) return;
+    await startRuntimeGlobalsLoad([]);
+  }
+
+  async function refreshRuntimeGlobals(games = state.games) {
+    if (state.runtimeGlobalsPromise) {
+      try {
+        await state.runtimeGlobalsPromise;
+      } catch (e) {}
+    }
+    state.runtimeGlobalsLoaded = false;
+    return startRuntimeGlobalsLoad(games || []);
+  }
+
   async function loadLibrary(silent = false) {
     const requestSeq = ++state.libraryRequestSeq;
     state.isLoadingMore = false;
@@ -142,8 +257,6 @@
         state.nextOffset = Number(data.next_offset ?? state.games.length);
         state.hasMore = !!data.has_more;
         if (data.user_id) state.userId = data.user_id;
-        if (data.config) state.config = Object.assign(state.config, data.config);
-        if (Array.isArray(data.available_bios)) state.available_bios = data.available_bios;
         state.isAdmin = !!data.is_admin;
 
         document.querySelectorAll('.gba-admin-only').forEach((el) => {
@@ -163,10 +276,10 @@
           }
         }
 
+        // 첫 화면은 list_games의 DB 응답만으로 즉시 렌더한다. 세이브/BIOS처럼
+        // 파일시스템을 확인해야 하는 상태는 렌더 이후 비동기로 보정한다.
         renderGames(true);
-        if ($('gbaBiosModal') && $('gbaBiosModal').style.display === 'flex') {
-          renderBiosModal();
-        }
+        queueRuntimeStateRefresh(state.games, true);
         startCoverQueueMonitor();
       } else {
         showToast('게임 목록을 불러오지 못했습니다: ' + (data.error || '알 수 없는 오류'), true);
@@ -290,6 +403,7 @@
       state.nextOffset = Number(data.next_offset ?? (offset + incoming.length));
       state.hasMore = !!data.has_more;
       renderGames(false);
+      queueRuntimeStateRefresh(incoming, false);
     } catch (err) {
       if (requestSeq === state.libraryRequestSeq) {
         console.error('[GBA] Load more games error:', err);
@@ -411,7 +525,7 @@
     // 필요한 바이오스 미설치 여부 검사
     const biosList = (state.available_bios || []).map((b) => b.toLowerCase());
     const neededBios = (game.needed_bios || '').trim().toLowerCase();
-    const isBiosMissing = neededBios && !biosList.includes(neededBios);
+    const isBiosMissing = state.runtimeGlobalsLoaded && neededBios && !biosList.includes(neededBios);
 
     card.innerHTML = `
       <div class="gba-card-cover-wrap" data-action="play">
@@ -724,7 +838,12 @@
     }
   }
 
-  function openBiosModal() {
+  async function openBiosModal() {
+    try {
+      await ensureRuntimeGlobals();
+    } catch (err) {
+      console.warn('[GBA] BIOS runtime state load error:', err);
+    }
     state.biosPage = 1;
     state.biosSearch = '';
     if ($('gbaBiosSearchInput')) $('gbaBiosSearchInput').value = '';
@@ -926,6 +1045,12 @@
   // 에뮬레이터 실행 & 플레이어 관리 (커스텀 툴바 연동)
   // --------------------------------------------------------------------------
   async function launchGame(game, bypassBiosCheck = false) {
+    // 목록은 DB-only로 즉시 표시하므로, 실제 실행 직전에 세이브/BIOS 상태를 보장한다.
+    try {
+      await ensureRuntimeState(game);
+    } catch (err) {
+      console.warn('[GBA] Runtime state check before launch failed:', err);
+    }
     if (!bypassBiosCheck) {
       const missing = checkMissingBios(game);
       if (missing) {
@@ -1910,6 +2035,14 @@
       } catch (err) {
         console.error('[GBA] Upload error:', err);
         showToast(`업로드 에러 (${file.name}): ${err.message || err}`, true);
+      }
+    }
+
+    if (type === 'bios' && completed > 0) {
+      try {
+        await refreshRuntimeGlobals(state.games);
+      } catch (err) {
+        console.warn('[GBA] BIOS runtime state refresh error:', err);
       }
     }
 
@@ -2986,7 +3119,12 @@
     });
 
     // 설정 모달 열기 & 저장
-    $('gbaSettingsBtn').addEventListener('click', () => {
+    $('gbaSettingsBtn').addEventListener('click', async () => {
+      try {
+        await ensureRuntimeGlobals();
+      } catch (err) {
+        console.warn('[GBA] Settings runtime state load error:', err);
+      }
       $('gbaSettingCloudSave').checked = state.config.cloud_save_enabled;
       $('gbaSettingInterval').value = state.config.auto_save_interval_sec;
       if ($('gbaSettingEmulatorjsRoot')) {
@@ -3117,6 +3255,11 @@
           state.config.bios_path = biosPath;
           state.config.cloud_save_enabled = cloudSave === '1';
           state.config.auto_save_interval_sec = parseInt(interval, 10) || 60;
+          try {
+            await refreshRuntimeGlobals(state.games);
+          } catch (err) {
+            console.warn('[GBA] Runtime globals refresh after settings save failed:', err);
+          }
           renderGames();
           $('gbaSettingsModal').style.display = 'none';
 
