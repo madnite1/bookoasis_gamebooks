@@ -196,7 +196,17 @@ def _convert_result(result):
     }
 
 
-def analyze_rom(file_path, compute_hashes=False):
-    """rom-analyzer로 분석하고 기존 Game Books dict 계약으로 변환한다."""
+def analyze_result(file_path, compute_hashes=False):
+    """rom-analyzer를 한 번 실행하고 원본 RomAnalysisResult를 반환한다."""
     analyze, _version = _load_analyzer()
-    return _convert_result(analyze(file_path, compute_hashes=compute_hashes))
+    return analyze(file_path, compute_hashes=compute_hashes)
+
+
+def convert_result(result):
+    """이미 계산된 RomAnalysisResult를 기존 Game Books dict 계약으로 변환한다."""
+    return _convert_result(result)
+
+
+def analyze_rom(file_path, compute_hashes=False):
+    """기존 호환 API: 한 번 분석한 원본 결과를 Game Books dict로 변환한다."""
+    return convert_result(analyze_result(file_path, compute_hashes=compute_hashes))

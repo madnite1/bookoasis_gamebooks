@@ -55,22 +55,54 @@ class RomAnalysisAdapterTests(unittest.TestCase):
             self.assertEqual(converted["resolved_disk_files"], [str(disc)])
             self.assertEqual(converted["metadata_confidence"], 97)
 
-    def test_detect_rom_info_prefers_modern_result(self):
+    def test_analyze_rom_uses_one_raw_analysis_result(self):
+        raw_result = object()
+        analyze = mock.Mock(return_value=raw_result)
+        converted = {"core": "n64", "platform": "N64", "title": "Modern"}
+        with mock.patch.object(adapter, "_load_analyzer", return_value=(analyze, "test")), \
+             mock.patch.object(adapter, "convert_result", return_value=converted) as convert:
+            self.assertEqual(adapter.analyze_rom("dummy.zip"), converted)
+            analyze.assert_called_once_with("dummy.zip", compute_hashes=False)
+            convert.assert_called_once_with(raw_result)
+
+    def test_analyze_rom_context_keeps_raw_modern_result(self):
+        raw_result = object()
         modern = {"core": "n64", "platform": "N64", "title": "Modern"}
-        with mock.patch.object(adapter, "analyze_rom", return_value=modern), mock.patch.object(gamebooks, "_detect_rom_info_legacy") as legacy:
-            self.assertEqual(gamebooks._detect_rom_info("dummy.zip"), modern)
+        with mock.patch.object(adapter, "analyze_result", return_value=raw_result) as analyze, \
+             mock.patch.object(adapter, "convert_result", return_value=modern) as convert, \
+             mock.patch.object(gamebooks, "_detect_rom_info_legacy") as legacy:
+            result, info = gamebooks._analyze_rom_context("dummy.zip")
+            self.assertIs(result, raw_result)
+            self.assertEqual(info, modern)
+            analyze.assert_called_once_with("dummy.zip")
+            convert.assert_called_once_with(raw_result)
             legacy.assert_not_called()
 
-    def test_detect_rom_info_falls_back_when_modern_is_unknown(self):
+    def test_detect_rom_info_returns_context_dict(self):
+        raw_result = object()
+        modern = {"core": "n64", "platform": "N64", "title": "Modern"}
+        with mock.patch.object(gamebooks, "_analyze_rom_context", return_value=(raw_result, modern)) as context:
+            self.assertEqual(gamebooks._detect_rom_info("dummy.zip"), modern)
+            context.assert_called_once_with("dummy.zip")
+
+    def test_analyze_rom_context_falls_back_when_modern_is_unknown(self):
+        raw_result = object()
         legacy_result = {"core": "arcade", "platform": "Arcade", "title": "Legacy"}
-        with mock.patch.object(adapter, "analyze_rom", return_value={"core": "", "platform": ""}), mock.patch.object(gamebooks, "_detect_rom_info_legacy", return_value=legacy_result) as legacy:
-            self.assertEqual(gamebooks._detect_rom_info("dummy.zip"), legacy_result)
+        with mock.patch.object(adapter, "analyze_result", return_value=raw_result), \
+             mock.patch.object(adapter, "convert_result", return_value={"core": "", "platform": ""}), \
+             mock.patch.object(gamebooks, "_detect_rom_info_legacy", return_value=legacy_result) as legacy:
+            result, info = gamebooks._analyze_rom_context("dummy.zip")
+            self.assertIsNone(result)
+            self.assertEqual(info, legacy_result)
             legacy.assert_called_once_with("dummy.zip")
 
-    def test_detect_rom_info_falls_back_when_modern_raises(self):
+    def test_analyze_rom_context_falls_back_when_modern_raises(self):
         legacy_result = {"core": "snes", "platform": "SNES", "title": "Legacy"}
-        with mock.patch.object(adapter, "analyze_rom", side_effect=RuntimeError("분석 실패")), mock.patch.object(gamebooks, "_detect_rom_info_legacy", return_value=legacy_result) as legacy:
-            self.assertEqual(gamebooks._detect_rom_info("dummy.sfc"), legacy_result)
+        with mock.patch.object(adapter, "analyze_result", side_effect=RuntimeError("분석 실패")), \
+             mock.patch.object(gamebooks, "_detect_rom_info_legacy", return_value=legacy_result) as legacy:
+            result, info = gamebooks._analyze_rom_context("dummy.sfc")
+            self.assertIsNone(result)
+            self.assertEqual(info, legacy_result)
             legacy.assert_called_once_with("dummy.sfc")
 
 

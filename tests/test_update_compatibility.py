@@ -26,6 +26,11 @@ LEGACY_198_FILES = [
 CRITICAL_RUNTIME_FILES = {
     "rom_analysis_adapter.py",
     "libs/rom_analyzer/analyzer.py",
+    "libs/library_structures/__init__.py",
+    "libs/library_structures/base.py",
+    "libs/library_structures/manager.py",
+    "libs/library_structures/models.py",
+    "libs/library_structures/romm.py",
     "libs/rom_database/manager.py",
     "libs/rom_database/data/arcade_dat.db",
     "libs/rom_database/data/mame_compatibility.db",

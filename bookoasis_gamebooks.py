@@ -2887,22 +2887,28 @@ def _detect_rom_info_legacy(file_path):
     return info
 
 
-def _detect_rom_info(file_path):
-    """rom-analyzer를 우선 사용하고 식별 실패/예외 시 기존 감지기로 안전하게 폴백한다."""
+def _analyze_rom_context(file_path):
+    """rom-analyzer를 한 번 실행하고 원본 결과와 기존 Game Books dict를 함께 반환한다."""
     try:
-        from rom_analysis_adapter import analyze_rom
+        from rom_analysis_adapter import analyze_result, convert_result
 
-        modern = analyze_rom(file_path)
+        analysis_result = analyze_result(file_path)
+        modern = convert_result(analysis_result)
         modern_core = str(modern.get("core") or "").strip()
         modern_platform = str(modern.get("platform") or "").strip()
         if modern_core and modern_platform:
-            return modern
+            return analysis_result, modern
     except Exception as exc:
         logger.debug(
             f"[{SELF_ID}] rom-analyzer fallback ({os.path.basename(str(file_path))}): {exc}"
         )
 
-    return _detect_rom_info_legacy(file_path)
+    return None, _detect_rom_info_legacy(file_path)
+
+
+def _detect_rom_info(file_path):
+    """기존 호환 API: 분석 컨텍스트에서 Game Books dict만 반환한다."""
+    return _analyze_rom_context(file_path)[1]
 
 
 def _emulatorjs_unsupported_reason(rom_info):
@@ -3138,6 +3144,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "libs/rom_analyzer/providers/igdb.py",
             "libs/rom_analyzer/providers/libretro.py",
             "libs/rom_analyzer/providers/screenscraper.py",
+            "libs/library_structures/__init__.py",
+            "libs/library_structures/base.py",
+            "libs/library_structures/manager.py",
+            "libs/library_structures/models.py",
+            "libs/library_structures/romm.py",
             "libs/rom_database/VENDORED_FROM.json",
             "libs/rom_database/__init__.py",
             "libs/rom_database/__main__.py",
@@ -3189,6 +3200,49 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         if os.path.isdir("/mnt/gdrive/emulatorjs"):
             return "/mnt/gdrive/emulatorjs"
         return self._get_data_dir()
+
+    def _get_library_manager(self):
+        """Game Books 표준 물리 배치를 담당하는 library_structures 관리자."""
+        from library_structures import LibraryManager
+
+        return LibraryManager(self._get_emulatorjs_root())
+
+    def _place_new_ingest_content(self, analysis_result, future_id, file_path):
+        """신규 ingest ROM을 재분석 없이 최종 game-id 기반 구조로 배치한다.
+
+        기존 정책 단계에서 7z 변환/디스크 번들 정리가 끝난 뒤 호출되므로
+        원본 RomAnalysisResult의 파일 위치와 sidecar 참조만 현재 상태로 맞춘다.
+        """
+        if analysis_result is None:
+            return None
+
+        source_path = os.path.abspath(str(file_path or ""))
+        if not source_path or not os.path.isfile(source_path):
+            return None
+
+        analysis_result.file_path = source_path
+        analysis_result.file_name = os.path.basename(source_path)
+        analysis_result.file_size = os.path.getsize(source_path)
+        analysis_result.file_ext = os.path.splitext(source_path)[1].lower()
+
+        disc_info = getattr(analysis_result, "disc_info", None)
+        if disc_info is not None and getattr(analysis_result, "is_disc", False):
+            # 기존 Game Books 번들 이동은 모든 sidecar를 같은 폴더로 모으고
+            # CUE/GDI/M3U 참조를 basename으로 재작성한다. 재분석 없이 raw 결과도
+            # 같은 표현으로 맞춰 library_structures가 현재 파일들을 찾게 한다.
+            refs = list(getattr(disc_info, "referenced_files", None) or [])
+            if refs:
+                disc_info.referenced_files = [os.path.basename(str(ref)) for ref in refs]
+            playlist = list(getattr(disc_info, "playlist_entries", None) or [])
+            if playlist:
+                disc_info.playlist_entries = [os.path.basename(str(ref)) for ref in playlist]
+
+        return self._get_library_manager().place_content(
+            analysis_result,
+            future_id,
+            move_files=True,
+            conflict_strategy="replace",
+        )
 
     def _get_roms_dir(self):
         """기본 롬 파일 디렉터리 (../../data/bookoasis_gamebooks/roms/)"""
@@ -3704,6 +3758,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     ("revision_tag", "TEXT DEFAULT ''"),
                     ("disc_number", "INTEGER DEFAULT 0"),
                     ("content_flags", "TEXT DEFAULT ''"),
+                    ("future_id", "INTEGER"),
+                    ("layout_version", "INTEGER DEFAULT 1"),
+                    ("cover_thumbnail_path", "TEXT DEFAULT ''"),
+                    ("cover_revision", "INTEGER DEFAULT 0"),
                 ):
                     try:
                         conn.execute(f"ALTER TABLE games ADD COLUMN {col} {ctype}")
@@ -3721,11 +3779,22 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     )"""
                 )
                 conn.execute(
+                    """CREATE TABLE IF NOT EXISTS game_id_map (
+                        future_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        legacy_id TEXT NOT NULL UNIQUE,
+                        migration_status TEXT NOT NULL DEFAULT 'pending',
+                        last_error TEXT DEFAULT '',
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    )"""
+                )
+                conn.execute(
                     """CREATE TABLE IF NOT EXISTS settings (
                         key TEXT PRIMARY KEY,
                         value TEXT
                     )"""
                 )
+                self._backfill_future_game_ids(conn)
                 conn.commit()
                 conn.close()
             except Exception as e:
@@ -3734,6 +3803,226 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
     # ------------------------------------------------------------------
     # DB 헬퍼 함수
     # ------------------------------------------------------------------
+    def _backfill_future_game_ids(self, conn):
+        """기존 문자열 game id에 최종 INTEGER ID를 한 번만 영구 예약한다.
+
+        기존 설치는 현재 SQLite rowid를 우선 사용해 번호를 안정적으로 보존하고,
+        이미 game_id_map에 고정된 매핑이 있으면 그 값을 최우선으로 사용한다.
+        """
+        rows = conn.execute(
+            "SELECT rowid, id, future_id FROM games ORDER BY rowid"
+        ).fetchall()
+        for source_rowid, raw_legacy_id, stored_future_id in rows:
+            legacy_id = str(raw_legacy_id or "").strip()
+            if not legacy_id:
+                continue
+
+            mapped = conn.execute(
+                "SELECT future_id FROM game_id_map WHERE legacy_id = ?",
+                (legacy_id,),
+            ).fetchone()
+            if mapped:
+                future_id = int(mapped[0])
+                if int(stored_future_id or 0) != future_id:
+                    conn.execute(
+                        "UPDATE games SET future_id = ? WHERE id = ?",
+                        (future_id, legacy_id),
+                    )
+                continue
+
+            preferred_id = int(stored_future_id or source_rowid or 0)
+            future_id = 0
+            if preferred_id > 0:
+                owner = conn.execute(
+                    "SELECT legacy_id FROM game_id_map WHERE future_id = ?",
+                    (preferred_id,),
+                ).fetchone()
+                if not owner:
+                    try:
+                        conn.execute(
+                            """INSERT INTO game_id_map
+                               (future_id, legacy_id, migration_status, updated_at)
+                               VALUES (?, ?, 'pending', CURRENT_TIMESTAMP)""",
+                            (preferred_id, legacy_id),
+                        )
+                        future_id = preferred_id
+                    except sqlite3.IntegrityError:
+                        future_id = 0
+                elif str(owner[0] or "") == legacy_id:
+                    future_id = preferred_id
+
+            if future_id <= 0:
+                cur = conn.execute(
+                    """INSERT INTO game_id_map
+                       (legacy_id, migration_status, updated_at)
+                       VALUES (?, 'pending', CURRENT_TIMESTAMP)""",
+                    (legacy_id,),
+                )
+                future_id = int(cur.lastrowid)
+
+            if int(stored_future_id or 0) != future_id:
+                conn.execute(
+                    "UPDATE games SET future_id = ? WHERE id = ?",
+                    (future_id, legacy_id),
+                )
+
+    def _get_or_create_future_game_id(self, legacy_id):
+        """현재 문자열 ID에 대응하는 영구 INTEGER game id를 반환한다."""
+        legacy_id = str(legacy_id or "").strip()
+        if not legacy_id:
+            raise ValueError("legacy game id가 필요합니다.")
+
+        with _DB_LOCK:
+            conn = self._get_db_conn(timeout=60)
+            try:
+                mapped = conn.execute(
+                    "SELECT future_id FROM game_id_map WHERE legacy_id = ?",
+                    (legacy_id,),
+                ).fetchone()
+                if mapped:
+                    return int(mapped[0])
+
+                existing = conn.execute(
+                    "SELECT future_id FROM games WHERE id = ?",
+                    (legacy_id,),
+                ).fetchone()
+                preferred_id = int((existing[0] if existing else 0) or 0)
+                future_id = 0
+                if preferred_id > 0:
+                    owner = conn.execute(
+                        "SELECT legacy_id FROM game_id_map WHERE future_id = ?",
+                        (preferred_id,),
+                    ).fetchone()
+                    if not owner:
+                        try:
+                            conn.execute(
+                                """INSERT INTO game_id_map
+                                   (future_id, legacy_id, migration_status, updated_at)
+                                   VALUES (?, ?, 'pending', CURRENT_TIMESTAMP)""",
+                                (preferred_id, legacy_id),
+                            )
+                            future_id = preferred_id
+                        except sqlite3.IntegrityError:
+                            future_id = 0
+                    elif str(owner[0] or "") == legacy_id:
+                        future_id = preferred_id
+
+                if future_id <= 0:
+                    cur = conn.execute(
+                        """INSERT INTO game_id_map
+                           (legacy_id, migration_status, updated_at)
+                           VALUES (?, 'pending', CURRENT_TIMESTAMP)""",
+                        (legacy_id,),
+                    )
+                    future_id = int(cur.lastrowid)
+
+                conn.execute(
+                    "UPDATE games SET future_id = ? WHERE id = ?",
+                    (future_id, legacy_id),
+                )
+                conn.commit()
+                return future_id
+            finally:
+                conn.close()
+
+    def _rebind_future_game_id(self, old_legacy_id, new_legacy_id, future_id):
+        """경로 기반 legacy ID가 바뀌어도 같은 영구 INTEGER ID를 유지한다."""
+        old_legacy_id = str(old_legacy_id or "").strip()
+        new_legacy_id = str(new_legacy_id or "").strip()
+        future_id = int(future_id or 0)
+        if not old_legacy_id or not new_legacy_id or future_id <= 0:
+            raise ValueError("future game id 재바인딩 인자가 올바르지 않습니다.")
+        if old_legacy_id == new_legacy_id:
+            actual_id = self._get_or_create_future_game_id(new_legacy_id)
+            if actual_id != future_id:
+                raise ValueError(
+                    f"future game id 충돌: {new_legacy_id}={actual_id}, expected={future_id}"
+                )
+            return actual_id
+
+        with _DB_LOCK:
+            conn = self._get_db_conn(timeout=60)
+            try:
+                mapped_new = conn.execute(
+                    "SELECT future_id FROM game_id_map WHERE legacy_id = ?",
+                    (new_legacy_id,),
+                ).fetchone()
+                if mapped_new and int(mapped_new[0]) != future_id:
+                    raise ValueError(
+                        f"legacy id가 다른 future id에 이미 연결되어 있습니다: "
+                        f"{new_legacy_id} -> {mapped_new[0]}"
+                    )
+
+                mapped_future = conn.execute(
+                    "SELECT legacy_id FROM game_id_map WHERE future_id = ?",
+                    (future_id,),
+                ).fetchone()
+                if mapped_future:
+                    owner = str(mapped_future[0] or "")
+                    if owner not in {old_legacy_id, new_legacy_id}:
+                        raise ValueError(
+                            f"future id가 다른 legacy id에 이미 연결되어 있습니다: "
+                            f"{future_id} -> {owner}"
+                        )
+                    conn.execute(
+                        """UPDATE game_id_map
+                           SET legacy_id = ?, migration_status = 'pending', last_error = '',
+                               updated_at = CURRENT_TIMESTAMP
+                           WHERE future_id = ?""",
+                        (new_legacy_id, future_id),
+                    )
+                else:
+                    mapped_old = conn.execute(
+                        "SELECT future_id FROM game_id_map WHERE legacy_id = ?",
+                        (old_legacy_id,),
+                    ).fetchone()
+                    if mapped_old and int(mapped_old[0]) != future_id:
+                        raise ValueError(
+                            f"기존 legacy id의 future id가 일치하지 않습니다: "
+                            f"{old_legacy_id} -> {mapped_old[0]}"
+                        )
+                    conn.execute(
+                        """INSERT INTO game_id_map
+                           (future_id, legacy_id, migration_status, updated_at)
+                           VALUES (?, ?, 'pending', CURRENT_TIMESTAMP)""",
+                        (future_id, new_legacy_id),
+                    )
+
+                conn.execute(
+                    "UPDATE games SET future_id = ? WHERE id = ?",
+                    (future_id, new_legacy_id),
+                )
+                conn.commit()
+                return future_id
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def _delete_future_game_id(self, legacy_id):
+        """실제 게임 삭제 후 legacy 매핑만 제거한다. AUTOINCREMENT ID는 재사용하지 않는다."""
+        legacy_id = str(legacy_id or "").strip()
+        if not legacy_id:
+            return False
+        with _DB_LOCK:
+            conn = self._get_db_conn(timeout=60)
+            try:
+                still_exists = conn.execute(
+                    "SELECT 1 FROM games WHERE id = ? LIMIT 1",
+                    (legacy_id,),
+                ).fetchone()
+                if still_exists:
+                    return False
+                cur = conn.execute(
+                    "DELETE FROM game_id_map WHERE legacy_id = ?",
+                    (legacy_id,),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+            finally:
+                conn.close()
+
     def _get_db_conn(self, timeout=60):
         db_path = self._get_db_path()
         conn = sqlite3.connect(db_path, timeout=timeout)
@@ -3885,6 +4174,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         if not file_path or not os.path.exists(file_path):
             self._db_execute("DELETE FROM games WHERE id = ?", (game_id,))
             self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (game_id,))
+            self._delete_future_game_id(game_id)
             return {"exists": False, "deleted": True, "cover_updated": False}
 
         # 2. 기종/코어 재검증 (과거 잘못 등록된 arcade/other 기종 보정)
@@ -4288,7 +4578,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         def _process_single_rom(info):
             try:
                 gid = info["id"]
-                rom_info = _detect_rom_info(info["file_path"])
+                analysis_result, rom_info = _analyze_rom_context(info["file_path"])
                 with _SCAN_PROGRESS_LOCK:
                     processed_counter[0] += 1
                     _SCAN_PROGRESS["current"] = processed_counter[0]
@@ -4326,6 +4616,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "source_gid": source_gid,
                     "info": info,
                     "rom_info": rom_info,
+                    "analysis_result": analysis_result,
                     "clean_title": clean_title,
                     "mapped_header": mapped_header,
                     "identity_info": identity_info,
@@ -4351,6 +4642,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 source_gid = res.get("source_gid") or gid
                 info = res["info"]
                 rom_info = res["rom_info"]
+                analysis_result = res.get("analysis_result")
                 clean_title = res["clean_title"]
                 mapped_header = res["mapped_header"]
                 identity_info = res.get("identity_info") or {}
@@ -4493,13 +4785,29 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     update_db=False,
                 )
 
+                # 최종 legacy gid가 확정된 뒤에만 영구 INTEGER ID를 예약한다.
+                # 기존 게임의 relocation이면 새 번호를 만들지 않고 기존 future_id를 그대로 승계한다.
+                if source_gid != gid and source_gid in existing_games:
+                    future_id = int((existing_games.get(source_gid) or {}).get("future_id") or 0)
+                    if future_id <= 0:
+                        future_id = self._get_or_create_future_game_id(source_gid)
+                else:
+                    future_id = self._get_or_create_future_game_id(gid)
+
+                is_new_ingest = bool(
+                    new_only
+                    and gid not in existing_games
+                    and source_gid not in existing_games
+                )
+
                 try:
                     if gid not in existing_games:
                         self._db_execute(
-                            """INSERT OR REPLACE INTO games (id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence, region_tag, revision_tag, disc_number, content_flags)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            """INSERT OR REPLACE INTO games (id, future_id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence, region_tag, revision_tag, disc_number, content_flags)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 gid,
+                                future_id,
                                 info["filename"],
                                 curr_file_path,
                                 clean_title,
@@ -4528,6 +4836,43 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 identity_info.get("content_flags") or "",
                             ),
                         )
+
+                        if is_new_ingest and analysis_result is not None:
+                            try:
+                                placement = self._place_new_ingest_content(
+                                    analysis_result,
+                                    future_id,
+                                    curr_file_path,
+                                )
+                                if placement and placement.success and placement.rom_dest_path:
+                                    curr_file_path = os.path.abspath(placement.rom_dest_path)
+                                    info["file_path"] = curr_file_path
+                                    info["filename"] = os.path.basename(curr_file_path)
+                                    info["size_bytes"] = os.path.getsize(curr_file_path)
+                                    info["mtime"] = os.path.getmtime(curr_file_path)
+                                    self._db_execute(
+                                        """UPDATE games
+                                           SET layout_version = 2, filename = ?, file_path = ?, size_bytes = ?, mtime = ?
+                                           WHERE id = ?""",
+                                        (
+                                            info["filename"],
+                                            curr_file_path,
+                                            info["size_bytes"],
+                                            info["mtime"],
+                                            gid,
+                                        ),
+                                    )
+                                elif placement is not None:
+                                    logger.warning(
+                                        f"[{SELF_ID}] library_structures ingest placement failed "
+                                        f"({info.get('filename')}): {'; '.join(placement.errors or [])}"
+                                    )
+                            except Exception as placement_exc:
+                                logger.warning(
+                                    f"[{SELF_ID}] library_structures ingest placement error "
+                                    f"({info.get('filename')}): {placement_exc}"
+                                )
+
                         new_games_added.append(clean_title or info["filename"])
                         if not existing_cover_file:
                             covers_to_fetch.append((
@@ -4539,8 +4884,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             ))
                     else:
                         self._db_execute(
-                            "UPDATE games SET file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ?, game_code = ?, needed_bios = ?, health_status = ?, missing_roms = ?, rom_crc32 = ?, rom_md5 = ?, rom_sha1 = ?, serial_code = ?, normalized_title = ?, source_system = ?, metadata_source = COALESCE(NULLIF(metadata_source, ''), ?), metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence = 0 THEN ? ELSE metadata_confidence END, region_tag = ?, revision_tag = ?, disc_number = ?, content_flags = ?, cover_path = COALESCE(cover_path, ?) WHERE id = ?",
-                            (curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, rom_info["game_code"], rom_info.get("needed_bios") or "", health_status, missing_roms_str, identity_info.get("rom_crc32") or "", identity_info.get("rom_md5") or "", identity_info.get("rom_sha1") or "", identity_info.get("serial_code") or "", identity_info.get("normalized_title") or "", identity_info.get("source_system") or "", identity_info.get("metadata_source") or "", identity_info.get("metadata_confidence") or 0, identity_info.get("region_tag") or "", identity_info.get("revision_tag") or "", identity_info.get("disc_number") or 0, identity_info.get("content_flags") or "", existing_cover_file, gid),
+                            "UPDATE games SET future_id = ?, file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, title = ?, game_code = ?, needed_bios = ?, health_status = ?, missing_roms = ?, rom_crc32 = ?, rom_md5 = ?, rom_sha1 = ?, serial_code = ?, normalized_title = ?, source_system = ?, metadata_source = COALESCE(NULLIF(metadata_source, ''), ?), metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence = 0 THEN ? ELSE metadata_confidence END, region_tag = ?, revision_tag = ?, disc_number = ?, content_flags = ?, cover_path = COALESCE(cover_path, ?) WHERE id = ?",
+                            (future_id, curr_file_path, info["size_bytes"], info["mtime"], rom_info["core"], rom_info["platform"], clean_title, rom_info["game_code"], rom_info.get("needed_bios") or "", health_status, missing_roms_str, identity_info.get("rom_crc32") or "", identity_info.get("rom_md5") or "", identity_info.get("rom_sha1") or "", identity_info.get("serial_code") or "", identity_info.get("normalized_title") or "", identity_info.get("source_system") or "", identity_info.get("metadata_source") or "", identity_info.get("metadata_confidence") or 0, identity_info.get("region_tag") or "", identity_info.get("revision_tag") or "", identity_info.get("disc_number") or 0, identity_info.get("content_flags") or "", existing_cover_file, gid),
                         )
                         existing_entry = existing_games.get(gid)
                         current_cover = existing_entry.get("cover_path") if existing_entry else None
@@ -4559,17 +4904,35 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     if source_gid != gid and source_gid in existing_games:
                         if not self._merge_game_user_state(source_gid, gid):
                             failed_relocations.add(source_gid)
+                        else:
+                            try:
+                                self._rebind_future_game_id(source_gid, gid, future_id)
+                            except Exception:
+                                failed_relocations.add(source_gid)
+                                raise
                 except Exception as dbe:
                     logger.warning(f"[{SELF_ID}] Game DB update error ({gid}): {dbe}")
 
         # 삭제된 게임 정리. 신규/변경 파일이 하나도 없어도 디스크와 DB의 삭제 상태는 항상 맞춘다.
-        for gid in existing_games:
+        # layout v2 게임은 legacy scan root 밖의 표준 library/에 있으므로 실제 파일이 살아 있으면 유지한다.
+        structured_library_root = os.path.join(self._get_emulatorjs_root(), "library")
+        for gid, existing_game in existing_games.items():
             if gid in failed_relocations:
                 continue
             if gid not in found_files:
+                layout_version = int((existing_game or {}).get("layout_version") or 1)
+                structured_path = str((existing_game or {}).get("file_path") or "").strip()
+                if (
+                    layout_version >= 2
+                    and structured_path
+                    and os.path.isfile(structured_path)
+                    and _path_within(structured_path, structured_library_root)
+                ):
+                    continue
                 try:
                     self._db_execute("DELETE FROM games WHERE id = ?", (gid,))
                     self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (gid,))
+                    self._delete_future_game_id(gid)
                     deleted_count += 1
                 except Exception:
                     pass
@@ -6132,6 +6495,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                     self._db_execute("DELETE FROM games WHERE id = ?", (game_id,))
                     self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (game_id,))
+                    self._delete_future_game_id(game_id)
                     return {"success": True, "message": "게임이 성공적으로 삭제되었습니다."}
                 return {"success": False, "error": "game_id 파라미터가 누락되었습니다."}
 
