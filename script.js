@@ -279,7 +279,6 @@
         // 첫 화면은 list_games의 DB 응답만으로 즉시 렌더한다. 세이브/BIOS처럼
         // 파일시스템을 확인해야 하는 상태는 렌더 이후 비동기로 보정한다.
         renderGames(true);
-        queueRuntimeStateRefresh(state.games, true);
         startCoverQueueMonitor();
       } else {
         showToast('게임 목록을 불러오지 못했습니다: ' + (data.error || '알 수 없는 오류'), true);
@@ -403,7 +402,6 @@
       state.nextOffset = Number(data.next_offset ?? (offset + incoming.length));
       state.hasMore = !!data.has_more;
       renderGames(false);
-      queueRuntimeStateRefresh(incoming, false);
     } catch (err) {
       if (requestSeq === state.libraryRequestSeq) {
         console.error('[GBA] Load more games error:', err);

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from flask import Flask
+from werkzeug.exceptions import NotFound
 
 import bookoasis_gamebooks as gamebooks
 
@@ -134,6 +135,55 @@ class ListPaginationTests(unittest.TestCase):
         self.assertEqual(data["game_states"]["g5"]["has_save"], 0)
         self.assertIn("gba_bios.bin", data["available_bios"])
         self.assertIn("config", data)
+
+    def test_frontend_does_not_auto_query_runtime_state_after_list_render(self):
+        script = (Path(__file__).resolve().parents[1] / "script.js").read_text()
+        self.assertNotIn("queueRuntimeStateRefresh(state.games, true);", script)
+        self.assertNotIn("queueRuntimeStateRefresh(incoming, false);", script)
+
+    def test_cover_route_uses_db_path_without_recovery_scan(self):
+        cover_path = self.covers / "g5.png"
+        payload = b"\x89PNG\r\n\x1a\ncover"
+        cover_path.write_bytes(payload)
+        self.provider._db_execute(
+            "UPDATE games SET cover_path = ? WHERE id = ?",
+            (str(cover_path), "g5"),
+        )
+
+        with self.app.test_request_context("/"), \
+             mock.patch.object(gamebooks, "_get_current_user_id", return_value=1), \
+             mock.patch.object(
+                 self.provider,
+                 "_resolve_existing_cover",
+                 side_effect=AssertionError("cover recovery must not run"),
+             ):
+            response = self.provider._route_cover_file("g5")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_data(), payload)
+        self.assertEqual(response.mimetype, "image/png")
+
+    def test_cover_route_does_not_fallback_when_db_path_is_missing(self):
+        missing_path = self.covers / "missing.png"
+        fallback_path = self.covers / "g5.png"
+        fallback_path.write_bytes(b"fallback")
+        self.provider._db_execute(
+            "UPDATE games SET cover_path = ? WHERE id = ?",
+            (str(missing_path), "g5"),
+        )
+
+        with self.app.test_request_context("/"), \
+             mock.patch.object(gamebooks, "_get_current_user_id", return_value=1), \
+             mock.patch.object(
+                 self.provider,
+                 "_resolve_existing_cover",
+                 side_effect=AssertionError("cover recovery must not run"),
+             ):
+            with self.assertRaises(NotFound):
+                self.provider._route_cover_file("g5")
+
+        row = self.provider._db_query("SELECT cover_path FROM games WHERE id = ?", ("g5",))[0]
+        self.assertEqual(row["cover_path"], str(missing_path))
 
     def test_list_payload_omits_heavy_unused_fields(self):
         data = self._call("offset=0&limit=1&sort=newest&category=all&status=all")

@@ -5048,34 +5048,27 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return resp
 
     def _route_cover_file(self, game_id):
-        """커버 이미지 서빙"""
+        """DB에 저장된 cover_path의 커버 이미지를 그대로 서빙한다."""
         from flask import Response, abort
 
         if _get_current_user_id() <= 0:
             abort(401, "Authentication required")
 
-        rows = self._db_query(
-            "SELECT cover_path, file_path, filename, core, platform, normalized_title, title FROM games WHERE id = ?",
-            (game_id,),
-        )
+        rows = self._db_query("SELECT cover_path FROM games WHERE id = ?", (game_id,))
         if not rows:
             abort(404, "Cover image not found")
-        game = rows[0]
-        cover_path = self._resolve_existing_cover(
-            game_id,
-            game.get("filename") or os.path.basename(game.get("file_path") or ""),
-            game.get("core") or game.get("platform") or "",
-            current_cover_path=game.get("cover_path") or "",
-            update_db=True,
-        )
-        if not cover_path or not os.path.exists(cover_path):
+        cover_path = str(rows[0].get("cover_path") or "").strip()
+        if not cover_path:
             abort(404, "Cover image not found")
 
-        ext = os.path.splitext(str(cover_path))[1].lower().replace(".", "")
+        ext = os.path.splitext(cover_path)[1].lower().replace(".", "")
         mime = "image/png" if ext == "png" else "image/jpeg" if ext in ("jpg", "jpeg") else "image/webp"
 
-        with open(str(cover_path), "rb") as f:
-            data = f.read()
+        try:
+            with open(cover_path, "rb") as f:
+                data = f.read()
+        except OSError:
+            abort(404, "Cover image not found")
 
         resp = Response(data, 200, mimetype=mime)
         resp.headers["Cache-Control"] = "public, max-age=86400"
