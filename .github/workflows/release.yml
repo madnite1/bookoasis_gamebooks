@@ -62,6 +62,13 @@ jobs:
             fi
           } > release_body.md
 
+      - name: Build and verify full release ZIP
+        if: steps.tagcheck.outputs.exists == 'false'
+        run: |
+          mkdir -p dist
+          python tools/build_release_zip.py \
+            --output "dist/bookoasis_gamebooks-${{ steps.version.outputs.version }}.zip"
+
       - name: Create Release
         if: steps.tagcheck.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
@@ -70,14 +77,6 @@ jobs:
           name: ${{ steps.version.outputs.version }}
           body_path: release_body.md
           files: |
-            bookoasis_gamebooks.py
-            __init__.py
-            VERSION
-            LICENSE
-            index.html
-            style.css
-            script.js
-            README.md
-            requirements.txt
-            arcade_dat.db
-          fail_on_unmatched_files: false
+            dist/bookoasis_gamebooks-${{ steps.version.outputs.version }}.zip
+            dist/bookoasis_gamebooks-${{ steps.version.outputs.version }}.zip.sha256
+          fail_on_unmatched_files: true

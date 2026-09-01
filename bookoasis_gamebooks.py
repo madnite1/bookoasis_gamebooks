@@ -3085,12 +3085,16 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         "raw_base_url": "https://raw.githubusercontent.com/madnite1/bookoasis_gamebooks/main",
         "version_file": "VERSION",
         "version_key": "plugin version",
-        "show_sample_update_button": True,
+        # Game Books는 중첩 libs/와 SQLite 바이너리를 함께 배포하므로
+        # BookOasis 코어의 텍스트 기반 샘플 업데이트 버튼은 사용하지 않는다.
+        # 온라인/ZIP 업데이트는 Plugin Manager의 저장소 ZIP 경로를 사용한다.
+        "show_sample_update_button": False,
         "files": [
             "bookoasis_gamebooks.py",
             "__init__.py",
             "VERSION",
             "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
             "index.html",
             "style.css",
             "script.js",
