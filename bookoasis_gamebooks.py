@@ -3081,8 +3081,12 @@ def _derive_health_status_from_analysis(rom_info, file_path, db_core="", db_plat
     return "pass", ""
 
 
-def _build_analysis_snapshot(analysis):
-    """rom-analyzer 결과 중 UI에 노출할 수 있는 안정적인 필드만 JSON 직렬화용으로 정리합니다."""
+def _build_analysis_snapshot(analysis, health_status="", health_reason="", file_state="ok", cache_key="", analyzed_at=""):
+    """ROM 분석의 단일 저장 원본을 만든다.
+
+    rom-analyzer 상세 근거와 그 결과에서 파생한 health 요약을 같은 JSON에 보관한다.
+    목록용 health_status/missing_roms 컬럼은 이 스냅샷의 DB 인덱스 역할만 한다.
+    """
     analysis = analysis if isinstance(analysis, dict) else {}
 
     def _text(value):
@@ -3101,7 +3105,7 @@ def _build_analysis_snapshot(analysis):
                 result.append(text)
         return result
 
-    return {
+    snapshot = {
         "core": _text(analysis.get("core")),
         "platform": _text(analysis.get("platform")),
         "title": _text(analysis.get("title")),
@@ -3131,6 +3135,14 @@ def _build_analysis_snapshot(analysis):
         "emulatorjs_system": _text(analysis.get("emulatorjs_system")),
         "emulatorjs_reason": _text(analysis.get("emulatorjs_reason")),
     }
+    snapshot.update({
+        "health_status": _text(health_status or analysis.get("health_status")),
+        "health_reason": _text(health_reason or analysis.get("health_reason")),
+        "file_state": _text(file_state or analysis.get("file_state") or "ok"),
+        "analysis_cache_key": _text(cache_key or analysis.get("analysis_cache_key")),
+        "analysis_updated_at": _text(analyzed_at or analysis.get("analysis_updated_at")),
+    })
+    return snapshot
 
 
 class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
@@ -4635,8 +4647,210 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             cache[parent] = value
         return value
 
-    def _refresh_health_statuses(self):
-        """파일 배치를 변경하지 않고 전체 라이브러리의 진단 상태만 증분 재계산한다."""
+    @staticmethod
+    def _cached_analysis_snapshot(game):
+        raw = str((game or {}).get("analysis_json") or "")
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _analysis_environment(self):
+        bios_dir = self._get_bios_dir()
+        try:
+            available_bios_names = {
+                name.lower() for name in os.listdir(bios_dir) if not name.startswith(".")
+            } if os.path.isdir(bios_dir) else set()
+        except Exception:
+            available_bios_names = set()
+        return bios_dir, available_bios_names, self._health_engine_signature(available_bios_names)
+
+    def _evaluate_rom_analysis(
+        self, game, *, available_bios_names=None, bios_dir=None, engine_signature=None,
+        bios_state_cache=None, bundle_state_cache=None, force=False,
+    ):
+        """개별 ROM의 상세 분석과 health 요약을 한 번에 계산한다.
+
+        이 함수가 상세보기와 전체 분석 갱신의 공통 원본이다. DB 경로는 절대 수정하지 않는다.
+        """
+        game = dict(game or {})
+        gid = str(game.get("id") or "")
+        filename = str(game.get("filename") or "")
+        if bios_dir is None or available_bios_names is None or engine_signature is None:
+            env_bios_dir, env_bios_names, env_signature = self._analysis_environment()
+            bios_dir = env_bios_dir if bios_dir is None else bios_dir
+            available_bios_names = env_bios_names if available_bios_names is None else available_bios_names
+            engine_signature = env_signature if engine_signature is None else engine_signature
+
+        db_path = str(game.get("file_path") or "")
+        file_path = db_path if db_path and os.path.isfile(db_path) else ""
+        file_state = "ok"
+        if not file_path:
+            resolved = self._resolve_existing_rom_path(
+                gid, filename, db_path,
+                core=game.get("core") or "", platform=game.get("platform") or "", update_db=False,
+            )
+            if resolved and os.path.isfile(resolved):
+                file_path = resolved
+                file_state = "path_mismatch"
+            else:
+                file_state = "missing_file"
+
+        stat_result = None
+        if file_path:
+            try:
+                stat_result = os.stat(file_path)
+            except OSError:
+                file_path = ""
+                file_state = "missing_file"
+
+        bios_state = self._health_bios_cache_state(
+            game, available_bios_names, bios_dir, state_cache=bios_state_cache
+        )
+        bundle_state = self._health_bundle_cache_state(
+            game, file_path, state_cache=bundle_state_cache
+        )
+        cache_key = self._health_cache_key(
+            game, engine_signature, file_state, file_path, stat_result,
+            bios_state=bios_state, bundle_state=bundle_state,
+        )
+        cached_snapshot = self._cached_analysis_snapshot(game)
+        cache_reused = bool(
+            not force and cached_snapshot
+            and str(game.get("health_cache_key") or "") == cache_key
+            and str(game.get("analysis_cache_key") or "") == cache_key
+        )
+        if cache_reused:
+            return {
+                "kind": "cached", "game_id": gid, "target": None, "snapshot": cached_snapshot,
+                "file_path": file_path, "file_state": file_state, "cache_key": cache_key,
+                "cache_reused": True, "error": "",
+            }
+
+        now_str = _get_kst_now_str()
+        if file_state == "missing_file":
+            status = "missing_file"
+            reason = "DB에 등록된 ROM 파일을 현재 경로 또는 관리 저장소에서 찾을 수 없습니다."
+            snapshot = _build_analysis_snapshot(
+                cached_snapshot or {}, status, reason, file_state, cache_key, now_str
+            )
+            target = {
+                "status": status, "reason": reason,
+                "analysis_json": json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                "analysis_cache_key": cache_key,
+                "content_identity_key": str(game.get("content_identity_key") or self._content_identity_key(game, snapshot)),
+                "metadata_source": str(snapshot.get("metadata_source") or game.get("metadata_source") or ""),
+                "metadata_confidence": int(snapshot.get("metadata_confidence") or game.get("metadata_confidence") or 0),
+                "source_system": str(snapshot.get("source_system") or game.get("source_system") or ""),
+                "needed_bios": _normalize_required_archive(snapshot.get("needed_bios") or game.get("needed_bios") or ""),
+                "cache_key": cache_key,
+            }
+            return {
+                "kind": "update", "game_id": gid, "target": target, "snapshot": snapshot,
+                "file_path": "", "file_state": file_state, "cache_key": cache_key,
+                "cache_reused": False, "error": "",
+            }
+
+        try:
+            from rom_analysis_adapter import analyze_rom
+            fresh = analyze_rom(file_path)
+            if not isinstance(fresh, dict):
+                raise RuntimeError("rom-analyzer 결과 형식이 올바르지 않습니다.")
+            derived_status, derived_reason = _derive_health_status_from_analysis(
+                fresh, file_path,
+                db_core=game.get("core") or "", db_platform=game.get("platform") or "",
+                db_game_code=game.get("game_code") or "",
+                available_bios_names=available_bios_names, bios_dir=bios_dir,
+            )
+            status = str(derived_status or "unverified")
+            reason = str(derived_reason or "")
+            if file_state == "path_mismatch":
+                status = "path_mismatch"
+                reason = "DB의 ROM 경로와 실제 발견 위치가 다릅니다. 라이브러리 동기화로 경로를 갱신하세요."
+
+            detected_needed_bios = _normalize_required_archive(fresh.get("needed_bios") or "")
+            cache_game = dict(game)
+            cache_game["needed_bios"] = detected_needed_bios
+            detected_bios_state = self._health_bios_cache_state(
+                cache_game, available_bios_names, bios_dir, state_cache=bios_state_cache
+            )
+            final_cache_key = self._health_cache_key(
+                cache_game, engine_signature, file_state, file_path, stat_result,
+                bios_state=detected_bios_state, bundle_state=bundle_state,
+            )
+            snapshot = _build_analysis_snapshot(
+                fresh, status, reason, file_state, final_cache_key, now_str
+            )
+            content_identity_key = self._content_identity_key(cache_game, snapshot)
+            target = {
+                "status": status, "reason": reason,
+                "analysis_json": json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                "analysis_cache_key": final_cache_key,
+                "content_identity_key": content_identity_key,
+                "metadata_source": str(fresh.get("metadata_source") or "rom-analyzer"),
+                "metadata_confidence": int(fresh.get("metadata_confidence") or 0),
+                "source_system": str(fresh.get("source_system") or "rom_analyzer"),
+                "needed_bios": detected_needed_bios,
+                "cache_key": final_cache_key,
+            }
+            return {
+                "kind": "update", "game_id": gid, "target": target, "snapshot": snapshot,
+                "file_path": file_path, "file_state": file_state, "cache_key": final_cache_key,
+                "cache_reused": False, "error": "",
+            }
+        except Exception as exc:
+            # 경로 불일치는 analyzer가 일시적으로 실패해도 현재 storage 상태 자체는 확정할 수 있다.
+            if file_state == "path_mismatch":
+                status = "path_mismatch"
+                reason = "DB의 ROM 경로와 실제 발견 위치가 다릅니다. 라이브러리 동기화로 경로를 갱신하세요."
+                snapshot = _build_analysis_snapshot(
+                    cached_snapshot or {}, status, reason, file_state, cache_key, now_str
+                )
+                target = {
+                    "status": status, "reason": reason,
+                    "analysis_json": json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                    "analysis_cache_key": cache_key,
+                    "content_identity_key": str(game.get("content_identity_key") or self._content_identity_key(game, snapshot)),
+                    "metadata_source": str(snapshot.get("metadata_source") or game.get("metadata_source") or ""),
+                    "metadata_confidence": int(snapshot.get("metadata_confidence") or game.get("metadata_confidence") or 0),
+                    "source_system": str(snapshot.get("source_system") or game.get("source_system") or ""),
+                    "needed_bios": _normalize_required_archive(snapshot.get("needed_bios") or game.get("needed_bios") or ""),
+                    "cache_key": cache_key,
+                }
+                return {
+                    "kind": "update", "game_id": gid, "target": target, "snapshot": snapshot,
+                    "file_path": file_path, "file_state": file_state, "cache_key": cache_key,
+                    "cache_reused": False, "error": str(exc),
+                }
+            return {
+                "kind": "failed", "game_id": gid, "target": None,
+                "snapshot": cached_snapshot or {}, "file_path": file_path,
+                "file_state": file_state, "cache_key": cache_key,
+                "cache_reused": False, "error": str(exc),
+            }
+
+    @staticmethod
+    def _analysis_update_params(target, game_id):
+        return (
+            target["status"], target["reason"], target["metadata_source"],
+            target["metadata_confidence"], target["source_system"], target["needed_bios"],
+            target["cache_key"], target["analysis_json"], target["analysis_cache_key"],
+            target["content_identity_key"], game_id,
+        )
+
+    def _persist_rom_analysis(self, game_id, target):
+        self._db_execute(
+            "UPDATE games SET health_status=?, missing_roms=?, metadata_source=?, "
+            "metadata_confidence=?, source_system=?, needed_bios=?, health_cache_key=?, "
+            "analysis_json=?, analysis_cache_key=?, content_identity_key=? WHERE id=?",
+            self._analysis_update_params(target, game_id),
+        )
+
+    def _refresh_rom_analyses(self, force=False):
+        """모든 ROM의 단일 분석 원본을 증분 갱신한다."""
         with _HEALTH_PROGRESS_LOCK:
             if _HEALTH_PROGRESS.get("is_running"):
                 return
@@ -4655,25 +4869,15 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 "FROM games WHERE COALESCE(deletion_status, 'active') = 'active' ORDER BY id"
             )
             total = len(rows)
-            bios_dir = self._get_bios_dir()
-            try:
-                available_bios_names = {
-                    name.lower() for name in os.listdir(bios_dir) if not name.startswith(".")
-                } if os.path.isdir(bios_dir) else set()
-            except Exception:
-                available_bios_names = set()
-            engine_signature = self._health_engine_signature(available_bios_names)
+            bios_dir, available_bios_names, engine_signature = self._analysis_environment()
             bios_state_cache = {}
             bundle_state_cache = {}
-
             _update_health_progress(
-                current=0, total=total, current_file="진단 준비 중...", status="analyzing",
+                current=0, total=total, current_file="ROM 분석 준비 중...", status="analyzing",
                 is_running=True, changed=0, cached=0, failed=0,
             )
             counters = {"current": 0, "cached": 0, "failed": 0}
             counter_lock = threading.Lock()
-
-            from rom_analysis_adapter import analyze_rom
 
             def finish_progress(filename, kind):
                 with counter_lock:
@@ -4688,123 +4892,17 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     )
 
             def analyze_one(game):
-                gid = game.get("id")
-                filename = game.get("filename") or ""
-                db_path = str(game.get("file_path") or "")
-                path = db_path if db_path and os.path.isfile(db_path) else ""
-                state = "ok"
-
-                if not path:
-                    # 진단은 경로를 고치지 않는다. 다른 위치에서 찾더라도 동기화가 수정하도록
-                    # path_mismatch로 보고만 한다.
-                    resolved = self._resolve_existing_rom_path(
-                        gid, filename, db_path,
-                        core=game.get("core") or "", platform=game.get("platform") or "", update_db=False,
-                    )
-                    if resolved and os.path.isfile(resolved):
-                        path = resolved
-                        state = "path_mismatch"
-                    else:
-                        state = "missing_file"
-
-                stat_result = None
-                if path and os.path.isfile(path):
-                    try:
-                        stat_result = os.stat(path)
-                    except OSError:
-                        state = "missing_file"
-                        path = ""
-
-                bios_state = self._health_bios_cache_state(
-                    game, available_bios_names, bios_dir, state_cache=bios_state_cache
+                result = self._evaluate_rom_analysis(
+                    game,
+                    available_bios_names=available_bios_names,
+                    bios_dir=bios_dir,
+                    engine_signature=engine_signature,
+                    bios_state_cache=bios_state_cache,
+                    bundle_state_cache=bundle_state_cache,
+                    force=force,
                 )
-                bundle_state = self._health_bundle_cache_state(
-                    game, path, state_cache=bundle_state_cache
-                )
-                cache_key = self._health_cache_key(
-                    game, engine_signature, state, path, stat_result,
-                    bios_state=bios_state, bundle_state=bundle_state,
-                )
-                if str(game.get("health_cache_key") or "") == cache_key:
-                    finish_progress(filename, "cached")
-                    return ("cached", gid, None)
-
-                if state == "missing_file":
-                    target = {
-                        "status": "missing_file",
-                        "reason": "DB에 등록된 ROM 파일을 현재 경로 또는 관리 저장소에서 찾을 수 없습니다.",
-                        "analysis_json": str(game.get("analysis_json") or ""),
-                        "analysis_cache_key": str(game.get("analysis_cache_key") or ""),
-                        "metadata_source": str(game.get("metadata_source") or ""),
-                        "metadata_confidence": int(game.get("metadata_confidence") or 0),
-                        "source_system": str(game.get("source_system") or ""),
-                        "needed_bios": str(game.get("needed_bios") or ""),
-                        "cache_key": cache_key,
-                        "content_identity_key": str(game.get("content_identity_key") or self._content_identity_key(game)),
-                    }
-                    finish_progress(filename, "checked")
-                    return ("update", gid, target)
-
-                if state == "path_mismatch":
-                    target = {
-                        "status": "path_mismatch",
-                        "reason": "DB의 ROM 경로와 실제 발견 위치가 다릅니다. 라이브러리 동기화로 경로를 갱신하세요.",
-                        "analysis_json": str(game.get("analysis_json") or ""),
-                        "analysis_cache_key": str(game.get("analysis_cache_key") or ""),
-                        "metadata_source": str(game.get("metadata_source") or ""),
-                        "metadata_confidence": int(game.get("metadata_confidence") or 0),
-                        "source_system": str(game.get("source_system") or ""),
-                        "needed_bios": str(game.get("needed_bios") or ""),
-                        "cache_key": cache_key,
-                        "content_identity_key": str(game.get("content_identity_key") or self._content_identity_key(game)),
-                    }
-                    finish_progress(filename, "checked")
-                    return ("update", gid, target)
-
-                try:
-                    analysis = analyze_rom(path)
-                    status, reason = _derive_health_status_from_analysis(
-                        analysis, path,
-                        db_core=game.get("core") or "", db_platform=game.get("platform") or "",
-                        db_game_code=game.get("game_code") or "",
-                        available_bios_names=available_bios_names, bios_dir=bios_dir,
-                    )
-                    detected_needed_bios = _normalize_required_archive(analysis.get("needed_bios") or "")
-                    cache_game = dict(game)
-                    cache_game["needed_bios"] = detected_needed_bios
-                    detected_bios_state = self._health_bios_cache_state(
-                        cache_game, available_bios_names, bios_dir, state_cache=bios_state_cache
-                    )
-                    final_cache_key = self._health_cache_key(
-                        cache_game, engine_signature, state, path, stat_result,
-                        bios_state=detected_bios_state, bundle_state=bundle_state,
-                    )
-                    analysis_snapshot = _build_analysis_snapshot(analysis)
-                    analysis_json = json.dumps(analysis_snapshot, ensure_ascii=False, sort_keys=True)
-                    analysis_cache_key = self._analysis_detail_cache_key(
-                        cache_game, path, health_cache_key=final_cache_key
-                    )
-                    content_identity_key = self._content_identity_key(cache_game, analysis_snapshot)
-                    target = {
-                        "status": status,
-                        "reason": reason,
-                        "analysis_json": analysis_json,
-                        "analysis_cache_key": analysis_cache_key,
-                        "content_identity_key": content_identity_key,
-                        "metadata_source": analysis.get("metadata_source") or "rom-analyzer",
-                        "metadata_confidence": int(analysis.get("metadata_confidence") or 0),
-                        "source_system": analysis.get("source_system") or "rom_analyzer",
-                        "needed_bios": detected_needed_bios,
-                        "cache_key": final_cache_key,
-                    }
-                    finish_progress(filename, "checked")
-                    return ("update", gid, target)
-                except Exception as exc:
-                    # 일시적인 분석 실패는 기존 정상 판정을 덮어쓰지 않는다. 캐시도 갱신하지 않아
-                    # 다음 진단에서 자동으로 재시도한다.
-                    logger.debug(f"[{SELF_ID}] health reanalysis failed ({filename}): {exc}")
-                    finish_progress(filename, "failed")
-                    return ("failed", gid, str(exc))
+                finish_progress(game.get("filename") or "", result.get("kind") or "failed")
+                return result
 
             results = []
             if rows:
@@ -4816,46 +4914,32 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         except Exception as exc:
                             with counter_lock:
                                 counters["failed"] += 1
-                            logger.debug(f"[{SELF_ID}] health worker error: {exc}")
+                            logger.debug(f"[{SELF_ID}] ROM analysis worker error: {exc}")
 
             old_by_id = {row.get("id"): row for row in rows}
             updates = []
             changed = 0
-            for kind, gid, target in results:
-                if kind != "update" or not target:
+            for result in results:
+                if result.get("kind") != "update" or not result.get("target"):
                     continue
+                gid = result.get("game_id")
+                target = result["target"]
                 old = old_by_id.get(gid) or {}
-                old_status = str(old.get("health_status") or "pass")
-                old_reason = str(old.get("missing_roms") or "")
-                if old_status != target["status"] or old_reason != target["reason"]:
+                if (
+                    str(old.get("health_status") or "pass") != target["status"]
+                    or str(old.get("missing_roms") or "") != target["reason"]
+                ):
                     changed += 1
-
                 old_values = (
-                    old_status,
-                    old_reason,
-                    str(old.get("metadata_source") or ""),
-                    int(old.get("metadata_confidence") or 0),
-                    str(old.get("source_system") or ""),
-                    str(old.get("needed_bios") or ""),
-                    str(old.get("health_cache_key") or ""),
-                    str(old.get("analysis_json") or ""),
-                    str(old.get("analysis_cache_key") or ""),
-                    str(old.get("content_identity_key") or ""),
+                    str(old.get("health_status") or "pass"), str(old.get("missing_roms") or ""),
+                    str(old.get("metadata_source") or ""), int(old.get("metadata_confidence") or 0),
+                    str(old.get("source_system") or ""), str(old.get("needed_bios") or ""),
+                    str(old.get("health_cache_key") or ""), str(old.get("analysis_json") or ""),
+                    str(old.get("analysis_cache_key") or ""), str(old.get("content_identity_key") or ""),
                 )
-                new_values = (
-                    target["status"],
-                    target["reason"],
-                    target["metadata_source"],
-                    target["metadata_confidence"],
-                    target["source_system"],
-                    target["needed_bios"],
-                    target["cache_key"],
-                    target["analysis_json"],
-                    target["analysis_cache_key"],
-                    target["content_identity_key"],
-                )
+                new_values = self._analysis_update_params(target, gid)[:-1]
                 if old_values != new_values:
-                    updates.append(new_values + (gid,))
+                    updates.append(self._analysis_update_params(target, gid))
 
             if updates:
                 with _DB_LOCK:
@@ -4876,8 +4960,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 changed=changed, cached=counters["cached"], failed=counters["failed"],
             )
         except Exception as exc:
-            logger.exception(f"[{SELF_ID}] health refresh error: {exc}")
+            logger.exception(f"[{SELF_ID}] ROM analysis refresh error: {exc}")
             _update_health_progress(status="error", is_running=False, failed=1, current_file=str(exc))
+
+    def _refresh_health_statuses(self):
+        """기존 내부 호출 호환용. 실제 작업은 단일 ROM 분석 갱신으로 통합됐다."""
+        return self._refresh_rom_analyses(force=False)
 
     @staticmethod
     def _relocation_identity_matches(old_game, identity_info):
@@ -4958,7 +5046,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         - ingest: 업로드/외부 유입 후 신규·변경 ROM만 동기화
         - sync: 일반 라이브러리 동기화
         - rebuild: 모든 ROM을 최신 분석 기준으로 강제 재분석
-        - diagnose: 파일을 변경하지 않고 전체 health 상태만 재계산
+        - diagnose: 파일을 변경하지 않고 전체 ROM 분석 원본과 health 요약을 함께 갱신
         """
         mode = str(mode or "sync").strip().lower()
         if mode not in {"ingest", "sync", "rebuild", "diagnose"}:
@@ -4981,7 +5069,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 if isinstance(scan_stats, dict):
                     scan_stats.update(deletion_stats)
                 return scan_stats
-            self._refresh_health_statuses()
+            self._refresh_rom_analyses(force=False)
             return {"success": True, "mode": mode}
         finally:
             _LIBRARY_SYNC_LOCK.release()
@@ -5086,7 +5174,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         # 전체 재구축은 기존 진단 캐시를 신뢰하지 않는다. 먼저 무효화한 뒤 이번 전수 분석에
         # 성공한 게임만 새 health_cache_key를 저장한다. 중간 실패/중단 항목은 빈 키로 남아
-        # 다음 무결성 진단에서 자동 재분석된다.
+        # 다음 전체 ROM 분석 갱신에서 자동 재분석된다.
         if force_full:
             self._db_execute(
                 "UPDATE games SET health_cache_key = '' "
@@ -5132,7 +5220,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         health_bundle_state_cache = {}
 
         def _build_scan_health_cache_key(gid, file_path, rom_info, health_status, missing_roms):
-            """스캔에서 이미 얻은 분석 결과를 다음 무결성 진단 캐시로 재사용한다."""
+            """스캔에서 이미 얻은 분석 결과를 다음 전체 ROM 분석 갱신 캐시로 재사용한다."""
             try:
                 stat_result = os.stat(file_path)
             except OSError:
@@ -5411,7 +5499,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         except Exception as merge_err:
                             logger.debug(f"[{SELF_ID}] Bios merge error during scan: {merge_err}")
 
-                # 무결성 자동 진단: 최신 rom-analyzer의 명시적 근거만 사용한다.
+                # ROM 분석 요약: 최신 rom-analyzer의 명시적 근거만 사용한다.
                 health_source = rom_info if rom_info.get("metadata_source") == "rom-analyzer" else {}
                 health_status, missing_roms_str = _derive_health_status_from_analysis(
                     health_source, curr_file_path,
@@ -5421,7 +5509,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 health_cache_key = _build_scan_health_cache_key(
                     gid, curr_file_path, rom_info, health_status, missing_roms_str
                 )
-                analysis_snapshot = _build_analysis_snapshot(rom_info)
+                analysis_snapshot = _build_analysis_snapshot(
+                    rom_info, health_status, missing_roms_str, "ok", health_cache_key, _get_kst_now_str()
+                )
                 analysis_json = json.dumps(analysis_snapshot, ensure_ascii=False, sort_keys=True)
                 analysis_cache_game = {
                     "id": gid,
@@ -5532,10 +5622,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                     analysis_cache_key = self._analysis_detail_cache_key(
                                         analysis_cache_game, curr_file_path, health_cache_key=health_cache_key
                                     )
+                                    analysis_snapshot = _build_analysis_snapshot(
+                                        rom_info, health_status, missing_roms_str, "ok", health_cache_key, _get_kst_now_str()
+                                    )
+                                    analysis_json = json.dumps(analysis_snapshot, ensure_ascii=False, sort_keys=True)
                                     self._db_execute(
                                         """UPDATE games
                                            SET layout_version = 2, filename = ?, file_path = ?, size_bytes = ?, mtime = ?,
-                                               health_cache_key = ?, analysis_cache_key = ?
+                                               health_cache_key = ?, analysis_json = ?, analysis_cache_key = ?
                                            WHERE id = ?""",
                                         (
                                             info["filename"],
@@ -5543,6 +5637,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                             info["size_bytes"],
                                             info["mtime"],
                                             health_cache_key,
+                                            analysis_json,
                                             analysis_cache_key,
                                             gid,
                                         ),
@@ -6264,7 +6359,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return None, None
 
     def _analysis_detail_cache_key(self, game, file_path, health_cache_key=None):
-        """상세 분석 캐시를 ROM 파일 상태와 현재 진단 캐시에 묶습니다."""
+        """상세 분석과 health가 같은 캐시 키를 사용하도록 통일한다."""
+        if health_cache_key:
+            return str(health_cache_key)
         if not file_path or not os.path.isfile(file_path):
             return ""
         try:
@@ -6358,7 +6455,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         )
         return {"success": True, "play": self._effective_play_status(refreshed[0] if refreshed else rows[0])}
 
-    def _build_analysis_detail(self, game_id, user_id, is_admin=False):
+    def _build_analysis_detail(self, game_id, user_id, is_admin=False, force=False):
         rows = self._db_query(
             "SELECT id, filename, file_path, title, game_code, core, platform, size_bytes, mtime, needed_bios, "
             "COALESCE(health_status, 'unverified') AS health_status, COALESCE(missing_roms, '') AS missing_roms, "
@@ -6381,47 +6478,27 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         if str(game.get("deletion_status") or "active") != "active":
             return {"success": False, "error": "삭제 대기 중인 게임입니다."}
 
-        db_path = str(game.get("file_path") or "")
-        file_path = db_path if db_path and os.path.isfile(db_path) else ""
-        if not file_path:
-            recovered = self._resolve_existing_rom_path(
-                game_id, filename=game.get("filename"), current_path=db_path,
-                core=game.get("core"), platform=game.get("platform"), update_db=False,
-            )
-            if recovered and os.path.isfile(recovered):
-                file_path = recovered
-
-        cache_key = self._analysis_detail_cache_key(game, file_path) if file_path else ""
-        cached_snapshot = None
-        if game.get("analysis_json"):
-            try:
-                parsed = json.loads(game.get("analysis_json") or "{}")
-                if isinstance(parsed, dict):
-                    cached_snapshot = parsed
-            except Exception:
-                cached_snapshot = None
-
-        analysis = cached_snapshot or {}
-        cache_reused = bool(cached_snapshot and cache_key and str(game.get("analysis_cache_key") or "") == cache_key)
-        analysis_error = ""
-        analysis_stale = bool(cached_snapshot and not cache_reused)
-
-        if file_path and not cache_reused:
-            try:
-                from rom_analysis_adapter import analyze_rom
-                fresh = analyze_rom(file_path)
-                analysis = _build_analysis_snapshot(fresh)
-                cache_key = self._analysis_detail_cache_key(game, file_path)
-                content_key = self._content_identity_key(game, analysis)
-                self._db_execute(
-                    "UPDATE games SET analysis_json = ?, analysis_cache_key = ?, content_identity_key = ? WHERE id = ?",
-                    (json.dumps(analysis, ensure_ascii=False, sort_keys=True), cache_key, content_key, game_id),
-                )
-                game["content_identity_key"] = content_key
-                analysis_stale = False
-            except Exception as exc:
-                analysis_error = str(exc)
-                logger.debug(f"[{SELF_ID}] analysis detail refresh failed ({game_id}): {exc}")
+        evaluation = self._evaluate_rom_analysis(game, force=bool(force))
+        target = evaluation.get("target")
+        if target:
+            self._persist_rom_analysis(game_id, target)
+            game.update({
+                "health_status": target["status"],
+                "missing_roms": target["reason"],
+                "metadata_source": target["metadata_source"],
+                "metadata_confidence": target["metadata_confidence"],
+                "source_system": target["source_system"],
+                "needed_bios": target["needed_bios"],
+                "health_cache_key": target["cache_key"],
+                "analysis_json": target["analysis_json"],
+                "analysis_cache_key": target["analysis_cache_key"],
+                "content_identity_key": target["content_identity_key"],
+            })
+        file_path = str(evaluation.get("file_path") or "")
+        analysis = evaluation.get("snapshot") or self._cached_analysis_snapshot(game) or {}
+        cache_reused = bool(evaluation.get("cache_reused"))
+        analysis_error = str(evaluation.get("error") or "")
+        analysis_stale = bool(analysis_error and evaluation.get("kind") == "failed")
 
         bios_name = str((analysis or {}).get("needed_bios") or game.get("needed_bios") or "").strip()
         bios_path = self._find_runtime_bios_path(bios_name, game_file_path=file_path, game_id=game_id) if bios_name else None
@@ -6458,8 +6535,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 "sha1": game.get("rom_sha1") or "",
             },
             "health": {
-                "status": game.get("health_status") or "unverified",
-                "reason": game.get("missing_roms") or "",
+                "status": analysis.get("health_status") or game.get("health_status") or "unverified",
+                "reason": analysis.get("health_reason") or game.get("missing_roms") or "",
+                "updated_at": analysis.get("analysis_updated_at") or "",
             },
             "bios": {
                 "name": bios_name,
@@ -7629,7 +7707,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 game_id = str(request.args.get("game_id", "") or "").strip()
                 if not game_id:
                     return {"success": False, "error": "game_id 파라미터가 필요합니다."}
-                return self._build_analysis_detail(game_id, user_id, is_admin=is_admin)
+                force = str(request.args.get("refresh", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+                return self._build_analysis_detail(game_id, user_id, is_admin=is_admin, force=force)
 
             elif action == "runtime_state":
                 # 최초 목록 렌더와 분리된 실제 파일 상태 조회. rclone/GDrive 메타데이터
@@ -7885,7 +7964,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                 if mode == "diagnose":
                     if scan_busy:
-                        return {"success": False, "error": "라이브러리 동기화가 진행 중입니다. 완료 후 무결성 진단을 실행하세요."}
+                        return {"success": False, "error": "라이브러리 동기화가 진행 중입니다. 완료 후 전체 ROM 분석을 실행하세요."}
                     launch = False
                     with _HEALTH_PROGRESS_LOCK:
                         running = bool(_HEALTH_PROGRESS.get("is_running"))
@@ -7902,7 +7981,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     return {"success": True, "mode": mode, "progress": progress}
 
                 if health_busy:
-                    return {"success": False, "error": "무결성 진단이 진행 중입니다. 완료 후 라이브러리 작업을 실행하세요."}
+                    return {"success": False, "error": "전체 ROM 분석이 진행 중입니다. 완료 후 라이브러리 작업을 실행하세요."}
 
                 if mode == "rebuild":
                     if not scan_busy:
@@ -7987,7 +8066,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 with _HEALTH_PROGRESS_LOCK:
                     health_busy = bool(_HEALTH_PROGRESS.get("is_running")) or _HEALTH_PROGRESS.get("status") == "queued"
                 if health_busy:
-                    return {"success": False, "error": "무결성 재진단이 진행 중입니다. 완료 후 풀 스캔을 실행하세요."}
+                    return {"success": False, "error": "전체 ROM 분석이 진행 중입니다. 완료 후 라이브러리 전체 재구축을 실행하세요."}
                 with _SCAN_PROGRESS_LOCK:
                     is_running = _SCAN_PROGRESS.get("is_running", False)
                 if not is_running:
@@ -7998,7 +8077,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 with _SCAN_PROGRESS_LOCK:
                     scan_running = bool(_SCAN_PROGRESS.get("is_running"))
                 if scan_running:
-                    return {"success": False, "error": "ROM 스캔이 진행 중입니다. 스캔 완료 후 무결성 진단을 실행하세요."}
+                    return {"success": False, "error": "ROM 스캔이 진행 중입니다. 완료 후 전체 ROM 분석을 실행하세요."}
                 launch = False
                 with _HEALTH_PROGRESS_LOCK:
                     running = bool(_HEALTH_PROGRESS.get("is_running"))

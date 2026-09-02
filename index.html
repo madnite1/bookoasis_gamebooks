@@ -11,6 +11,10 @@
             <i class="fa-solid fa-spinner fa-spin gba-queue-icon"></i>
             <span class="gba-queue-text" id="gbaCoverQueueText">커버 다운로드 중...</span>
           </div>
+          <button type="button" class="gba-analysis-progress-badge" id="gbaAnalysisProgressBadge" style="display: none;" title="백그라운드 ROM 분석 진행 상태 보기" aria-live="polite">
+            <i class="fa-solid fa-microscope gba-analysis-progress-icon"></i>
+            <span class="gba-analysis-progress-text" id="gbaAnalysisProgressText">ROM 분석 중...</span>
+          </button>
         </div>
       </div>
     </div>
@@ -79,8 +83,8 @@
         <button id="gbaScanBtn" class="gba-btn gba-btn-secondary gba-admin-only" title="ROM 폴더와 Game Books 라이브러리 동기화" style="display: none;">
           <i class="fa-solid fa-arrows-rotate"></i> <span>라이브러리 동기화</span>
         </button>
-        <button id="gbaHealthCheckBtn" class="gba-btn gba-btn-secondary gba-admin-only" title="파일 배치를 바꾸지 않고 변경된 ROM만 재분석해 파일/경로/BIOS/디스크/코어 호환성 상태 갱신" style="display: none;">
-          <i class="fa-solid fa-heart-pulse"></i> <span>무결성 진단</span>
+        <button id="gbaHealthCheckBtn" class="gba-btn gba-btn-secondary gba-admin-only" title="파일 배치를 바꾸지 않고 ROM 상세 분석 원본과 카드 진단 상태를 함께 갱신" style="display: none;">
+          <i class="fa-solid fa-microscope"></i> <span>전체 ROM 분석</span>
         </button>
         <button id="gbaControlsHelpBtn" class="gba-btn gba-btn-secondary" title="조작키 & 게임패드 컨트롤러 안내">
           <i class="fa-solid fa-gamepad"></i> <span>조작키</span>
@@ -240,12 +244,12 @@
 
         <div class="gba-storage-info gba-admin-only" style="display: none; margin-top: 14px;">
           <h4><i class="fa-solid fa-screwdriver-wrench"></i> 고급 라이브러리 관리</h4>
-          <p class="gba-help-text" style="margin: 0 0 10px;">삭제 대기 게임의 실제 파일을 먼저 정리한 뒤 기존 무결성 캐시를 무시하고 모든 ROM을 최신 분석 기준으로 다시 판정하며, 완료된 분석 결과로 진단 캐시도 새로 만듭니다. 필요하면 기종 폴더 이동·7z→ZIP 변환까지 수행합니다. 일반적인 ROM 추가/삭제에는 위의 <strong>라이브러리 동기화</strong>를 사용하세요.</p>
+          <p class="gba-help-text" style="margin: 0 0 10px;">삭제 대기 게임의 실제 파일을 먼저 정리한 뒤 기존 ROM 분석 캐시를 무시하고 모든 ROM을 최신 분석 기준으로 다시 판정하며, 상세 분석 원본과 카드 진단 상태를 같은 결과로 새로 만듭니다. 필요하면 기종 폴더 이동·7z→ZIP 변환까지 수행합니다. 일반적인 ROM 추가/삭제에는 위의 <strong>라이브러리 동기화</strong>를 사용하세요.</p>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
             <button id="gbaDeleteQueueBtn" class="gba-btn gba-btn-secondary" title="삭제 대기/실패 게임 확인 및 삭제 취소">
               <i class="fa-solid fa-trash-arrow-up"></i> <span>삭제 대기 관리</span> <span id="gbaDeleteQueueCount">0</span>
             </button>
-            <button id="gbaFullScanBtn" class="gba-btn gba-btn-secondary" title="기존 캐시를 무시하고 모든 ROM을 전수 분석해 진단 캐시까지 새로 구성">
+            <button id="gbaFullScanBtn" class="gba-btn gba-btn-secondary" title="기존 캐시를 무시하고 모든 ROM을 전수 분석해 ROM 분석 캐시까지 새로 구성">
               <i class="fa-solid fa-arrows-spin"></i> <span>라이브러리 전체 재구축</span>
             </button>
             <button id="gbaPhase6PreflightBtn" class="gba-btn gba-btn-secondary" title="실제 파일 이동 없이 Phase 6 마이그레이션 준비 상태를 검사">
@@ -616,32 +620,35 @@
         <div id="gbaAnalysisLoading" class="gba-analysis-loading">
           <div class="gba-spinner"></div>
           <strong>ROM 분석 정보를 확인하고 있습니다.</strong>
-          <span>저장된 상세 분석이 없는 기존 ROM은 처음 한 번만 다시 분석할 수 있습니다.</span>
+          <span>저장된 ROM 분석이 없거나 캐시가 오래된 경우 이 ROM만 같은 분석 파이프라인으로 갱신합니다.</span>
         </div>
         <div id="gbaAnalysisError" class="gba-analysis-error" style="display: none;"></div>
         <div id="gbaAnalysisContent" style="display: none;"></div>
       </div>
       <div class="gba-modal-footer gba-analysis-footer">
         <span>정적 진단 통과는 실제 플레이 성공을 보증하지 않습니다.</span>
-        <button class="gba-btn gba-btn-secondary" id="gbaAnalysisOkBtn">닫기</button>
+        <div class="gba-analysis-footer-actions">
+          <button class="gba-btn gba-btn-secondary" id="gbaAnalysisRefreshBtn"><i class="fa-solid fa-rotate"></i> 이 ROM 다시 분석</button>
+          <button class="gba-btn gba-btn-secondary" id="gbaAnalysisOkBtn">닫기</button>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- 롬 무결성 정밀 진단 모달 (Health Check) -->
+  <!-- 전체 ROM 분석 갱신 모달 (내부 health API 호환 유지) -->
   <div id="gbaHealthCheckModal" class="gba-modal" style="display: none;">
     <div class="gba-modal-box" style="max-width: 780px; width: 95vw;">
       <div class="gba-modal-header" style="border-bottom: 1px solid var(--gba-border);">
         <h3>
-          <i class="fa-solid fa-heart-pulse" style="color: #ec4899;"></i>
-          <span>ROM 라이브러리 무결성 & 호환성 재진단</span>
+          <i class="fa-solid fa-microscope"></i>
+          <span>ROM 라이브러리 전체 분석 갱신</span>
         </h3>
         <button class="gba-modal-close" id="gbaHealthCheckCloseBtn">&times;</button>
       </div>
       <div class="gba-modal-body">
         <div id="gbaHealthCheckLoading" style="text-align: center; padding: 32px 0;">
           <div class="gba-spinner" style="margin: 0 auto 16px;"></div>
-          <p style="color: var(--gba-text-muted); font-size: 0.95rem;">ROM 배치를 변경하지 않고 무결성을 확인하며, 변경된 항목만 rom-analyzer로 재분석합니다...</p>
+          <p style="color: var(--gba-text-muted); font-size: 0.95rem;">ROM 배치를 변경하지 않고 상세 분석 원본을 갱신하며, 같은 결과에서 카드 진단 상태도 함께 계산합니다...</p>
         </div>
 
         <div id="gbaHealthCheckResult" style="display: none;">
@@ -682,7 +689,7 @@
               <button class="gba-btn gba-btn-secondary gba-health-tab-btn" data-tab="unsupported">코어 미지원 (<span id="gbaHealthUnsupportedTabCount">0</span>)</button>
               <button class="gba-btn gba-btn-secondary gba-health-tab-btn" data-tab="unverified">판정 미확인 (<span id="gbaHealthUnverifiedTabCount">0</span>)</button>
             </div>
-            <input type="text" id="gbaHealthSearchInput" class="gba-input" placeholder="진단 결과 내 검색..." style="max-width: 200px; font-size: 0.85rem; padding: 6px 10px;">
+            <input type="text" id="gbaHealthSearchInput" class="gba-input" placeholder="ROM 분석 결과 검색..." style="max-width: 200px; font-size: 0.85rem; padding: 6px 10px;">
           </div>
 
           <!-- 결과 테이블 -->
@@ -692,7 +699,7 @@
                 <tr>
                   <th style="padding: 10px; text-align: left; border-bottom: 1px solid var(--gba-border);">게임 제목</th>
                   <th style="padding: 10px; text-align: left; border-bottom: 1px solid var(--gba-border);">파일명</th>
-                  <th style="padding: 10px; text-align: left; border-bottom: 1px solid var(--gba-border);">진단 세부 내용 &amp; 원인</th>
+                  <th style="padding: 10px; text-align: left; border-bottom: 1px solid var(--gba-border);">분석 요약 &amp; 원인</th>
                 </tr>
               </thead>
               <tbody id="gbaHealthTableBody"></tbody>

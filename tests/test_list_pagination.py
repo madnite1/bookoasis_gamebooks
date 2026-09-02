@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -237,8 +238,9 @@ class ListPaginationTests(unittest.TestCase):
         self.assertIn('id="gbaLaunchRetryBtn"', index)
         self.assertIn('id="gbaLaunchCloseBtn"', index)
 
-    def _analysis_detail(self, game_id, admin=False):
-        with self.app.test_request_context(f"/?action=analysis_detail&game_id={game_id}"), \
+    def _analysis_detail(self, game_id, admin=False, force=False):
+        refresh = "&refresh=1" if force else ""
+        with self.app.test_request_context(f"/?action=analysis_detail&game_id={game_id}{refresh}"), \
              mock.patch.object(gamebooks, "_get_current_user_id", return_value=1), \
              mock.patch.object(gamebooks, "_is_current_user_admin", return_value=admin):
             return self.provider.get_dashboard_data("general")
@@ -250,7 +252,7 @@ class ListPaginationTests(unittest.TestCase):
              mock.patch.object(gamebooks, "_is_current_user_admin", return_value=False):
             return self.provider.get_dashboard_data("general")
 
-    def test_analysis_detail_reuses_cached_snapshot_without_changing_health(self):
+    def test_analysis_detail_updates_health_from_same_cached_snapshot(self):
         self.provider._db_execute(
             "UPDATE games SET health_cache_key = 'health-a', health_status = 'pass', missing_roms = 'static-health' WHERE id = 'g1'"
         )
@@ -276,22 +278,30 @@ class ListPaginationTests(unittest.TestCase):
         with mock.patch("rom_analysis_adapter.analyze_rom", return_value=fake) as analyze:
             first = self._analysis_detail("g1", admin=False)
             second = self._analysis_detail("g1", admin=False)
+            forced = self._analysis_detail("g1", admin=False, force=True)
 
-        self.assertEqual(analyze.call_count, 1)
+        self.assertEqual(analyze.call_count, 2)
         self.assertTrue(first["success"])
         self.assertFalse(first["analysis_cache_reused"])
         self.assertTrue(second["analysis_cache_reused"])
+        self.assertFalse(forced["analysis_cache_reused"])
         self.assertEqual(second["analysis"]["resolved_disk_files"], ["disc1.bin"])
         self.assertEqual(second["analysis"]["disk_missing_files"], ["disc2.bin"])
         self.assertEqual(second["file"]["server_path"], "")
         row = self.provider._db_query(
             "SELECT health_status, missing_roms, health_cache_key, analysis_json, analysis_cache_key FROM games WHERE id='g1'"
         )[0]
-        self.assertEqual(row["health_status"], "pass")
-        self.assertEqual(row["missing_roms"], "static-health")
-        self.assertEqual(row["health_cache_key"], "health-a")
-        self.assertTrue(row["analysis_json"])
-        self.assertTrue(row["analysis_cache_key"])
+        self.assertEqual(row["health_status"], "incomplete")
+        self.assertIn("disc2.bin", row["missing_roms"])
+        self.assertTrue(row["health_cache_key"])
+        self.assertEqual(row["analysis_cache_key"], row["health_cache_key"])
+        snapshot = json.loads(row["analysis_json"])
+        self.assertEqual(snapshot["health_status"], row["health_status"])
+        self.assertEqual(snapshot["health_reason"], row["missing_roms"])
+        self.assertEqual(snapshot["analysis_cache_key"], row["health_cache_key"])
+        self.assertTrue(snapshot["analysis_updated_at"])
+        self.assertEqual(second["health"]["status"], "incomplete")
+        self.assertEqual(second["health"]["reason"], row["missing_roms"])
 
     def test_analysis_detail_admin_can_see_server_path(self):
         fake = {"core": "gba", "platform": "GBA", "metadata_source": "rom-analyzer"}
@@ -374,6 +384,23 @@ class ListPaginationTests(unittest.TestCase):
         self.assertIn("apiCall('record_boot'", script)
         self.assertIn("apiCall('set_play_status'", script)
         self.assertIn('id="gbaAnalysisModal"', index)
+        self.assertIn('id="gbaAnalysisRefreshBtn"', index)
+        self.assertIn("refresh: forceRefresh ? 1 : 0", script)
+        self.assertIn("이 ROM 다시 분석", script)
+        self.assertIn("const analysisUpdatedAt = health.updated_at", script)
+        self.assertIn("저장된 ROM 분석 사용", script)
+        self.assertIn("이번 조회에서 ROM 분석 갱신", script)
+        self.assertIn("전체 ROM 분석", index)
+        self.assertIn('id="gbaAnalysisProgressBadge"', index)
+        self.assertIn("ROM 분석 중 ${current.toLocaleString()}/${total.toLocaleString()} · ${percent}%", script)
+        self.assertIn("startAnalysisProgressMonitor()", script)
+        self.assertIn("gbaAnalysisProgressBadge')?.addEventListener('click'", script)
+        self.assertIn("모달과 독립된 감시기", script)
+        self.assertIn("state.analysisProgressMonitorStart = startAnalysisProgressMonitor", script)
+        self.assertIn("scheduleAnalysisProgressPoll(1000)", script)
+        self.assertNotIn("setInterval(pollAnalysisProgress, 1000)", script)
+        self.assertIn(".gba-analysis-progress-badge", style)
+        self.assertNotIn(">무결성 진단<", index)
         self.assertIn("--gba-bg-main: var(--app-bg-main", style)
         self.assertIn("--gba-bg-card: var(--app-bg-card", style)
         self.assertIn("--gba-text-main: var(--app-text-primary", style)

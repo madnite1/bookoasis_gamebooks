@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -22,7 +23,7 @@ class LibrarySyncEngineTests(unittest.TestCase):
         provider = self._provider()
         with mock.patch.object(provider, "_scan_roms", return_value={"success": True}) as scan, \
              mock.patch.object(provider, "_process_pending_deletions", return_value={"delete_processed_count": 0}) as deletes, \
-             mock.patch.object(provider, "_refresh_health_statuses") as health:
+             mock.patch.object(provider, "_refresh_rom_analyses") as analysis_refresh:
             provider._run_library_sync("ingest")
             scan.assert_called_once_with(new_only=True)
             deletes.assert_not_called()
@@ -41,7 +42,7 @@ class LibrarySyncEngineTests(unittest.TestCase):
             deletes.reset_mock()
 
             provider._run_library_sync("diagnose")
-            health.assert_called_once_with()
+            analysis_refresh.assert_called_once_with(force=False)
             scan.assert_not_called()
             deletes.assert_not_called()
 
@@ -728,7 +729,10 @@ class LibrarySyncEngineTests(unittest.TestCase):
             self.assertTrue(first["health_cache_key"])
             self.assertEqual(first["health_status"], "pass")
             self.assertTrue(first["analysis_json"])
-            self.assertTrue(first["analysis_cache_key"])
+            self.assertEqual(first["analysis_cache_key"], first["health_cache_key"])
+            snapshot = json.loads(first["analysis_json"])
+            self.assertEqual(snapshot["health_status"], "pass")
+            self.assertEqual(snapshot["analysis_cache_key"], first["health_cache_key"])
             self.assertIn('"metadata_source": "rom-analyzer"', first["analysis_json"])
 
             with mock.patch("rom_analysis_adapter.analyze_rom") as analyze_again:
@@ -757,17 +761,27 @@ class LibrarySyncEngineTests(unittest.TestCase):
             resolver = mock.Mock(return_value=str(actual))
             provider._resolve_existing_rom_path = resolver
 
-            with mock.patch("rom_analysis_adapter.analyze_rom") as analyze:
+            analysis = {
+                "metadata_source": "rom-analyzer", "metadata_confidence": 100,
+                "source_system": "header", "core": "nes", "platform": "NES",
+                "identity_status": "exact", "is_playable": True, "emulatorjs_supported": True,
+            }
+            with mock.patch("rom_analysis_adapter.analyze_rom", return_value=analysis) as analyze, \
+                 mock.patch.object(gamebooks, "_derive_health_status_from_analysis", return_value=("pass", "")):
                 provider._refresh_health_statuses()
-                analyze.assert_not_called()
+                analyze.assert_called_once_with(str(actual))
 
             self.assertFalse(resolver.call_args.kwargs["update_db"])
             row = provider._db_query(
-                "SELECT file_path, health_status, missing_roms FROM games WHERE id = ?", ("game",)
+                "SELECT file_path, health_status, missing_roms, analysis_json, health_cache_key, analysis_cache_key FROM games WHERE id = ?", ("game",)
             )[0]
             self.assertEqual(row["file_path"], str(stale))
             self.assertEqual(row["health_status"], "path_mismatch")
             self.assertIn("라이브러리 동기화", row["missing_roms"])
+            self.assertEqual(row["analysis_cache_key"], row["health_cache_key"])
+            snapshot = json.loads(row["analysis_json"])
+            self.assertEqual(snapshot["file_state"], "path_mismatch")
+            self.assertEqual(snapshot["health_status"], "path_mismatch")
 
     def test_health_diagnose_distinguishes_missing_file(self):
         with tempfile.TemporaryDirectory() as td:
@@ -885,6 +899,11 @@ class LibrarySyncEngineTests(unittest.TestCase):
             game["health_cache_key"] = provider._health_cache_key(
                 game, "engine", "ok", str(rom), os.stat(rom)
             )
+            game["analysis_cache_key"] = game["health_cache_key"]
+            game["analysis_json"] = json.dumps(gamebooks._build_analysis_snapshot(
+                {"metadata_source": "rom-analyzer", "metadata_confidence": 100, "source_system": "header"},
+                "pass", "", "ok", game["health_cache_key"], "2026-09-02 12:00:00",
+            ), ensure_ascii=False, sort_keys=True)
             provider._db_query = mock.Mock(return_value=[game])
             provider._get_db_conn = mock.Mock(side_effect=AssertionError("cache hit must not write"))
 
@@ -938,7 +957,26 @@ class LibrarySyncEngineTests(unittest.TestCase):
         self.assertIn("apiCall('cancel_delete_game'", script)
         self.assertNotIn("percent = 95;", script)
         self.assertIn("다음 라이브러리 동기화 또는 전체 재구축 시 실제 ROM/관련 디스크/세이브 데이터가 삭제됩니다", script)
-        self.assertIn("무결성 캐시 갱신이 완료되었습니다", script)
+        self.assertIn("ROM 분석 캐시 갱신이 완료되었습니다", script)
+        self.assertIn("전체 ROM 분석", index)
+        self.assertIn("ROM 라이브러리 전체 분석 갱신", index)
+        self.assertNotIn(">무결성 진단<", index)
+        self.assertIn('data-health-analysis-id=', script)
+        self.assertIn("showRomAnalysis({ id: btn.dataset.healthAnalysisId })", script)
+        self.assertIn("ROM 분석 갱신 완료", script)
+        provider_source = (root / "bookoasis_gamebooks.py").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        self.assertIn("전체 ROM 분석이 진행 중입니다. 완료 후 라이브러리 작업을 실행하세요.", provider_source)
+        self.assertIn("완료 후 전체 ROM 분석을 실행하세요.", provider_source)
+        self.assertNotIn("무결성 진단이 진행 중입니다", provider_source)
+        self.assertNotIn("완료 후 무결성 진단을 실행하세요", provider_source)
+        self.assertIn("[전체 ROM 분석]", readme)
+        self.assertNotIn("[무결성 진단]", readme)
+        self.assertIn("const isBusyNotice = message.includes('진행 중입니다.')", script)
+        self.assertIn("isBusyNotice ? message", script)
+        self.assertIn('id="gbaAnalysisProgressBadge"', index)
+        self.assertIn("apiCall('health_progress'", script)
+        self.assertIn("openHealthAnalysisModal({ startIfIdle: false })", script)
 
     def test_db_execute_batches_uses_one_transaction_for_multiple_groups(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1037,6 +1075,13 @@ class LibrarySyncEngineTests(unittest.TestCase):
             self.assertEqual(len(layout_updates), 1)
             self.assertEqual(layout_updates[0][1][1], str(target))
             self.assertEqual(layout_updates[0][1][-1], final_gid)
+            final_health_key = layout_updates[0][1][4]
+            final_snapshot = json.loads(layout_updates[0][1][5])
+            final_analysis_key = layout_updates[0][1][6]
+            self.assertEqual(final_analysis_key, final_health_key)
+            self.assertEqual(final_snapshot["analysis_cache_key"], final_health_key)
+            self.assertEqual(final_snapshot["health_status"], "pass")
+            self.assertEqual(final_snapshot["file_state"], "ok")
 
     def test_ingest_keeps_legacy_layout_when_raw_analysis_is_unavailable(self):
         provider = self._provider()

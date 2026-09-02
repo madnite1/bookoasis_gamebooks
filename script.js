@@ -69,6 +69,7 @@
     coverQueueSeenActive: false,
     coverVariantPollTimer: null,
     phase6Preflight: null,
+    analysisProgressMonitorStart: null,
     coverQueue: {
       is_running: false,
       total: 0,
@@ -290,6 +291,9 @@
         // 파일시스템을 확인해야 하는 상태는 렌더 이후 비동기로 보정한다.
         renderGames(true);
         startCoverQueueMonitor();
+        if (state.isAdmin && typeof state.analysisProgressMonitorStart === 'function') {
+          state.analysisProgressMonitorStart();
+        }
       } else {
         showToast('게임 목록을 불러오지 못했습니다: ' + (data.error || '알 수 없는 오류'), true);
       }
@@ -602,9 +606,11 @@
     const confidence = Number(analysis.metadata_confidence ?? identity.metadata_confidence ?? 0);
     const emulatorSupported = !!analysis.emulatorjs_supported;
     const analyzerPlayable = !!analysis.is_playable;
-    const cacheText = data.analysis_cache_reused
-      ? '저장된 상세 분석 캐시 사용'
-      : (data.analysis_error ? '기존 상세 분석 표시' : '이번 조회에서 상세 분석 갱신');
+    const analysisUpdatedAt = health.updated_at || analysis.analysis_updated_at || '';
+    const cacheTextBase = data.analysis_cache_reused
+      ? '저장된 ROM 분석 사용'
+      : (data.analysis_error ? '기존 ROM 분석 표시' : '이번 조회에서 ROM 분석 갱신');
+    const cacheText = analysisUpdatedAt ? `${cacheTextBase} · ${analysisUpdatedAt}` : cacheTextBase;
 
     const warnings = Array.isArray(analysis.analysis_warnings) ? analysis.analysis_warnings : [];
     const conflicts = Array.isArray(analysis.analysis_conflicts) ? analysis.analysis_conflicts : [];
@@ -713,7 +719,7 @@
     });
   }
 
-  async function showRomAnalysis(game) {
+  async function showRomAnalysis(game, forceRefresh = false) {
     const modal = $('gbaAnalysisModal');
     const loading = $('gbaAnalysisLoading');
     const content = $('gbaAnalysisContent');
@@ -727,19 +733,33 @@
     if (errorEl) errorEl.style.display = 'none';
     if ($('gbaAnalysisCloseBtn')) $('gbaAnalysisCloseBtn').onclick = closeRomAnalysis;
     if ($('gbaAnalysisOkBtn')) $('gbaAnalysisOkBtn').onclick = closeRomAnalysis;
+    const refreshBtn = $('gbaAnalysisRefreshBtn');
+    if (refreshBtn) {
+      refreshBtn.disabled = !!forceRefresh;
+      refreshBtn.innerHTML = forceRefresh
+        ? '<i class="fa-solid fa-spinner fa-spin"></i> 다시 분석 중...'
+        : '<i class="fa-solid fa-rotate"></i> 이 ROM 다시 분석';
+      refreshBtn.onclick = () => showRomAnalysis({ id: game.id }, true);
+    }
     try {
-      const data = await apiCall('analysis_detail', { game_id: game.id });
+      const data = await apiCall('analysis_detail', { game_id: game.id, refresh: forceRefresh ? 1 : 0 });
       if (!data || !data.success) throw new Error((data && data.error) || 'ROM 분석 정보를 불러오지 못했습니다.');
       if (String(state.analysisDetailGameId) !== String(game.id)) return;
       state.analysisDetailData = data;
       applyPlayStateToGame(game.id, data.play);
       renderRomAnalysisDetail(data);
+      if (forceRefresh) showToast('이 ROM의 분석 데이터를 최신 상태로 갱신했습니다.');
     } catch (err) {
       if (loading) loading.style.display = 'none';
       if (content) content.style.display = 'none';
       if (errorEl) {
         errorEl.style.display = 'flex';
         errorEl.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i><span>${escapeHtml(err && err.message ? err.message : 'ROM 분석 정보를 불러오지 못했습니다.')}</span>`;
+      }
+    } finally {
+      if (refreshBtn) {
+        refreshBtn.disabled = false;
+        refreshBtn.innerHTML = '<i class="fa-solid fa-rotate"></i> 이 ROM 다시 분석';
       }
     }
   }
@@ -1240,7 +1260,7 @@
         systemName: '디스크/플레이리스트 구성 불완전',
         title: '참조 파일 누락',
         reason: `M3U/CUE/GDI 등에서 참조하는 파일(<code>${escapeHtml(sampleMissing || '일부 파일')}</code>)을 찾지 못했습니다.`,
-        notice: '누락된 참조 파일을 같은 게임 번들에 추가한 뒤 무결성 진단을 다시 실행하세요.',
+        notice: '누락된 참조 파일을 같은 게임 번들에 추가한 뒤 전체 ROM 분석을 다시 실행하세요.',
         btnText: '확인',
         hideUpload: true,
         isOptional: false,
@@ -3402,7 +3422,9 @@
         }
       } catch (e) {
         console.error('[GBA] Library sync error:', e);
-        showToast('라이브러리 동기화 중 오류가 발생했습니다: ' + (e.message || e), true);
+        const message = e.message || String(e);
+        const isBusyNotice = message.includes('진행 중입니다.') && message.includes('완료 후');
+        showToast(isBusyNotice ? message : `라이브러리 동기화 중 오류가 발생했습니다: ${message}`, true);
         loadLibrary(true);
       } finally {
         if (pollTimer) clearInterval(pollTimer);
@@ -3511,7 +3533,7 @@
         await loadLibrary(true);
 
         if (scanProgressBar) scanProgressBar.style.width = '100%';
-        showToast('라이브러리 전체 재구축과 무결성 캐시 갱신이 완료되었습니다!');
+        showToast('라이브러리 전체 재구축과 ROM 분석 캐시 갱신이 완료되었습니다!');
       } catch (err) {
         if (pollTimer) clearInterval(pollTimer);
         console.error('[GBA] Library rebuild error:', err);
@@ -3528,7 +3550,7 @@
     });
     
     // --------------------------------------------------------------------------
-    // ROM 라이브러리 전수 무결성 진단 (Health Check)
+    // ROM 라이브러리 전체 분석 갱신 (내부 Health API 호환)
     // --------------------------------------------------------------------------
     let healthData = null;
     let activeHealthTab = 'issues';
@@ -3596,91 +3618,223 @@
                 ${escapeHtml(item.reason)}
               </span>
               ${metaInfo.length ? `<div style="margin-top: 6px; font-size: 0.78rem; color: var(--gba-text-muted);">${escapeHtml(metaInfo.join(' · '))}</div>` : ''}
+              <button type="button" class="gba-analysis-icon-btn" data-health-analysis-id="${escapeHtml(String(item.id || ''))}" title="ROM 분석 상세 보기" aria-label="ROM 분석 상세 보기" style="margin-top: 6px;"><i class="fa-solid fa-microscope"></i></button>
             </td>
           </tr>
         `;
       }).join('');
+      tbody.querySelectorAll('[data-health-analysis-id]').forEach((btn) => {
+        btn.addEventListener('click', () => showRomAnalysis({ id: btn.dataset.healthAnalysisId }));
+      });
     }
 
-    $('gbaHealthCheckBtn')?.addEventListener('click', async () => {
+    let analysisProgressPollTimer = null;
+    let analysisProgressRequestInFlight = false;
+    let analysisProgressWasActive = false;
+    let analysisCompletionHandled = false;
+
+    function analysisProgressValues(progress = {}) {
+      const current = Math.max(0, Number(progress.current || 0));
+      const total = Math.max(0, Number(progress.total || 0));
+      const percent = total > 0 ? Math.min(100, Math.round(current * 100 / total)) : 0;
+      const cached = Math.max(0, Number(progress.cached || 0));
+      const failed = Math.max(0, Number(progress.failed || 0));
+      return { current, total, percent, cached, failed };
+    }
+
+    function isAnalysisProgressActive(progress = {}) {
+      return !!progress.is_running || progress.status === 'queued';
+    }
+
+    function updateAnalysisProgressUi(progress = {}) {
+      const badge = $('gbaAnalysisProgressBadge');
+      const badgeText = $('gbaAnalysisProgressText');
       const modal = $('gbaHealthCheckModal');
       const loading = $('gbaHealthCheckLoading');
       const loadingText = loading?.querySelector('p');
       const result = $('gbaHealthCheckResult');
+      const active = isAnalysisProgressActive(progress);
+      const { current, total, percent, cached, failed } = analysisProgressValues(progress);
 
+      if (badge) {
+        if (state.isAdmin && active) {
+          badge.style.display = 'inline-flex';
+          if (badgeText) {
+            badgeText.textContent = total > 0
+              ? `ROM 분석 중 ${current.toLocaleString()}/${total.toLocaleString()} · ${percent}%`
+              : 'ROM 분석 준비 중...';
+          }
+          const stats = `캐시 재사용 ${cached.toLocaleString()}${failed > 0 ? ` · 실패 ${failed.toLocaleString()}` : ''}`;
+          badge.title = total > 0
+            ? `백그라운드 ROM 분석 ${current.toLocaleString()} / ${total.toLocaleString()} (${percent}%) · ${stats}\n현재: ${progress.current_file || '준비 중...'}\n클릭하면 진행 화면을 다시 엽니다.`
+            : '백그라운드 ROM 분석 준비 중입니다. 클릭하면 진행 화면을 다시 엽니다.';
+        } else {
+          badge.style.display = 'none';
+        }
+      }
+
+      if (modal?.style.display === 'flex' && active) {
+        if (loading) loading.style.display = 'block';
+        if (result) result.style.display = 'none';
+        if (loadingText) {
+          const stats = `캐시 재사용 ${cached.toLocaleString()}${failed > 0 ? ` · 실패 ${failed.toLocaleString()}` : ''}`;
+          loadingText.textContent = total > 0
+            ? `ROM 분석 갱신 중... ${current.toLocaleString()} / ${total.toLocaleString()} (${percent}%) · ${stats} · ${progress.current_file || ''}`
+            : 'ROM 분석 준비 중...';
+        }
+      }
+    }
+
+    function renderHealthResult(res) {
+      healthData = res;
+      if ($('gbaHealthPassCount')) $('gbaHealthPassCount').textContent = res.summary?.pass || 0;
+      if ($('gbaHealthIncompleteCount')) $('gbaHealthIncompleteCount').textContent = res.summary?.issues || 0;
+      if ($('gbaHealthChdCount')) $('gbaHealthChdCount').textContent = res.summary?.chd || 0;
+      if ($('gbaHealthReclassifyCount')) $('gbaHealthReclassifyCount').textContent = res.summary?.reclassify || 0;
+      if ($('gbaHealthUnsupportedCount')) $('gbaHealthUnsupportedCount').textContent = res.summary?.unsupported || 0;
+      if ($('gbaHealthUnverifiedCount')) $('gbaHealthUnverifiedCount').textContent = res.summary?.unverified || 0;
+
+      if ($('gbaHealthIncompleteTabCount')) $('gbaHealthIncompleteTabCount').textContent = res.summary?.issues || 0;
+      if ($('gbaHealthChdTabCount')) $('gbaHealthChdTabCount').textContent = res.summary?.chd || 0;
+      if ($('gbaHealthReclassifyTabCount')) $('gbaHealthReclassifyTabCount').textContent = res.summary?.reclassify || 0;
+      if ($('gbaHealthUnsupportedTabCount')) $('gbaHealthUnsupportedTabCount').textContent = res.summary?.unsupported || 0;
+      if ($('gbaHealthUnverifiedTabCount')) $('gbaHealthUnverifiedTabCount').textContent = res.summary?.unverified || 0;
+
+      if ($('gbaHealthCheckLoading')) $('gbaHealthCheckLoading').style.display = 'none';
+      if ($('gbaHealthCheckResult')) $('gbaHealthCheckResult').style.display = 'block';
+      renderHealthTable();
+    }
+
+    async function loadHealthResult({ refreshLibrary = false, showCompletionToast = false, progress = null } = {}) {
+      const res = await apiCall('health_check');
+      if (!res || !res.success) {
+        throw new Error(res && res.error ? res.error : 'ROM 분석 결과 조회 실패');
+      }
+      renderHealthResult(res);
+      if (refreshLibrary) await loadLibrary(true);
+      if (showCompletionToast) {
+        const cached = Number(progress?.cached ?? res.progress?.cached ?? 0);
+        const failed = Number(progress?.failed ?? res.progress?.failed ?? 0);
+        showToast(`ROM 분석 갱신 완료: ${res.summary?.total || 0}개 확인 · 캐시 재사용 ${cached}${failed > 0 ? ` · 실패 ${failed}` : ''}`);
+      }
+      return res;
+    }
+
+    function scheduleAnalysisProgressPoll(delay = 1000) {
+      if (analysisProgressPollTimer) return;
+      analysisProgressPollTimer = setTimeout(() => {
+        analysisProgressPollTimer = null;
+        pollAnalysisProgress();
+      }, delay);
+    }
+
+    async function pollAnalysisProgress() {
+      if (analysisProgressRequestInFlight) return;
+      if (!state.isAdmin) {
+        updateAnalysisProgressUi({});
+        return;
+      }
+
+      analysisProgressRequestInFlight = true;
+      try {
+        const progressRes = await apiCall('health_progress');
+        if (!progressRes || !progressRes.success) return;
+        const progress = progressRes.progress || {};
+        const active = isAnalysisProgressActive(progress);
+        updateAnalysisProgressUi(progress);
+
+        if (active) {
+          analysisProgressWasActive = true;
+          analysisCompletionHandled = false;
+          scheduleAnalysisProgressPoll(1000);
+          return;
+        }
+
+        if (analysisProgressWasActive && !analysisCompletionHandled && progress.status === 'completed') {
+          analysisCompletionHandled = true;
+          analysisProgressWasActive = false;
+          await loadHealthResult({ refreshLibrary: true, showCompletionToast: true, progress });
+          updateAnalysisProgressUi(progress);
+          return;
+        }
+
+        if (analysisProgressWasActive && !analysisCompletionHandled && progress.status === 'error') {
+          analysisCompletionHandled = true;
+          analysisProgressWasActive = false;
+          updateAnalysisProgressUi(progress);
+          const message = progress.current_file || 'ROM 분석 갱신 중 오류가 발생했습니다.';
+          showToast('ROM 분석 갱신 중 오류가 발생했습니다: ' + message, true);
+          if ($('gbaHealthCheckModal')?.style.display === 'flex') {
+            const loadingText = $('gbaHealthCheckLoading')?.querySelector('p');
+            if (loadingText) loadingText.textContent = `ROM 분석 오류: ${message}`;
+          }
+        }
+      } catch (err) {
+        console.warn('[GBA] ROM analysis progress polling error:', err);
+        if (analysisProgressWasActive) scheduleAnalysisProgressPoll(2000);
+      } finally {
+        analysisProgressRequestInFlight = false;
+      }
+    }
+
+    function startAnalysisProgressMonitor() {
+      if (analysisProgressPollTimer || analysisProgressRequestInFlight) return;
+      pollAnalysisProgress();
+    }
+
+    async function openHealthAnalysisModal({ startIfIdle = false } = {}) {
+      const modal = $('gbaHealthCheckModal');
+      const loading = $('gbaHealthCheckLoading');
+      const loadingText = loading?.querySelector('p');
+      const result = $('gbaHealthCheckResult');
       if (!modal) return;
+
       modal.style.display = 'flex';
       if (loading) loading.style.display = 'block';
       if (result) result.style.display = 'none';
-      if (loadingText) loadingText.textContent = '무결성 증분 진단을 시작하는 중입니다...';
 
       try {
+        const progressRes = await apiCall('health_progress');
+        if (!progressRes || !progressRes.success) throw new Error('ROM 분석 진행 상태 확인 실패');
+        let progress = progressRes.progress || {};
+
+        if (isAnalysisProgressActive(progress)) {
+          analysisProgressWasActive = true;
+          analysisCompletionHandled = false;
+          updateAnalysisProgressUi(progress);
+          startAnalysisProgressMonitor();
+          return;
+        }
+
+        if (!startIfIdle) {
+          if (progress.status === 'completed' || healthData) {
+            await loadHealthResult();
+          } else if (loadingText) {
+            loadingText.textContent = '현재 진행 중인 전체 ROM 분석이 없습니다.';
+          }
+          return;
+        }
+
+        if (loadingText) loadingText.textContent = '전체 ROM 분석 갱신을 시작하는 중입니다...';
         const startRes = await apiCall('library_sync', { mode: 'diagnose' });
         if (!startRes || !startRes.success) {
-          throw new Error(startRes && startRes.error ? startRes.error : '무결성 재분석 시작 실패');
+          throw new Error(startRes && startRes.error ? startRes.error : '전체 ROM 분석 시작 실패');
         }
-
-        let finished = false;
-        for (let attempt = 0; attempt < 1200; attempt += 1) {
-          const progressRes = await apiCall('health_progress');
-          if (!progressRes || !progressRes.success) throw new Error('무결성 진단 진행 상태 확인 실패');
-          const progress = progressRes.progress || {};
-          const current = Number(progress.current || 0);
-          const total = Number(progress.total || 0);
-          const percent = total > 0 ? Math.min(100, Math.round(current * 100 / total)) : 0;
-          const cached = Number(progress.cached || 0);
-          const failed = Number(progress.failed || 0);
-          if (loadingText) {
-            const stats = `캐시 재사용 ${cached.toLocaleString()}${failed > 0 ? ` · 실패 ${failed.toLocaleString()}` : ''}`;
-            loadingText.textContent = total > 0
-              ? `무결성 진단 중... ${current.toLocaleString()} / ${total.toLocaleString()} (${percent}%) · ${stats} · ${progress.current_file || ''}`
-              : '무결성 진단 준비 중...';
-          }
-          if (!progress.is_running && progress.status === 'completed') {
-            finished = true;
-            break;
-          }
-          if (!progress.is_running && progress.status === 'error') {
-            throw new Error(progress.current_file || '무결성 재분석 중 오류가 발생했습니다.');
-          }
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-        if (!finished) throw new Error('무결성 진단 시간이 너무 오래 걸려 상태 확인을 중단했습니다.');
-
-        const res = await apiCall('health_check');
-        if (!res || !res.success) {
-          throw new Error(res && res.error ? res.error : '무결성 진단 결과 조회 실패');
-        }
-        healthData = res;
-
-        if ($('gbaHealthPassCount')) $('gbaHealthPassCount').textContent = res.summary.pass || 0;
-        if ($('gbaHealthIncompleteCount')) $('gbaHealthIncompleteCount').textContent = res.summary.issues || 0;
-        if ($('gbaHealthChdCount')) $('gbaHealthChdCount').textContent = res.summary.chd || 0;
-        if ($('gbaHealthReclassifyCount')) $('gbaHealthReclassifyCount').textContent = res.summary.reclassify || 0;
-        if ($('gbaHealthUnsupportedCount')) $('gbaHealthUnsupportedCount').textContent = res.summary.unsupported || 0;
-        if ($('gbaHealthUnverifiedCount')) $('gbaHealthUnverifiedCount').textContent = res.summary.unverified || 0;
-
-        if ($('gbaHealthIncompleteTabCount')) $('gbaHealthIncompleteTabCount').textContent = res.summary.issues || 0;
-        if ($('gbaHealthChdTabCount')) $('gbaHealthChdTabCount').textContent = res.summary.chd || 0;
-        if ($('gbaHealthReclassifyTabCount')) $('gbaHealthReclassifyTabCount').textContent = res.summary.reclassify || 0;
-        if ($('gbaHealthUnsupportedTabCount')) $('gbaHealthUnsupportedTabCount').textContent = res.summary.unsupported || 0;
-        if ($('gbaHealthUnverifiedTabCount')) $('gbaHealthUnverifiedTabCount').textContent = res.summary.unverified || 0;
-
-        if (loading) loading.style.display = 'none';
-        if (result) result.style.display = 'block';
-        renderHealthTable();
-        await loadLibrary(true);
-        {
-          const cached = Number(res.progress?.cached || 0);
-          const failed = Number(res.progress?.failed || 0);
-          showToast(`무결성 진단 완료: ${res.summary.total || 0}개 확인 · 캐시 재사용 ${cached}${failed > 0 ? ` · 실패 ${failed}` : ''}`);
-        }
+        progress = startRes.progress || { status: 'queued', is_running: false };
+        analysisProgressWasActive = true;
+        analysisCompletionHandled = false;
+        updateAnalysisProgressUi(progress);
+        startAnalysisProgressMonitor();
+        setTimeout(pollAnalysisProgress, 50);
       } catch (err) {
-        console.error('[GBA] Health check error:', err);
-        showToast('무결성 진단 중 오류가 발생했습니다: ' + (err.message || err), true);
+        console.error('[GBA] ROM analysis modal error:', err);
+        showToast('ROM 분석 갱신 중 오류가 발생했습니다: ' + (err.message || err), true);
         modal.style.display = 'none';
       }
-    });
+    }
+
+    $('gbaHealthCheckBtn')?.addEventListener('click', () => openHealthAnalysisModal({ startIfIdle: true }));
+    $('gbaAnalysisProgressBadge')?.addEventListener('click', () => openHealthAnalysisModal({ startIfIdle: false }));
 
     $('gbaHealthCheckCloseBtn')?.addEventListener('click', () => {
       $('gbaHealthCheckModal').style.display = 'none';
@@ -3688,6 +3842,10 @@
     $('gbaHealthCheckOkBtn')?.addEventListener('click', () => {
       $('gbaHealthCheckModal').style.display = 'none';
     });
+
+    // 모달과 독립된 감시기. 최초 라이브러리 로드 후 한 번 확인하고,
+    // 실제 분석이 진행 중인 동안에만 1초 폴링을 유지한다.
+    state.analysisProgressMonitorStart = startAnalysisProgressMonitor;
 
     document.querySelectorAll('.gba-health-tab-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
