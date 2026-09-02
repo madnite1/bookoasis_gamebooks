@@ -2293,7 +2293,7 @@ kbd {
 }
 
 
-/* Phase 6 준비 점검 - 코어 테마 변수에만 의존 */
+/* 라이브러리 구조 전환 준비 점검 - 코어 테마 변수에만 의존 */
 .gba-phase6-modal-box { max-width: 780px; width: min(780px, 95vw); }
 .gba-phase6-summary {
   padding: 14px; border: 1px solid var(--gba-border); border-radius: 10px;

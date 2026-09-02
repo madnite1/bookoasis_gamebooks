@@ -2906,7 +2906,7 @@
       summary.classList.toggle('has-blockers', !ready);
       const journal = data?.migration_journal || {};
       summary.innerHTML = `
-        <strong>${ready ? 'Phase 6 시작 조건을 충족했습니다.' : 'Phase 6 시작 전에 해결할 항목이 있습니다.'}</strong><br>
+        <strong>${ready ? '라이브러리 구조 전환 시작 조건을 충족했습니다.' : '라이브러리 구조 전환 전에 해결할 항목이 있습니다.'}</strong><br>
         게임 ${Number(data?.total_games || 0).toLocaleString()}개 · layout v2 ${Number(data?.layout_v2 || 0).toLocaleString()}개 ·
         DB schema ${escapeHtml(String(data?.schema_version ?? '-'))}/${escapeHtml(String(data?.required_schema_version ?? '-'))} ·
         migration journal ${Number(journal.total || 0).toLocaleString()}건<br>
@@ -2936,12 +2936,12 @@
     const action = repair ? 'phase6_repair' : 'phase6_preflight';
     try {
       const res = await apiCall(action);
-      if (!res || !res.success) throw new Error((res && res.error) || 'Phase 6 준비 점검 실패');
+      if (!res || !res.success) throw new Error((res && res.error) || '라이브러리 구조 전환 준비 점검 실패');
       renderPhase6Preflight(res);
       return res;
     } catch (err) {
       if (modal) modal.style.display = 'none';
-      showToast(err.message || 'Phase 6 준비 점검 중 오류가 발생했습니다.', true);
+      showToast(err.message || '라이브러리 구조 전환 준비 점검 중 오류가 발생했습니다.', true);
       throw err;
     }
   }
@@ -2952,7 +2952,7 @@
     try {
       const res = await apiCall('phase6_backup');
       if (!res || !res.success) throw new Error((res && res.error) || 'DB 백업 실패');
-      showToast(`Phase 6 전 DB 백업을 생성했습니다: ${res.filename || 'backup.sqlite3'}`);
+      showToast(`구조 전환 전 DB 백업을 생성했습니다: ${res.filename || 'backup.sqlite3'}`);
     } catch (err) {
       showToast(err.message || 'DB 백업 생성 중 오류가 발생했습니다.', true);
     } finally {

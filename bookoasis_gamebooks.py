@@ -6295,7 +6295,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         add_blocker("missing_file", "ROM 파일 없음", len(missing_files), missing_files[:10])
         add_blocker("unmanaged_path", "관리 저장소 밖 ROM", len(unmanaged), unmanaged[:10])
         add_blocker("incomplete_bundle", "불완전 디스크/CHD", len(incomplete), incomplete[:10])
-        add_blocker("target_collision", "Phase 6 대상 경로 충돌", len(target_collisions), target_collisions[:10])
+        add_blocker("target_collision", "구조 전환 대상 경로 충돌", len(target_collisions), target_collisions[:10])
         add_blocker("content_identity_missing", "content identity 누락", len(identity_missing), identity_missing[:10])
         if not root_ready:
             blockers.append({"code": "root_not_writable", "label": "통합 라이브러리 루트 쓰기 불가", "count": 1, "sample": [root]})

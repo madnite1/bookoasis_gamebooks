@@ -510,7 +510,7 @@ class ListPaginationTests(unittest.TestCase):
         self.assertIn('id="gbaPhase6RepairBtn"', index)
         self.assertIn('id="gbaPhase6BackupBtn"', index)
         self.assertIn('id="gbaCoverWebpBtn"', index)
-        self.assertIn("Phase 6 실제 ROM 마이그레이션은 시작하지 않습니다.", index)
+        self.assertIn("실제 라이브러리 구조 전환은 시작하지 않습니다.", index)
         self.assertIn("const action = repair ? 'phase6_repair' : 'phase6_preflight'", script)
         self.assertIn("apiCall(action)", script)
         self.assertIn("apiCall('phase6_backup')", script)
