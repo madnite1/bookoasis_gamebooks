@@ -98,6 +98,43 @@ class ListPaginationTests(unittest.TestCase):
         self.assertNotIn("available_bios", second)
         self.assertTrue(all(game["runtime_state_loaded"] is False for game in first["games"]))
 
+    def test_save_settings_preserves_omitted_legacy_storage_paths(self):
+        settings = {
+            "EMULATORJS_ROOT": str(self.root),
+            "EXTRA_ROMS_PATH": "/legacy/emulatorjs/roms",
+            "COVERS_PATH": "/legacy/emulatorjs/covers",
+            "BIOS_PATH": "/legacy/emulatorjs/bios",
+            "IGDB_CLIENT_ID": "legacy-client",
+            "IGDB_CLIENT_SECRET": "legacy-secret",
+            "CLOUD_SAVE_ENABLED": "1",
+            "AUTO_SAVE_INTERVAL_SEC": "60",
+        }
+        self.provider._get_setting = lambda key, default="": settings.get(key, default)
+        self.provider._set_setting = lambda key, value: settings.__setitem__(key, str(value))
+
+        with self.app.test_request_context(
+            "/?action=save_settings",
+            method="POST",
+            json={
+                "emulatorjs_root": str(self.root),
+                "cloud_save_enabled": "0",
+                "auto_save_interval_sec": "90",
+            },
+        ), mock.patch.object(gamebooks, "_get_current_user_id", return_value=1), \
+             mock.patch.object(gamebooks, "_is_current_user_admin", return_value=True), \
+             mock.patch.object(gamebooks.threading, "Thread") as thread_cls:
+            result = self.provider.get_dashboard_data("general")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(settings["EXTRA_ROMS_PATH"], "/legacy/emulatorjs/roms")
+        self.assertEqual(settings["COVERS_PATH"], "/legacy/emulatorjs/covers")
+        self.assertEqual(settings["BIOS_PATH"], "/legacy/emulatorjs/bios")
+        self.assertEqual(settings["IGDB_CLIENT_ID"], "legacy-client")
+        self.assertEqual(settings["IGDB_CLIENT_SECRET"], "legacy-secret")
+        self.assertEqual(settings["CLOUD_SAVE_ENABLED"], "False")
+        self.assertEqual(settings["AUTO_SAVE_INTERVAL_SEC"], "90")
+        thread_cls.assert_not_called()
+
     def test_server_filters_apply_before_pagination(self):
         arcade = self._call("offset=0&limit=40&sort=title&category=arcade&status=all")
         favorite = self._call("offset=0&limit=40&sort=newest&category=all&status=all&favorite_only=1")
@@ -519,6 +556,18 @@ class ListPaginationTests(unittest.TestCase):
         self.assertIn(".gba-phase6-summary", style)
         self.assertIn("var(--gba-bg-card)", style)
         self.assertIn("var(--gba-border)", style)
+
+    def test_settings_frontend_omits_removed_legacy_path_fields(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "script.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+
+        self.assertNotIn('id="gbaSettingExtraPath"', index)
+        self.assertNotIn('id="gbaSettingCoversPath"', index)
+        self.assertNotIn('id="gbaSettingBiosPath"', index)
+        self.assertIn("if (extraPathInput) settingsPayload.extra_roms_path = extraPath;", script)
+        self.assertIn("if (coversPathInput) settingsPayload.covers_path = coversPath;", script)
+        self.assertIn("if (biosPathInput) settingsPayload.bios_path = biosPath;", script)
 
     def test_list_payload_omits_heavy_unused_fields(self):
         data = self._call("offset=0&limit=1&sort=newest&category=all&status=all")

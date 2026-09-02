@@ -4026,18 +4026,21 @@
 
     $('gbaSettingsSaveBtn').addEventListener('click', async () => {
       const emulatorjsRoot = $('gbaSettingEmulatorjsRoot') ? $('gbaSettingEmulatorjsRoot').value.trim() : '';
-      const extraPath = $('gbaSettingExtraPath') ? $('gbaSettingExtraPath').value.trim() : '';
-      const coversPath = $('gbaSettingCoversPath') ? $('gbaSettingCoversPath').value.trim() : '';
-      const biosPath = $('gbaSettingBiosPath') ? $('gbaSettingBiosPath').value.trim() : '';
+      const extraPathInput = $('gbaSettingExtraPath');
+      const coversPathInput = $('gbaSettingCoversPath');
+      const biosPathInput = $('gbaSettingBiosPath');
+      const extraPath = extraPathInput ? extraPathInput.value.trim() : null;
+      const coversPath = coversPathInput ? coversPathInput.value.trim() : null;
+      const biosPath = biosPathInput ? biosPathInput.value.trim() : null;
       const cloudSave = $('gbaSettingCloudSave').checked ? '1' : '0';
       const interval = $('gbaSettingInterval').value.trim();
       const saveBtn = $('gbaSettingsSaveBtn');
 
       const prevCoversPath = (state.config.covers_path || '').trim();
-      const needCoverMigration = coversPath && coversPath !== prevCoversPath;
+      const needCoverMigration = coversPathInput && coversPath && coversPath !== prevCoversPath;
 
       const prevBiosPath = (state.config.bios_path || '').trim();
-      const needBiosMigration = biosPath && biosPath !== prevBiosPath;
+      const needBiosMigration = biosPathInput && biosPath && biosPath !== prevBiosPath;
 
       saveBtn.disabled = true;
       saveBtn.textContent = '저장 중...';
@@ -4113,20 +4116,24 @@
           if (scanProgressBar) scanProgressBar.style.width = '95%';
         }
 
-        const res = await apiCall('save_settings', {
+        const settingsPayload = {
           emulatorjs_root: emulatorjsRoot,
-          extra_roms_path: extraPath,
-          covers_path: coversPath,
-          bios_path: biosPath,
           cloud_save_enabled: cloudSave,
           auto_save_interval_sec: interval,
-        });
+        };
+        // 최신 설정 UI에는 개별 경로 입력칸이 없으므로, 존재하지 않는 필드를
+        // 빈 문자열로 보내 1.9.8 사용자의 기존 경로를 지우지 않는다.
+        if (extraPathInput) settingsPayload.extra_roms_path = extraPath;
+        if (coversPathInput) settingsPayload.covers_path = coversPath;
+        if (biosPathInput) settingsPayload.bios_path = biosPath;
+
+        const res = await apiCall('save_settings', settingsPayload);
 
         if (res && res.success) {
           state.config.emulatorjs_root = emulatorjsRoot;
-          state.config.extra_roms_path = extraPath;
-          state.config.covers_path = coversPath;
-          state.config.bios_path = biosPath;
+          if (extraPathInput) state.config.extra_roms_path = extraPath;
+          if (coversPathInput) state.config.covers_path = coversPath;
+          if (biosPathInput) state.config.bios_path = biosPath;
           state.config.cloud_save_enabled = cloudSave === '1';
           state.config.auto_save_interval_sec = parseInt(interval, 10) || 60;
           try {

@@ -51,22 +51,25 @@ class LibrarySyncEngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             provider._run_library_sync("unknown")
 
-    def test_sync_reconciles_deleted_games_even_without_changed_files(self):
+    def test_sync_marks_missing_game_without_deleting_state(self):
         provider = self._provider()
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             roms = root / "roms"
             bios = root / "bios"
             covers = root / "covers"
+            emulator_root = root / "emulatorjs"
             roms.mkdir()
             bios.mkdir()
             covers.mkdir()
+            emulator_root.mkdir()
 
-            deleted = []
+            executed = []
             provider._migrate_bios_files = lambda: None
             provider._get_roms_dir = lambda: str(roms)
             provider._get_bios_dir = lambda: str(bios)
             provider._get_covers_dir = lambda: str(covers)
+            provider._get_emulatorjs_root = lambda: str(emulator_root)
             provider._get_setting = lambda key, default="": default
             provider._db_query = lambda sql, params=(): [
                 {
@@ -80,17 +83,53 @@ class LibrarySyncEngineTests(unittest.TestCase):
                     "platform": "Arcade",
                 }
             ] if "SELECT * FROM games" in sql else []
-            provider._db_execute = lambda sql, params=(): deleted.append((sql, params))
-            deleted_future_ids = []
-            provider._delete_future_game_id = lambda game_id: deleted_future_ids.append(game_id) or True
+            provider._db_execute = lambda sql, params=(): executed.append((sql, params))
 
             result = provider._scan_roms()
 
             self.assertEqual(result["new_count"], 0)
-            self.assertEqual(result["deleted_count"], 1)
-            self.assertTrue(any("DELETE FROM games" in sql for sql, _ in deleted))
-            self.assertTrue(any("DELETE FROM user_game_data" in sql for sql, _ in deleted))
-            self.assertEqual(deleted_future_ids, ["roms_missing_zip"])
+            self.assertEqual(result["deleted_count"], 0)
+            self.assertEqual(result["missing_count"], 1)
+            self.assertFalse(any("DELETE FROM games" in sql for sql, _ in executed))
+            self.assertFalse(any("DELETE FROM user_game_data" in sql for sql, _ in executed))
+            missing_updates = [(sql, params) for sql, params in executed if "health_status = ?" in sql]
+            self.assertEqual(len(missing_updates), 1)
+            self.assertEqual(missing_updates[0][1][0], "missing_file")
+
+    def test_check_game_marks_missing_without_delete(self):
+        provider = self._provider()
+        executed = []
+        provider._db_query = lambda sql, params=(): [{
+            "id": "missing",
+            "file_path": "/definitely/not/present/game.zip",
+        }] if "SELECT * FROM games" in sql else []
+        provider._db_execute = lambda sql, params=(): executed.append((sql, params))
+
+        result = provider._check_and_update_game("missing")
+
+        self.assertFalse(result["exists"])
+        self.assertFalse(result["deleted"])
+        self.assertTrue(result["missing"])
+        self.assertFalse(any("DELETE FROM" in sql for sql, _ in executed))
+        self.assertTrue(any("health_status = ?" in sql for sql, _ in executed))
+
+    def test_rom_scan_dirs_include_legacy_emulator_root_when_extra_path_is_empty(self):
+        provider = self._provider()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data_roms = root / "data" / "roms"
+            emulator_root = root / "emulatorjs"
+            legacy_roms = emulator_root / "roms"
+            data_roms.mkdir(parents=True)
+            legacy_roms.mkdir(parents=True)
+            provider._get_roms_dir = lambda: str(data_roms)
+            provider._get_data_dir = lambda: str(root / "data")
+            provider._get_emulatorjs_root = lambda: str(emulator_root)
+            provider._get_setting = lambda key, default="": "" if key == "EXTRA_ROMS_PATH" else default
+
+            scan_dirs = provider._get_rom_scan_dirs()
+
+            self.assertEqual(scan_dirs, [str(data_roms), str(legacy_roms)])
 
     def test_rebuild_replaces_old_health_cache_with_scan_result(self):
         with tempfile.TemporaryDirectory() as td:
@@ -657,6 +696,132 @@ class LibrarySyncEngineTests(unittest.TestCase):
             {"rom_sha1": ""},
             {"rom_sha1": ""},
         ))
+
+    def test_verified_relocation_removes_only_old_row_and_keeps_future_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "gba.db"
+            roms = root / "roms"
+            bios = root / "bios"
+            covers = root / "covers"
+            (roms / "nes").mkdir(parents=True)
+            bios.mkdir()
+            covers.mkdir()
+            physical = roms / "nes" / "game.nes"
+            physical.write_bytes(b"NES\x1a" + b"x" * 128)
+
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            old_id = "legacy_old_location"
+            provider._db_execute(
+                "INSERT INTO games (id,filename,file_path,size_bytes,mtime,core,platform,rom_sha1) VALUES (?,?,?,?,?,?,?,?)",
+                (old_id, physical.name, str(root / "old" / physical.name), physical.stat().st_size, 1.0, "nes", "NES", "samehash"),
+            )
+            future_id = provider._get_or_create_future_game_id(old_id)
+            provider._db_execute(
+                "INSERT INTO user_game_data(user_id,game_id,is_favorite,last_played_at,play_count) VALUES (?,?,?,?,?)",
+                (7, old_id, 1, "2026-09-01 10:00:00", 4),
+            )
+            provider._migrate_bios_files = lambda: None
+            provider._get_rom_scan_dirs = lambda: [str(roms)]
+            provider._get_bios_dir = lambda: str(bios)
+            provider._get_covers_dir = lambda: str(covers)
+            provider._get_emulatorjs_root = lambda: str(root / "emulatorjs")
+            provider._resolve_existing_cover = lambda *args, **kwargs: None
+
+            analysis = {
+                "core": "nes", "platform": "NES", "title": "Game", "game_code": "",
+                "maker_code": "", "needed_bios": "", "metadata_source": "test",
+                "metadata_confidence": 100, "source_system": "header", "disk_missing_files": [],
+            }
+            identity = {
+                "rom_crc32": "", "rom_md5": "", "rom_sha1": "samehash", "serial_code": "",
+                "normalized_title": "Game", "source_system": "header", "metadata_source": "test",
+                "metadata_confidence": 100, "region_tag": "", "revision_tag": "", "disc_number": 0,
+                "content_flags": "",
+            }
+            with mock.patch.object(gamebooks, "_analyze_rom_context", return_value=(None, analysis)), \
+                 mock.patch.object(gamebooks, "_collect_identity_fields", return_value=identity), \
+                 mock.patch.object(gamebooks, "_derive_health_status_from_analysis", return_value=("pass", "")), \
+                 mock.patch.object(gamebooks, "_resolve_korean_game_title", return_value="Game"), \
+                 mock.patch.object(gamebooks, "_enqueue_cover_downloads"):
+                provider._scan_roms(force_full=True)
+
+            new_id = gamebooks._sanitize_id(f"{roms.name}_{os.path.relpath(physical, roms)}")
+            self.assertEqual(provider._db_query("SELECT id FROM games WHERE id=?", (old_id,)), [])
+            rows = provider._db_query("SELECT id,future_id,file_path FROM games WHERE id=?", (new_id,))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["future_id"], future_id)
+            self.assertEqual(rows[0]["file_path"], str(physical))
+            mapped = provider._db_query("SELECT legacy_id FROM game_id_map WHERE future_id=?", (future_id,))
+            self.assertEqual(mapped, [{"legacy_id": new_id}])
+            state = provider._db_query("SELECT user_id,game_id,play_count FROM user_game_data WHERE user_id=7")
+            self.assertEqual(state, [{"user_id": 7, "game_id": new_id, "play_count": 4}])
+
+    def test_duplicate_relocation_keeps_existing_target_future_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "gba.db"
+            roms = root / "roms"
+            bios = root / "bios"
+            covers = root / "covers"
+            (roms / "nes").mkdir(parents=True)
+            bios.mkdir()
+            covers.mkdir()
+            physical = roms / "nes" / "game.nes"
+            physical.write_bytes(b"NES\x1a" + b"x" * 128)
+            new_id = gamebooks._sanitize_id(f"{roms.name}_{os.path.relpath(physical, roms)}")
+            old_id = "legacy_duplicate_location"
+
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            provider._db_execute(
+                "INSERT INTO games (id,filename,file_path,size_bytes,mtime,core,platform,rom_sha1) VALUES (?,?,?,?,?,?,?,?)",
+                (old_id, physical.name, str(root / "old" / physical.name), physical.stat().st_size, 1.0, "nes", "NES", "samehash"),
+            )
+            old_future = provider._get_or_create_future_game_id(old_id)
+            provider._db_execute(
+                "INSERT INTO games (id,filename,file_path,size_bytes,mtime,core,platform,rom_sha1) VALUES (?,?,?,?,?,?,?,?)",
+                (new_id, physical.name, str(physical), physical.stat().st_size, 1.0, "nes", "NES", "samehash"),
+            )
+            target_future = provider._get_or_create_future_game_id(new_id)
+            self.assertNotEqual(old_future, target_future)
+            provider._db_execute(
+                "INSERT INTO user_game_data(user_id,game_id,is_favorite,last_played_at,play_count) VALUES (?,?,?,?,?)",
+                (7, old_id, 1, "2026-09-01 10:00:00", 4),
+            )
+            provider._migrate_bios_files = lambda: None
+            provider._get_rom_scan_dirs = lambda: [str(roms)]
+            provider._get_bios_dir = lambda: str(bios)
+            provider._get_covers_dir = lambda: str(covers)
+            provider._get_emulatorjs_root = lambda: str(root / "emulatorjs")
+            provider._resolve_existing_cover = lambda *args, **kwargs: None
+
+            analysis = {
+                "core": "nes", "platform": "NES", "title": "Game", "game_code": "",
+                "maker_code": "", "needed_bios": "", "metadata_source": "test",
+                "metadata_confidence": 100, "source_system": "header", "disk_missing_files": [],
+            }
+            identity = {
+                "rom_crc32": "", "rom_md5": "", "rom_sha1": "samehash", "serial_code": "",
+                "normalized_title": "Game", "source_system": "header", "metadata_source": "test",
+                "metadata_confidence": 100, "region_tag": "", "revision_tag": "", "disc_number": 0,
+                "content_flags": "",
+            }
+            with mock.patch.object(gamebooks, "_analyze_rom_context", return_value=(None, analysis)), \
+                 mock.patch.object(gamebooks, "_collect_identity_fields", return_value=identity), \
+                 mock.patch.object(gamebooks, "_derive_health_status_from_analysis", return_value=("pass", "")), \
+                 mock.patch.object(gamebooks, "_resolve_korean_game_title", return_value="Game"), \
+                 mock.patch.object(gamebooks, "_enqueue_cover_downloads"):
+                provider._scan_roms(force_full=True)
+
+            self.assertEqual(provider._db_query("SELECT id FROM games WHERE id=?", (old_id,)), [])
+            rows = provider._db_query("SELECT id,future_id FROM games WHERE id=?", (new_id,))
+            self.assertEqual(rows, [{"id": new_id, "future_id": target_future}])
+            self.assertEqual(provider._db_query("SELECT legacy_id FROM game_id_map WHERE future_id=?", (old_future,)), [])
+            self.assertEqual(provider._db_query("SELECT legacy_id FROM game_id_map WHERE future_id=?", (target_future,)), [{"legacy_id": new_id}])
+            state = provider._db_query("SELECT user_id,game_id,play_count FROM user_game_data WHERE user_id=7")
+            self.assertEqual(state, [{"user_id": 7, "game_id": new_id, "play_count": 4}])
 
     def test_library_sync_rejects_overlapping_operation(self):
         provider = self._provider()

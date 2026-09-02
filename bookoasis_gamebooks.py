@@ -3281,6 +3281,54 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         return LibraryManager(self._get_emulatorjs_root())
 
+    def _get_legacy_emulator_dir(self, name, create=False):
+        """통합 루트 아래의 기존 EmulatorJS 하위 저장소 경로를 반환한다.
+
+        1.9.8 계열은 EXTRA_ROMS_PATH/COVERS_PATH/BIOS_PATH로 각각
+        ``<root>/roms|covers|bios``를 저장했다. 최신 UI에서는 통합 루트만
+        노출하므로 개별 설정이 비어 있어도 기존 저장소를 자동 인식해야 한다.
+        """
+        safe_name = str(name or "").strip().lower()
+        if safe_name not in {"roms", "covers", "bios"}:
+            return ""
+        root = str(self._get_emulatorjs_root() or "").strip()
+        if not root:
+            return ""
+        candidate = os.path.abspath(os.path.join(root, safe_name))
+        data_candidate = os.path.abspath(os.path.join(self._get_data_dir(), safe_name))
+        if os.path.realpath(candidate) == os.path.realpath(data_candidate):
+            return data_candidate
+        if create:
+            try:
+                os.makedirs(candidate, exist_ok=True)
+            except Exception as exc:
+                logger.warning(f"[{SELF_ID}] Legacy emulator dir create error ({candidate}): {exc}")
+                return ""
+        return candidate if os.path.isdir(candidate) else ""
+
+    def _get_rom_scan_dirs(self):
+        """현재 설정과 통합 루트의 레거시 ROM 저장소를 모두 안전하게 스캔한다."""
+        candidates = [self._get_roms_dir()]
+        extra_path = self._get_setting("EXTRA_ROMS_PATH", "").strip()
+        if extra_path:
+            candidates.append(extra_path)
+        legacy_root = self._get_legacy_emulator_dir("roms", create=False)
+        if legacy_root:
+            candidates.append(legacy_root)
+
+        scan_dirs = []
+        seen = set()
+        for candidate in candidates:
+            if not candidate or not os.path.isdir(candidate):
+                continue
+            abs_path = os.path.abspath(candidate)
+            real_path = os.path.realpath(abs_path)
+            if real_path in seen:
+                continue
+            seen.add(real_path)
+            scan_dirs.append(abs_path)
+        return scan_dirs
+
     def _place_new_ingest_content(self, analysis_result, future_id, file_path):
         """신규 ingest ROM을 재분석 없이 최종 game-id 기반 구조로 배치한다.
 
@@ -3334,7 +3382,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return saves_dir
 
     def _get_covers_dir(self):
-        """커버 아트 이미지 디렉터리"""
+        """커버 아트 이미지 디렉터리. 통합 루트의 기존 covers를 우선 호환한다."""
         custom_path = self._get_setting("COVERS_PATH", "").strip()
         if custom_path:
             try:
@@ -3343,6 +3391,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     return custom_path
             except Exception as e:
                 logger.warning(f"[{SELF_ID}] Custom covers dir error ({custom_path}): {e}")
+        legacy_dir = self._get_legacy_emulator_dir("covers", create=True)
+        if legacy_dir:
+            return legacy_dir
         default_dir = os.path.join(self._get_data_dir(), "covers")
         os.makedirs(default_dir, exist_ok=True)
         return default_dir
@@ -3463,12 +3514,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         if not raw_filename:
             return None
 
-        roots = []
-        for candidate in (self._get_roms_dir(), self._get_setting("EXTRA_ROMS_PATH", "").strip()):
-            if candidate and os.path.isdir(candidate):
-                real = os.path.realpath(os.path.abspath(candidate))
-                if real not in roots:
-                    roots.append(real)
+        roots = [os.path.realpath(path) for path in self._get_rom_scan_dirs()]
 
         aliases = []
         for value in (core, platform):
@@ -3570,7 +3616,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return moved_count
 
     def _get_bios_dir(self):
-        """시스템 바이오스 파일 디렉터리"""
+        """시스템 바이오스 파일 디렉터리. 통합 루트의 기존 bios를 우선 호환한다."""
         custom_path = self._get_setting("BIOS_PATH", "").strip()
         if custom_path:
             try:
@@ -3579,6 +3625,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     return custom_path
             except Exception as e:
                 logger.warning(f"[{SELF_ID}] Custom bios dir error ({custom_path}): {e}")
+        legacy_dir = self._get_legacy_emulator_dir("bios", create=True)
+        if legacy_dir:
+            return legacy_dir
         bios_dir = os.path.join(self._get_data_dir(), "bios")
         os.makedirs(bios_dir, exist_ok=True)
         return bios_dir
@@ -3641,10 +3690,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         search_dirs.append(plat_bios)
 
         search_dirs.append(self._get_bios_dir())
-        search_dirs.append(self._get_roms_dir())
-        extra_p = self._get_setting("EXTRA_ROMS_PATH", "").strip()
-        if extra_p and os.path.isdir(extra_p):
-            search_dirs.append(extra_p)
+        search_dirs.extend(self._get_rom_scan_dirs())
 
         seen = set()
         for sdir in search_dirs:
@@ -4488,12 +4534,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         game = rows[0]
         file_path = game.get("file_path") or ""
 
-        # 1. 파일 존재 여부 검사
-        if not file_path or not os.path.exists(file_path):
-            self._db_execute("DELETE FROM games WHERE id = ?", (game_id,))
-            self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (game_id,))
-            self._delete_future_game_id(game_id)
-            return {"exists": False, "deleted": True, "cover_updated": False}
+        # 1. 파일 존재 여부 검사. 미발견은 삭제가 아니라 상태 기록만 한다.
+        if not file_path or not os.path.isfile(file_path):
+            self._db_execute(
+                "UPDATE games SET health_status = ?, missing_roms = ?, health_cache_key = '', analysis_cache_key = '' WHERE id = ?",
+                ("missing_file", "ROM 파일을 찾을 수 없습니다.", game_id),
+            )
+            return {"exists": False, "deleted": False, "missing": True, "cover_updated": False}
 
         # 2. 기종/코어 재검증 (과거 잘못 등록된 arcade/other 기종 보정)
         rom_info = _detect_rom_info(file_path)
@@ -5095,10 +5142,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         """
         self._migrate_bios_files()
 
-        scan_dirs = [self._get_roms_dir()]
-        extra_path = self._get_setting("EXTRA_ROMS_PATH", "").strip()
-        if extra_path and os.path.isdir(extra_path) and extra_path not in scan_dirs:
-            scan_dirs.append(extra_path)
+        scan_dirs = self._get_rom_scan_dirs()
 
         bios_dir = os.path.abspath(self._get_bios_dir())
         covers_dir = os.path.abspath(self._get_covers_dir())
@@ -5194,16 +5238,25 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             missing_by_signature.setdefault(signature, []).append(old_gid)
 
         relocation_sources = {}
+        duplicate_relocation_sources = {}
         for found_gid, found_info in found_files.items():
-            if found_gid in existing_games:
-                continue
             signature = (
                 str(found_info.get("filename") or "").lower(),
                 int(found_info.get("size_bytes") or 0),
             )
             candidates = missing_by_signature.get(signature) or []
-            if len(candidates) == 1:
-                relocation_sources[found_gid] = candidates[0]
+            if len(candidates) != 1:
+                continue
+            source_gid = candidates[0]
+            if source_gid == found_gid:
+                continue
+            if found_gid in existing_games:
+                # 이전 스캔이 새 경로 행을 이미 만들었지만 옛 경로 행도 남아 있는 경우.
+                # 새 행의 future_id를 유지하고 옛 행의 사용자 상태만 병합한다.
+                duplicate_relocation_sources[found_gid] = source_gid
+            else:
+                # 새 경로 행이 아직 없으면 옛 행의 future_id를 그대로 승계한다.
+                relocation_sources[found_gid] = source_gid
 
         now_str = _get_kst_now_str()
         available_rom_names = {str(v.get("filename") or "").lower() for v in found_files.values() if v.get("filename")}
@@ -5312,10 +5365,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 source_gid = relocation_sources.get(gid) or gid
                 if source_gid != gid and not self._relocation_identity_matches(existing_games.get(source_gid) or {}, identity_info):
                     source_gid = gid
+                duplicate_source_gid = duplicate_relocation_sources.get(gid) or ""
+                if duplicate_source_gid and not self._relocation_identity_matches(existing_games.get(duplicate_source_gid) or {}, identity_info):
+                    duplicate_source_gid = ""
 
                 return {
                     "gid": gid,
                     "source_gid": source_gid,
+                    "duplicate_source_gid": duplicate_source_gid,
                     "info": info,
                     "rom_info": rom_info,
                     "analysis_result": analysis_result,
@@ -5329,6 +5386,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         # ThreadPoolExecutor를 이용한 멀티스레드 병렬 바이너리 분석
         failed_relocations = set()
+        resolved_relocations = set()
         existing_update_sql = (
             "UPDATE games SET future_id = ?, file_path = ?, size_bytes = ?, mtime = ?, core = ?, platform = ?, "
             "title = ?, game_code = ?, needed_bios = ?, health_status = ?, missing_roms = ?, rom_crc32 = ?, "
@@ -5370,6 +5428,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             for saving_index, res in enumerate(results, start=1):
                 gid = res["gid"]
                 source_gid = res.get("source_gid") or gid
+                duplicate_source_gid = str(res.get("duplicate_source_gid") or "").strip()
                 info = res["info"]
                 rom_info = res["rom_info"]
                 analysis_result = res.get("analysis_result")
@@ -5697,8 +5756,25 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         else:
                             try:
                                 self._rebind_future_game_id(source_gid, gid, future_id)
+                                # 해시 검증까지 통과한 relocation만 옛 DB 행을 제거한다.
+                                self._db_execute("DELETE FROM games WHERE id = ?", (source_gid,))
+                                resolved_relocations.add(source_gid)
                             except Exception:
                                 failed_relocations.add(source_gid)
+                                raise
+
+                    if duplicate_source_gid and duplicate_source_gid in existing_games:
+                        if not self._merge_game_user_state(duplicate_source_gid, gid):
+                            failed_relocations.add(duplicate_source_gid)
+                        else:
+                            try:
+                                # 새 경로 행이 이미 존재하면 그 행의 future_id가 정본이다.
+                                # 옛 중복 행을 지운 뒤 사용하지 않는 legacy 매핑만 제거한다.
+                                self._db_execute("DELETE FROM games WHERE id = ?", (duplicate_source_gid,))
+                                self._delete_future_game_id(duplicate_source_gid)
+                                resolved_relocations.add(duplicate_source_gid)
+                            except Exception:
+                                failed_relocations.add(duplicate_source_gid)
                                 raise
                 except Exception as dbe:
                     logger.warning(f"[{SELF_ID}] Game DB update error ({gid}): {dbe}")
@@ -5718,29 +5794,25 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
             _flush_existing_update_batch()
 
-        # 삭제된 게임 정리. 신규/변경 파일이 하나도 없어도 디스크와 DB의 삭제 상태는 항상 맞춘다.
-        # layout v2 게임은 legacy scan root 밖의 표준 library/에 있으므로 실제 파일이 살아 있으면 유지한다.
-        structured_library_root = os.path.join(self._get_emulatorjs_root(), "library")
+        # 스캔에서 보이지 않는다는 이유만으로 게임을 삭제하지 않는다.
+        # 외부 마운트 일시 장애, 설정 누락, 경로 전환 중에도 DB/사용자 상태를 보존하고
+        # 실제 파일이 없는 경우에만 missing_file 요약을 기록한다. 물리 삭제는
+        # 사용자가 명시적으로 삭제 예약한 항목을 _process_pending_deletions()에서만 수행한다.
+        missing_count = 0
         for gid, existing_game in existing_games.items():
-            if gid in failed_relocations:
+            if gid in failed_relocations or gid in resolved_relocations or gid in found_files:
                 continue
-            if gid not in found_files:
-                layout_version = int((existing_game or {}).get("layout_version") or 1)
-                structured_path = str((existing_game or {}).get("file_path") or "").strip()
-                if (
-                    layout_version >= 2
-                    and structured_path
-                    and os.path.isfile(structured_path)
-                    and _path_within(structured_path, structured_library_root)
-                ):
-                    continue
-                try:
-                    self._db_execute("DELETE FROM games WHERE id = ?", (gid,))
-                    self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (gid,))
-                    self._delete_future_game_id(gid)
-                    deleted_count += 1
-                except Exception:
-                    pass
+            current_path = str((existing_game or {}).get("file_path") or "").strip()
+            if current_path and os.path.isfile(current_path):
+                continue
+            try:
+                self._db_execute(
+                    "UPDATE games SET health_status = ?, missing_roms = ?, health_cache_key = '', analysis_cache_key = '' WHERE id = ?",
+                    ("missing_file", "ROM 파일을 찾을 수 없습니다.", gid),
+                )
+                missing_count += 1
+            except Exception as exc:
+                logger.warning(f"[{SELF_ID}] Missing ROM state update failed ({gid}): {exc}")
 
         # 누락된 커버 이미지를 전역 백그라운드 다운로드 큐에 추가
         if covers_to_fetch:
@@ -5758,7 +5830,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "success": True,
             "new_count": len(new_games_added),
             "new_games": new_games_added,
-            "deleted_count": deleted_count,
+            "deleted_count": 0,
+            "missing_count": missing_count,
             "total_files": total_files,
         }
 
@@ -8284,24 +8357,48 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 if not _is_current_user_admin():
                     return {"success": False, "error": "관리자(admin) 권한이 있는 사용자만 설정을 변경할 수 있습니다."}
 
-                # args, form, json 지원
+                # args, form, json 지원. 요청에 없는 값과 명시적으로 빈 값은 구분한다.
+                # 최신 UI에서 제거된 레거시 필드가 누락됐다는 이유로 기존 설정을 지우면 안 된다.
                 json_data = request.get_json(silent=True) or {}
-                def _get_val(key, default=""):
-                    return request.args.get(key) or request.form.get(key) or json_data.get(key) or default
+                _missing = object()
 
-                extra_path = str(_get_val("extra_roms_path", "")).strip()
-                covers_path = str(_get_val("covers_path", "")).strip()
-                bios_path = str(_get_val("bios_path", "")).strip()
-                emulatorjs_root = str(_get_val("emulatorjs_root", "")).strip()
-                cloud_save_raw = _get_val("cloud_save_enabled", "1")
-                interval_raw = _get_val("auto_save_interval_sec", "60")
+                def _get_optional(key):
+                    if key in request.args:
+                        return request.args.get(key)
+                    if key in request.form:
+                        return request.form.get(key)
+                    if key in json_data:
+                        return json_data.get(key)
+                    return _missing
 
-                ss_devid = str(_get_val("ss_devid", "")).strip()
-                ss_devpassword = str(_get_val("ss_devpassword", "")).strip()
-                ss_user = str(_get_val("ss_user", "")).strip()
-                ss_password = str(_get_val("ss_password", "")).strip()
-                igdb_client_id = str(_get_val("igdb_client_id", "")).strip()
-                igdb_client_secret = str(_get_val("igdb_client_secret", "")).strip()
+                def _preserved_text(api_key, setting_key, default=""):
+                    raw = _get_optional(api_key)
+                    if raw is _missing:
+                        return str(self._get_setting(setting_key, default) or "").strip(), False
+                    return str(raw or "").strip(), True
+
+                prev_emulatorjs_root = str(self._get_setting("EMULATORJS_ROOT", "") or "").strip()
+                prev_extra_path = str(self._get_setting("EXTRA_ROMS_PATH", "") or "").strip()
+                prev_covers_path = str(self._get_setting("COVERS_PATH", "") or "").strip()
+                prev_bios_path = str(self._get_setting("BIOS_PATH", "") or "").strip()
+
+                emulatorjs_root, emulatorjs_root_provided = _preserved_text("emulatorjs_root", "EMULATORJS_ROOT")
+                extra_path, extra_path_provided = _preserved_text("extra_roms_path", "EXTRA_ROMS_PATH")
+                covers_path, covers_path_provided = _preserved_text("covers_path", "COVERS_PATH")
+                bios_path, bios_path_provided = _preserved_text("bios_path", "BIOS_PATH")
+                ss_devid, ss_devid_provided = _preserved_text("ss_devid", "SS_DEVID")
+                ss_devpassword, ss_devpassword_provided = _preserved_text("ss_devpassword", "SS_DEVPASSWORD")
+                ss_user, ss_user_provided = _preserved_text("ss_user", "SS_USER")
+                ss_password, ss_password_provided = _preserved_text("ss_password", "SS_PASSWORD")
+                igdb_client_id, igdb_client_id_provided = _preserved_text("igdb_client_id", "IGDB_CLIENT_ID")
+                igdb_client_secret, igdb_client_secret_provided = _preserved_text("igdb_client_secret", "IGDB_CLIENT_SECRET")
+
+                cloud_save_raw = _get_optional("cloud_save_enabled")
+                if cloud_save_raw is _missing:
+                    cloud_save_raw = self._get_setting("CLOUD_SAVE_ENABLED", "1")
+                interval_raw = _get_optional("auto_save_interval_sec")
+                if interval_raw is _missing:
+                    interval_raw = self._get_setting("AUTO_SAVE_INTERVAL_SEC", "60")
 
                 cloud_save = True if str(cloud_save_raw).lower() in ("1", "true", "yes", "on") else False
                 try:
@@ -8309,39 +8406,50 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 except Exception:
                     interval = 60
 
-                prev_covers_path = str(self._get_setting("COVERS_PATH", "")).strip()
-                prev_bios_path = str(self._get_setting("BIOS_PATH", "")).strip()
-
-                if emulatorjs_root:
+                if emulatorjs_root_provided and emulatorjs_root:
                     self._set_setting("EMULATORJS_ROOT", emulatorjs_root)
-                self._set_setting("EXTRA_ROMS_PATH", extra_path)
-                self._set_setting("COVERS_PATH", covers_path)
-                self._set_setting("BIOS_PATH", bios_path)
+                if extra_path_provided:
+                    self._set_setting("EXTRA_ROMS_PATH", extra_path)
+                if covers_path_provided:
+                    self._set_setting("COVERS_PATH", covers_path)
+                if bios_path_provided:
+                    self._set_setting("BIOS_PATH", bios_path)
                 self._set_setting("CLOUD_SAVE_ENABLED", cloud_save)
                 self._set_setting("AUTO_SAVE_INTERVAL_SEC", interval)
-                self._set_setting("SS_DEVID", ss_devid)
-                self._set_setting("SS_DEVPASSWORD", ss_devpassword)
-                self._set_setting("SS_USER", ss_user)
-                self._set_setting("SS_PASSWORD", ss_password)
-                self._set_setting("IGDB_CLIENT_ID", igdb_client_id)
-                self._set_setting("IGDB_CLIENT_SECRET", igdb_client_secret)
+                if ss_devid_provided:
+                    self._set_setting("SS_DEVID", ss_devid)
+                if ss_devpassword_provided:
+                    self._set_setting("SS_DEVPASSWORD", ss_devpassword)
+                if ss_user_provided:
+                    self._set_setting("SS_USER", ss_user)
+                if ss_password_provided:
+                    self._set_setting("SS_PASSWORD", ss_password)
+                if igdb_client_id_provided:
+                    self._set_setting("IGDB_CLIENT_ID", igdb_client_id)
+                if igdb_client_secret_provided:
+                    self._set_setting("IGDB_CLIENT_SECRET", igdb_client_secret)
 
-                # 커버 이미지 폴더가 새로 지정되었거나 변경되었을 경우 기존 커버 파일들을 새 위치로 마이그레이션
-                if covers_path and covers_path != prev_covers_path:
+                # 커버/BIOS 개별 경로를 실제로 전달한 구형 클라이언트만 마이그레이션한다.
+                if covers_path_provided and covers_path and covers_path != prev_covers_path:
                     try:
                         self._migrate_covers_to_custom_dir(covers_path)
                     except Exception as e:
                         logger.error(f"[{SELF_ID}] Cover migration during save_settings error: {e}")
 
-                # 바이오스 폴더가 새로 지정되었거나 변경되었을 경우 기존 바이오스 파일들을 새 위치로 마이그레이션
-                if bios_path and bios_path != prev_bios_path:
+                if bios_path_provided and bios_path and bios_path != prev_bios_path:
                     try:
                         self._migrate_bios_to_custom_dir(bios_path)
                     except Exception as e:
                         logger.error(f"[{SELF_ID}] Bios migration during save_settings error: {e}")
 
-                # ROM 디렉토리 스캔을 백그라운드로 실행하여 저장 응답 타임아웃 방지
-                threading.Thread(target=self._run_library_sync_background, args=("sync",), daemon=True).start()
+                # ROM 스캔 루트가 실제로 변경됐을 때만 동기화한다. 단순 세이브 설정 변경으로
+                # 외부 마운트를 다시 훑거나 라이브러리 상태를 건드리지 않는다.
+                rom_scan_changed = (
+                    (emulatorjs_root_provided and emulatorjs_root and emulatorjs_root != prev_emulatorjs_root)
+                    or (extra_path_provided and extra_path != prev_extra_path)
+                )
+                if rom_scan_changed:
+                    threading.Thread(target=self._run_library_sync_background, args=("sync",), daemon=True).start()
                 return {"success": True, "message": "설정이 성공적으로 저장되었습니다."}
 
             elif action == "search_artwork":
