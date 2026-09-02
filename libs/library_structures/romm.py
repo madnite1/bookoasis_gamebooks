@@ -372,8 +372,8 @@ class RomMLibraryStructure(BaseLibraryStructure):
     @staticmethod
     def _content_conflict_strategy(value: str) -> str:
         strategy = str(value or "replace").lower()
-        if strategy not in {"replace", "skip"}:
-            raise ValueError("game_id 콘텐츠 디렉터리는 conflict_strategy=replace 또는 skip만 허용됩니다.")
+        if strategy not in {"replace", "skip", "verify"}:
+            raise ValueError("game_id 콘텐츠 디렉터리는 conflict_strategy=replace, skip 또는 verify만 허용됩니다.")
         return strategy
 
     @classmethod
@@ -466,6 +466,117 @@ class RomMLibraryStructure(BaseLibraryStructure):
         """기존 내부 호출 호환용 large WebP 변환."""
         return cls._to_webp_variant(data, cls.COVER_LARGE_MAX_WIDTH, cls.COVER_LARGE_QUALITY)
 
+    @staticmethod
+    def _file_sha256(path: str, chunk_size: int = 1024 * 1024) -> str:
+        import hashlib
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
+    def _verify_existing_content(cls, normalized_sources, final_dir: str) -> bool:
+        """재개 시 기존 game_id 디렉터리가 원본 세트와 정확히 같은지 확인한다."""
+        expected_names = {safe_name for _src, safe_name, _dest, _inside in normalized_sources}
+        actual_names = set()
+        if not os.path.isdir(final_dir):
+            return False
+        for root, _dirs, files in os.walk(final_dir):
+            for name in files:
+                rel = os.path.relpath(os.path.join(root, name), final_dir)
+                actual_names.add(rel)
+        if actual_names != expected_names:
+            return False
+        for src_abs, safe_name, _dest_abs, _inside in normalized_sources:
+            target = os.path.join(final_dir, safe_name)
+            try:
+                if os.path.getsize(src_abs) != os.path.getsize(target):
+                    return False
+            except OSError:
+                return False
+            if cls._file_sha256(src_abs) != cls._file_sha256(target):
+                return False
+        return True
+
+    @classmethod
+    def _same_device_move_possible(cls, normalized_sources, parent: str) -> bool:
+        if not normalized_sources:
+            return False
+        try:
+            target_dev = os.stat(parent).st_dev
+            return all(os.stat(src_abs).st_dev == target_dev for src_abs, _name, _dest, _inside in normalized_sources)
+        except OSError:
+            return False
+
+    @classmethod
+    def _transfer_directory_remote_rename(cls, normalized_sources, final_dir: str):
+        """같은 파일시스템에서는 contents를 재전송하지 않고 rename으로 배치한다.
+
+        rclone VFS/FUSE에서는 같은 remote 내 rename이 서버 측 move로 처리될 수 있어
+        대용량 ROM을 로컬 캐시를 통해 다시 읽고 쓰는 비용을 피한다. 실패하면 원본
+        위치를 복구한 뒤 None을 반환해 copy fallback을 허용한다.
+        """
+        parent = os.path.dirname(final_dir)
+        staging = tempfile.mkdtemp(prefix=".game-content-move-", dir=parent)
+        backup = None
+        moved = []
+        installed = False
+        try:
+            for src_abs, safe_name, _dest_abs, was_inside_target in normalized_sources:
+                if was_inside_target:
+                    # 일부만 이미 대상 내부인 혼합 세트는 rename fast-path로 처리하지 않는다.
+                    raise OSError("mixed target/source content")
+                staged_path = os.path.join(staging, safe_name)
+                os.makedirs(os.path.dirname(staged_path), exist_ok=True)
+                os.replace(src_abs, staged_path)
+                moved.append((src_abs, staged_path))
+
+            if os.path.exists(final_dir):
+                backup = cls._reserve_backup_path(parent, ".game-backup-")
+                os.replace(final_dir, backup)
+            os.replace(staging, final_dir)
+            staging = None
+            installed = True
+            if backup and os.path.exists(backup):
+                cls._remove_path(backup)
+                backup = None
+            return [os.path.join(final_dir, safe_name) for _src, safe_name, _dest, _inside in normalized_sources]
+        except OSError:
+            if installed:
+                # 최종 설치 이후의 오류는 copy fallback을 하면 중복/손실 위험이 있으므로 전파한다.
+                raise
+            if backup and os.path.exists(backup) and not os.path.exists(final_dir):
+                try:
+                    os.replace(backup, final_dir)
+                    backup = None
+                except OSError:
+                    raise
+            # staging으로 옮겨진 원본을 역순으로 되돌린다.
+            rollback_ok = True
+            for src_abs, staged_path in reversed(moved):
+                if not os.path.exists(staged_path):
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(src_abs), exist_ok=True)
+                    os.replace(staged_path, src_abs)
+                except OSError:
+                    rollback_ok = False
+            if not rollback_ok:
+                raise RuntimeError("rename fast-path 실패 후 원본 롤백에 실패했습니다.")
+            return None
+        finally:
+            if staging and os.path.exists(staging):
+                shutil.rmtree(staging, ignore_errors=True)
+            if backup and os.path.exists(backup) and not os.path.exists(final_dir):
+                try:
+                    os.replace(backup, final_dir)
+                except OSError:
+                    pass
+
     @classmethod
     def _transfer_directory_transactional(
         cls,
@@ -500,6 +611,19 @@ class RomMLibraryStructure(BaseLibraryStructure):
 
         if os.path.exists(final_dir) and strategy == "skip":
             return []
+        if os.path.exists(final_dir) and strategy == "verify":
+            if not cls._verify_existing_content(normalized_sources, final_dir):
+                raise FileExistsError(f"기존 game_id 콘텐츠가 원본과 달라 자동 재개할 수 없습니다: {final_dir}")
+            if move:
+                for src_abs, _safe_name, _dest_abs, was_inside_target in normalized_sources:
+                    if not was_inside_target and os.path.isfile(src_abs):
+                        os.remove(src_abs)
+            return expected_paths
+
+        if move and cls._same_device_move_possible(normalized_sources, parent):
+            renamed = cls._transfer_directory_remote_rename(normalized_sources, final_dir)
+            if renamed is not None:
+                return renamed
 
         staging = tempfile.mkdtemp(prefix=".game-content-", dir=parent)
         backup = None

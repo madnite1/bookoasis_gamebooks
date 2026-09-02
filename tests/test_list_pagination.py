@@ -313,19 +313,51 @@ class ListPaginationTests(unittest.TestCase):
         self.assertEqual(row["health_status"], "pass")
         self.assertEqual(row["play_status"], "verified")
 
-    def test_play_verification_expires_when_health_cache_key_changes(self):
-        self.provider._db_execute("UPDATE games SET health_cache_key='health-a' WHERE id='g1'")
+    def test_play_verification_survives_health_cache_path_change(self):
+        self.provider._db_execute(
+            "UPDATE games SET health_cache_key='health-a', content_identity_key='content-a' WHERE id='g1'"
+        )
         self._play_action("set_play_status", "g1", "verified")
         before = self._call("offset=0&limit=10&sort=title&category=all&status=all")
         before_game = next(game for game in before["games"] if game["id"] == "g1")
         self.assertEqual(before_game["play_status"], "verified")
         self.assertEqual(before_game["play_status_stale"], 0)
 
+        # Phase 6처럼 경로/mtime 기반 health key만 바뀌어도 ROM 내용 identity는 그대로다.
         self.provider._db_execute("UPDATE games SET health_cache_key='health-b' WHERE id='g1'")
+        after = self._call("offset=0&limit=10&sort=title&category=all&status=all")
+        after_game = next(game for game in after["games"] if game["id"] == "g1")
+        self.assertEqual(after_game["play_status"], "verified")
+        self.assertEqual(after_game["play_status_stale"], 0)
+
+    def test_play_verification_expires_when_content_identity_changes(self):
+        self.provider._db_execute(
+            "UPDATE games SET health_cache_key='health-a', content_identity_key='content-a' WHERE id='g1'"
+        )
+        self._play_action("set_play_status", "g1", "verified")
+        self.provider._db_execute(
+            "UPDATE games SET health_cache_key='health-b', content_identity_key='content-b' WHERE id='g1'"
+        )
+
         after = self._call("offset=0&limit=10&sort=title&category=all&status=all")
         after_game = next(game for game in after["games"] if game["id"] == "g1")
         self.assertEqual(after_game["play_status"], "untested")
         self.assertEqual(after_game["play_status_stale"], 1)
+
+    def test_content_identity_ignores_path_and_mtime_but_tracks_content_and_core(self):
+        base = {
+            "filename": "alpha.gba", "file_path": "/old/alpha.gba", "mtime": 1.0,
+            "core": "gba", "platform": "GBA", "size_bytes": 123,
+            "rom_sha1": "AABBCC", "rom_md5": "", "rom_crc32": "",
+            "game_code": "AGB-ALPHA", "serial_code": "", "normalized_title": "alpha",
+        }
+        moved = dict(base, file_path="/new/library/gba/roms/1/alpha.gba", mtime=999.0)
+        replaced = dict(base, rom_sha1="DDEEFF")
+        other_core = dict(base, core="mgba-next")
+
+        self.assertEqual(self.provider._content_identity_key(base), self.provider._content_identity_key(moved))
+        self.assertNotEqual(self.provider._content_identity_key(base), self.provider._content_identity_key(replaced))
+        self.assertNotEqual(self.provider._content_identity_key(base), self.provider._content_identity_key(other_core))
 
     def test_frontend_analysis_card_and_core_theme_contract(self):
         root = Path(__file__).resolve().parents[1]
@@ -395,6 +427,71 @@ class ListPaginationTests(unittest.TestCase):
 
         row = self.provider._db_query("SELECT cover_path FROM games WHERE id = ?", ("g5",))[0]
         self.assertEqual(row["cover_path"], str(missing_path))
+
+    def test_cover_variants_use_future_id_and_list_prefers_small_url(self):
+        future_id = self.provider._get_or_create_future_game_id("g5")
+        source = self.covers / "g5.png"
+        source.write_bytes(b"original-cover")
+        self.provider._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (str(source), "g5"))
+
+        large = self.root / "resources" / "roms" / str(future_id) / "cover_l.webp"
+        small = self.root / "resources" / "roms" / str(future_id) / "cover_s.webp"
+        large.parent.mkdir(parents=True, exist_ok=True)
+        large.write_bytes(b"large-webp")
+        small.write_bytes(b"small-webp")
+        fake_result = mock.Mock(
+            success=True,
+            cover_l_dest_path=str(large),
+            cover_s_dest_path=str(small),
+            errors=[],
+        )
+        fake_manager = mock.Mock()
+        fake_manager.save_cover.return_value = fake_result
+        with mock.patch.object(self.provider, "_get_library_manager", return_value=fake_manager):
+            result = self.provider._ensure_cover_variants("g5", force=True)
+
+        self.assertTrue(result["success"])
+        fake_manager.save_cover.assert_called_once_with(future_id, str(source))
+        row = self.provider._db_query(
+            "SELECT cover_large_path, cover_thumbnail_path, cover_revision FROM games WHERE id='g5'"
+        )[0]
+        self.assertEqual(row["cover_large_path"], str(large))
+        self.assertEqual(row["cover_thumbnail_path"], str(small))
+        self.assertEqual(int(row["cover_revision"]), 1)
+
+        with self.app.test_request_context("/?size=small"), \
+             mock.patch.object(gamebooks, "_get_current_user_id", return_value=1):
+            response = self.provider._route_cover_file("g5")
+        self.assertEqual(response.get_data(), b"small-webp")
+        self.assertEqual(response.mimetype, "image/webp")
+
+        data = self._call("offset=0&limit=10&sort=title&category=all&status=all")
+        game = next(item for item in data["games"] if item["id"] == "g5")
+        self.assertIn("size=small", game["cover_url"])
+        self.assertIn("rev=1", game["cover_url"])
+        self.assertNotIn("cover_thumbnail_path", game)
+        self.assertNotIn("cover_large_path", game)
+
+    def test_phase6_preflight_and_webp_frontend_contract(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "script.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        style = (root / "style.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="gbaPhase6PreflightBtn"', index)
+        self.assertIn('id="gbaPhase6PreflightModal"', index)
+        self.assertIn('id="gbaPhase6RepairBtn"', index)
+        self.assertIn('id="gbaPhase6BackupBtn"', index)
+        self.assertIn('id="gbaCoverWebpBtn"', index)
+        self.assertIn("Phase 6 실제 ROM 마이그레이션은 시작하지 않습니다.", index)
+        self.assertIn("const action = repair ? 'phase6_repair' : 'phase6_preflight'", script)
+        self.assertIn("apiCall(action)", script)
+        self.assertIn("apiCall('phase6_backup')", script)
+        self.assertIn("apiCall('cover_webp_refresh')", script)
+        self.assertIn("apiCall('cover_webp_progress')", script)
+        self.assertIn(".gba-phase6-summary", style)
+        self.assertIn("var(--gba-bg-card)", style)
+        self.assertIn("var(--gba-border)", style)
 
     def test_list_payload_omits_heavy_unused_fields(self):
         data = self._call("offset=0&limit=1&sort=newest&category=all&status=all")

@@ -67,6 +67,8 @@
     scrollObserver: null,
     coverQueuePollTimer: null,
     coverQueueSeenActive: false,
+    coverVariantPollTimer: null,
+    phase6Preflight: null,
     coverQueue: {
       is_running: false,
       total: 0,
@@ -2859,6 +2861,134 @@
     return items;
   }
 
+  function phase6SampleText(sample) {
+    if (!Array.isArray(sample) || !sample.length) return '';
+    return sample.slice(0, 5).map((item) => {
+      if (item && typeof item === 'object') {
+        return item.id || item.path || item.game_id || JSON.stringify(item);
+      }
+      return String(item ?? '');
+    }).filter(Boolean).join(', ');
+  }
+
+  function renderPhase6Preflight(data) {
+    state.phase6Preflight = data || null;
+    const content = $('gbaPhase6PreflightContent');
+    const loading = $('gbaPhase6PreflightLoading');
+    if (loading) loading.style.display = 'none';
+    if (content) content.style.display = 'block';
+    const blockers = Array.isArray(data?.blockers) ? data.blockers : [];
+    const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
+    const ready = !!data?.ready;
+    const summary = $('gbaPhase6PreflightSummary');
+    if (summary) {
+      summary.classList.toggle('is-ready', ready);
+      summary.classList.toggle('has-blockers', !ready);
+      const journal = data?.migration_journal || {};
+      summary.innerHTML = `
+        <strong>${ready ? 'Phase 6 시작 조건을 충족했습니다.' : 'Phase 6 시작 전에 해결할 항목이 있습니다.'}</strong><br>
+        게임 ${Number(data?.total_games || 0).toLocaleString()}개 · layout v2 ${Number(data?.layout_v2 || 0).toLocaleString()}개 ·
+        DB schema ${escapeHtml(String(data?.schema_version ?? '-'))}/${escapeHtml(String(data?.required_schema_version ?? '-'))} ·
+        migration journal ${Number(journal.total || 0).toLocaleString()}건<br>
+        <small>통합 루트: ${escapeHtml(String(data?.emulatorjs_root || '-'))}</small>`;
+    }
+    const renderItems = (items, emptyText) => items.length
+      ? items.map((item) => {
+          const sample = phase6SampleText(item.sample);
+          return `<div class="gba-phase6-item"><div><strong>${escapeHtml(item.label || item.code || '항목')}</strong>${sample ? `<small>${escapeHtml(sample)}</small>` : ''}</div><span class="gba-phase6-count">${Number(item.count || 0).toLocaleString()}개</span></div>`;
+        }).join('')
+      : `<div class="gba-phase6-empty">${escapeHtml(emptyText)}</div>`;
+    if ($('gbaPhase6Blockers')) $('gbaPhase6Blockers').innerHTML = renderItems(blockers, '차단 항목이 없습니다.');
+    if ($('gbaPhase6Warnings')) $('gbaPhase6Warnings').innerHTML = renderItems(warnings, '추가 경고가 없습니다.');
+    const repairs = Array.isArray(data?.repairs) ? data.repairs : [];
+    if ($('gbaPhase6Repairs')) {
+      $('gbaPhase6Repairs').innerHTML = repairs.length
+        ? `<strong>이번 안전 복구:</strong> ${repairs.map(escapeHtml).join(' · ')}`
+        : '안전 복구는 DB 매핑/고아 사용자 기록/복구 가능한 stale ROM 경로만 수정하며 ROM 파일을 이동하지 않습니다.';
+    }
+  }
+
+  async function runPhase6Preflight(repair = false) {
+    const modal = $('gbaPhase6PreflightModal');
+    if (modal) modal.style.display = 'flex';
+    if ($('gbaPhase6PreflightLoading')) $('gbaPhase6PreflightLoading').style.display = 'flex';
+    if ($('gbaPhase6PreflightContent')) $('gbaPhase6PreflightContent').style.display = 'none';
+    const action = repair ? 'phase6_repair' : 'phase6_preflight';
+    try {
+      const res = await apiCall(action);
+      if (!res || !res.success) throw new Error((res && res.error) || 'Phase 6 준비 점검 실패');
+      renderPhase6Preflight(res);
+      return res;
+    } catch (err) {
+      if (modal) modal.style.display = 'none';
+      showToast(err.message || 'Phase 6 준비 점검 중 오류가 발생했습니다.', true);
+      throw err;
+    }
+  }
+
+  async function createPhase6Backup() {
+    const btn = $('gbaPhase6BackupBtn');
+    if (btn) btn.disabled = true;
+    try {
+      const res = await apiCall('phase6_backup');
+      if (!res || !res.success) throw new Error((res && res.error) || 'DB 백업 실패');
+      showToast(`Phase 6 전 DB 백업을 생성했습니다: ${res.filename || 'backup.sqlite3'}`);
+    } catch (err) {
+      showToast(err.message || 'DB 백업 생성 중 오류가 발생했습니다.', true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function updateCoverWebpButton(progress) {
+    const btn = $('gbaCoverWebpBtn');
+    if (!btn) return;
+    const running = !!progress?.is_running;
+    const current = Number(progress?.current || 0);
+    const total = Number(progress?.total || 0);
+    if (running) {
+      btn.disabled = true;
+      btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span>WebP ${current.toLocaleString()}/${total.toLocaleString()}</span>`;
+    } else {
+      btn.disabled = false;
+      btn.innerHTML = '<i class="fa-solid fa-images"></i> <span>WebP 커버 생성</span>';
+    }
+  }
+
+  async function pollCoverWebpProgress() {
+    if (state.coverVariantPollTimer) {
+      clearTimeout(state.coverVariantPollTimer);
+      state.coverVariantPollTimer = null;
+    }
+    try {
+      const res = await apiCall('cover_webp_progress');
+      const progress = res?.progress || {};
+      updateCoverWebpButton(progress);
+      if (progress.is_running) {
+        state.coverVariantPollTimer = setTimeout(pollCoverWebpProgress, 1000);
+      } else if (progress.status === 'completed') {
+        showToast(`WebP 커버 생성 완료: ${Number(progress.completed || 0).toLocaleString()}개 · 실패 ${Number(progress.failed || 0).toLocaleString()}개`);
+        await loadLibrary(true);
+      }
+    } catch (err) {
+      updateCoverWebpButton({ is_running: false });
+      console.warn('[GameBooks] WebP cover progress error:', err);
+    }
+  }
+
+  async function startCoverWebpRefresh() {
+    if (!confirm('원본 커버는 유지하고 future_id 기반 small/large WebP 커버를 생성합니다.\n\n기존 WebP가 정상인 게임은 건너뜁니다. 계속할까요?')) return;
+    try {
+      const res = await apiCall('cover_webp_refresh');
+      if (!res || !res.success) throw new Error((res && res.error) || 'WebP 커버 생성 시작 실패');
+      updateCoverWebpButton(res.progress || { is_running: true });
+      await pollCoverWebpProgress();
+    } catch (err) {
+      showToast(err.message || 'WebP 커버 생성 시작 중 오류가 발생했습니다.', true);
+      updateCoverWebpButton({ is_running: false });
+    }
+  }
+
   async function confirmDeleteGame(game) {
     if (!confirm(`'${game.title}' 게임을 삭제 대기로 전환하시겠습니까?\n\n지금은 실제 ROM 파일을 삭제하지 않습니다.\n다음 라이브러리 동기화 또는 전체 재구축 시 실제 ROM/관련 디스크/세이브 데이터가 삭제됩니다.\n삭제 대기 게임은 목록에서 즉시 숨겨집니다.`)) {
       return;
@@ -3718,6 +3848,16 @@
     $('gbaDeleteQueueOkBtn')?.addEventListener('click', () => {
       $('gbaDeleteQueueModal').style.display = 'none';
     });
+
+    $('gbaPhase6PreflightBtn')?.addEventListener('click', () => runPhase6Preflight(false));
+    $('gbaPhase6PreflightCloseBtn')?.addEventListener('click', () => { $('gbaPhase6PreflightModal').style.display = 'none'; });
+    $('gbaPhase6PreflightOkBtn')?.addEventListener('click', () => { $('gbaPhase6PreflightModal').style.display = 'none'; });
+    $('gbaPhase6RepairBtn')?.addEventListener('click', async () => {
+      if (!confirm('ROM 파일은 이동하지 않고 DB 매핑, 고아 사용자 기록, 복구 가능한 stale 경로만 안전 복구합니다. 계속할까요?')) return;
+      await runPhase6Preflight(true);
+    });
+    $('gbaPhase6BackupBtn')?.addEventListener('click', createPhase6Backup);
+    $('gbaCoverWebpBtn')?.addEventListener('click', startCoverWebpRefresh);
 
     $('gbaSettingsCloseBtn').addEventListener('click', () => {
       $('gbaSettingsModal').style.display = 'none';

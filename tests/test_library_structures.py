@@ -2,6 +2,7 @@ import io
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -210,6 +211,68 @@ class LibraryStructuresIntegrationTests(unittest.TestCase):
             with Image.open(result.cover_s_dest_path) as small, Image.open(result.cover_l_dest_path) as large:
                 self.assertEqual(small.size, (200, 300))
                 self.assertEqual(large.size, (200, 300))
+
+    def test_same_device_move_uses_rename_fast_path_without_copy2(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source_dir = root / "incoming"
+            source_dir.mkdir()
+            source = source_dir / "fast.gba"
+            source.write_bytes(b"fast-rom")
+            manager = LibraryManager(str(root / "library-root"))
+            analysis = self._analysis(source, system_id="gba")
+
+            with mock.patch("library_structures.romm.shutil.copy2", side_effect=AssertionError("copy2 must not run")):
+                result = manager.place_content(analysis, 501, move_files=True, conflict_strategy="replace")
+
+            self.assertTrue(result.success, result.errors)
+            self.assertFalse(source.exists())
+            target = Path(result.rom_dest_path)
+            self.assertEqual(target.parent.name, "501")
+            self.assertEqual(target.name, "fast.gba")
+            self.assertEqual(target.read_bytes(), b"fast-rom")
+
+    def test_verify_resume_accepts_identical_content_and_rejects_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            manager = LibraryManager(str(root / "library-root"))
+
+            first_dir = root / "first"
+            first_dir.mkdir()
+            first = first_dir / "same.gba"
+            first.write_bytes(b"same-rom")
+            first_result = manager.place_content(
+                self._analysis(first, system_id="gba"), 777,
+                move_files=False, conflict_strategy="replace",
+            )
+            self.assertTrue(first_result.success, first_result.errors)
+
+            resume_dir = root / "resume"
+            resume_dir.mkdir()
+            resume = resume_dir / "same.gba"
+            resume.write_bytes(b"same-rom")
+            resumed = manager.place_content(
+                self._analysis(resume, system_id="gba"), 777,
+                move_files=True, conflict_strategy="verify",
+            )
+            self.assertTrue(resumed.success, resumed.errors)
+            self.assertFalse(resume.exists())
+            target = Path(resumed.rom_dest_path)
+            self.assertEqual(target.parent.name, "777")
+            self.assertEqual(target.name, "same.gba")
+            self.assertEqual(target.read_bytes(), b"same-rom")
+
+            mismatch_dir = root / "mismatch"
+            mismatch_dir.mkdir()
+            mismatch = mismatch_dir / "same.gba"
+            mismatch.write_bytes(b"different-rom")
+            rejected = manager.place_content(
+                self._analysis(mismatch, system_id="gba"), 777,
+                move_files=True, conflict_strategy="verify",
+            )
+            self.assertFalse(rejected.success)
+            self.assertTrue(mismatch.exists())
+            self.assertEqual(target.read_bytes(), b"same-rom")
 
     def test_library_structures_does_not_download_cover_urls(self):
         with tempfile.TemporaryDirectory() as td:

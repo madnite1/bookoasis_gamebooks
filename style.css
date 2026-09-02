@@ -2232,3 +2232,26 @@ kbd {
     justify-content: flex-start;
   }
 }
+
+
+/* Phase 6 준비 점검 - 코어 테마 변수에만 의존 */
+.gba-phase6-modal-box { max-width: 780px; width: min(780px, 95vw); }
+.gba-phase6-summary {
+  padding: 14px; border: 1px solid var(--gba-border); border-radius: 10px;
+  background: var(--gba-surface); color: var(--gba-text-main); margin-bottom: 14px; line-height: 1.55;
+}
+.gba-phase6-summary.is-ready { border-color: var(--gba-success); }
+.gba-phase6-summary.has-blockers { border-color: var(--gba-danger); }
+.gba-phase6-section { margin-top: 16px; }
+.gba-phase6-section h4 { margin: 0 0 8px; color: var(--gba-text-main); font-size: 0.92rem; }
+.gba-phase6-item {
+  display: flex; justify-content: space-between; gap: 12px; align-items: flex-start;
+  padding: 10px 12px; margin-top: 6px; border: 1px solid var(--gba-border);
+  border-radius: 8px; background: var(--gba-bg-card); color: var(--gba-text-main);
+}
+.gba-phase6-item small { display: block; margin-top: 3px; color: var(--gba-text-muted); word-break: break-all; }
+.gba-phase6-count { font-weight: 700; white-space: nowrap; }
+.gba-phase6-empty { color: var(--gba-text-muted); padding: 8px 0; }
+.gba-phase6-notice { margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--gba-border); }
+.gba-phase6-footer { justify-content: space-between; flex-wrap: wrap; }
+.gba-phase6-actions { display: flex; gap: 8px; flex-wrap: wrap; }

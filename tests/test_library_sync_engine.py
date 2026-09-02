@@ -415,6 +415,121 @@ class LibrarySyncEngineTests(unittest.TestCase):
             self.assertFalse(rom.exists())
             self.assertEqual(provider._db_query("SELECT id FROM games WHERE id = ?", ("game",)), [])
 
+    def test_schema_v3_and_migration_journal_table_are_created(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "gamebooks.db"
+            provider = self._provider()
+            provider._get_db_path = lambda: str(db_path)
+            provider._get_data_dir = lambda: str(root / "data")
+            provider._get_emulatorjs_root = lambda: str(root / "emulatorjs")
+            (root / "emulatorjs").mkdir(parents=True, exist_ok=True)
+            provider._init_db()
+
+            version = provider._db_query("SELECT version FROM schema_meta WHERE singleton=1")[0]["version"]
+            self.assertEqual(int(version), provider.DB_SCHEMA_VERSION)
+            cols = {row["name"] for row in provider._db_query("PRAGMA table_info(games)")}
+            self.assertIn("content_identity_key", cols)
+            self.assertIn("play_status_content_key", cols)
+            self.assertIn("cover_large_path", cols)
+            tables = {row["name"] for row in provider._db_query("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertIn("library_migrations", tables)
+
+    def test_phase6_preflight_reports_blockers_and_safe_repair_cleans_orphan_user_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data = root / "data"
+            emulator_root = root / "emulatorjs"
+            rom = root / "roms" / "alpha.gba"
+            rom.parent.mkdir(parents=True, exist_ok=True)
+            rom.write_bytes(b"rom-alpha")
+            emulator_root.mkdir(parents=True, exist_ok=True)
+            db_path = data / "gamebooks.db"
+            data.mkdir(parents=True, exist_ok=True)
+
+            provider = self._provider()
+            provider._get_db_path = lambda: str(db_path)
+            provider._get_data_dir = lambda: str(data)
+            provider._get_emulatorjs_root = lambda: str(emulator_root)
+            provider._get_setting = lambda key, default="": default
+            provider._init_db()
+            provider._db_execute(
+                """INSERT INTO games
+                   (id, filename, file_path, title, core, platform, size_bytes, rom_sha1, health_status, deletion_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pass', 'active')""",
+                ("alpha", "alpha.gba", str(rom), "Alpha", "gba", "GBA", rom.stat().st_size, "abc123"),
+            )
+            future_id = provider._get_or_create_future_game_id("alpha")
+            provider._db_execute("UPDATE games SET future_id=? WHERE id='alpha'", (future_id,))
+            with gamebooks._DB_LOCK:
+                conn = provider._get_db_conn(timeout=60)
+                try:
+                    provider._backfill_content_identity(conn)
+                    conn.commit()
+                finally:
+                    conn.close()
+            provider._db_execute(
+                "INSERT INTO user_game_data(user_id, game_id, play_count) VALUES (1, 'orphan', 3)"
+            )
+
+            with mock.patch.object(provider, "_is_managed_storage_path", return_value=True), \
+                 mock.patch.object(provider, "_phase6_existing_targets", return_value={}):
+                before = provider._phase6_preflight(repair=False)
+                self.assertTrue(before["ready"])
+                self.assertTrue(any(w["code"] == "orphan_user_data" for w in before["warnings"]))
+
+                repaired = provider._phase6_preflight(repair=True)
+                self.assertTrue(repaired["ready"])
+                self.assertTrue(any("고아 사용자 기록" in item for item in repaired["repairs"]))
+                orphan_count = provider._db_query(
+                    "SELECT COUNT(*) AS cnt FROM user_game_data WHERE game_id='orphan'"
+                )[0]["cnt"]
+                self.assertEqual(int(orphan_count), 0)
+
+                provider._db_execute(
+                    "UPDATE games SET deletion_status='pending' WHERE id='alpha'"
+                )
+                blocked = provider._phase6_preflight(repair=False)
+                self.assertFalse(blocked["ready"])
+                self.assertTrue(any(b["code"] == "pending_delete" for b in blocked["blockers"]))
+
+    def test_phase6_backup_and_migration_journal_are_valid(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data = root / "data"
+            data.mkdir(parents=True, exist_ok=True)
+            db_path = data / "gamebooks.db"
+            provider = self._provider()
+            provider._get_db_path = lambda: str(db_path)
+            provider._get_data_dir = lambda: str(data)
+            provider._get_emulatorjs_root = lambda: str(root / "emulatorjs")
+            provider._init_db()
+            provider._db_execute(
+                "INSERT INTO games(id, filename, future_id) VALUES ('g1', 'g1.gba', 101)"
+            )
+            provider._db_execute(
+                "INSERT INTO game_id_map(future_id, legacy_id, migration_status) VALUES (101, 'g1', 'pending')"
+            )
+            provider._upsert_migration_journal(
+                101, "g1", str(root / "source.gba"), str(root / "target"),
+                status="pending", stage="planned", transport="rename",
+            )
+            summary = provider._migration_journal_summary()
+            self.assertEqual(summary["total"], 1)
+            self.assertEqual(summary["counts"].get("pending"), 1)
+
+            backup = provider._create_phase6_db_backup()
+            self.assertTrue(backup["success"])
+            backup_path = Path(backup["path"])
+            self.assertTrue(backup_path.is_file())
+            conn = sqlite3.connect(str(backup_path))
+            try:
+                check = conn.execute("PRAGMA integrity_check").fetchone()[0]
+                self.assertEqual(str(check).lower(), "ok")
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM library_migrations").fetchone()[0], 1)
+            finally:
+                conn.close()
+
     def test_future_ids_backfill_once_and_survive_reinit(self):
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "gba.db"

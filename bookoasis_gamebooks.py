@@ -143,6 +143,12 @@ _HEALTH_PROGRESS = {
 }
 _HEALTH_PROGRESS_LOCK = threading.Lock()
 
+_COVER_VARIANT_PROGRESS = {
+    "is_running": False, "current": 0, "total": 0, "completed": 0, "failed": 0,
+    "current_title": "", "status": "idle", "updated_at": 0,
+}
+_COVER_VARIANT_PROGRESS_LOCK = threading.Lock()
+
 # 백그라운드 커버 아트 다운로드 전역 큐 매니저
 _COVER_QUEUE = []
 _COVER_QUEUE_SET = set()  # 중복 등록 방지 (gid 기준)
@@ -3131,6 +3137,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
     id = "bookoasis_gamebooks"
     name = "Game Books"
     is_searchable = False
+    DB_SCHEMA_VERSION = 3
 
     category_tab = {
         "title": "Game Books",
@@ -3761,111 +3768,220 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 except Exception as e:
                     logger.warning(f"[{SELF_ID}] Data migration warning from {legacy_id}: {e}")
 
+    @staticmethod
+    def _ensure_db_column(conn, table, column, definition):
+        """누락 컬럼만 추가하며 예상하지 못한 SQLite 오류를 숨기지 않는다."""
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(table or "")):
+            raise ValueError(f"잘못된 테이블 이름: {table}")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(column or "")):
+            raise ValueError(f"잘못된 컬럼 이름: {column}")
+        existing = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @classmethod
+    def _schema_migration_columns(cls, version):
+        if version == 1:
+            return (
+                ("core", "TEXT DEFAULT 'gba'"), ("platform", "TEXT DEFAULT 'GBA'"),
+                ("mtime", "REAL DEFAULT 0"), ("needed_bios", "TEXT"),
+                ("health_status", "TEXT DEFAULT 'pass'"), ("missing_roms", "TEXT DEFAULT ''"),
+                ("rom_crc32", "TEXT DEFAULT ''"), ("rom_md5", "TEXT DEFAULT ''"),
+                ("rom_sha1", "TEXT DEFAULT ''"), ("serial_code", "TEXT DEFAULT ''"),
+                ("normalized_title", "TEXT DEFAULT ''"), ("source_system", "TEXT DEFAULT ''"),
+                ("metadata_source", "TEXT DEFAULT ''"), ("metadata_confidence", "INTEGER DEFAULT 0"),
+                ("canonical_title", "TEXT DEFAULT ''"), ("alt_titles", "TEXT DEFAULT ''"),
+                ("region", "TEXT DEFAULT ''"), ("genre", "TEXT DEFAULT ''"),
+                ("developer", "TEXT DEFAULT ''"), ("publisher", "TEXT DEFAULT ''"),
+                ("release_year", "TEXT DEFAULT ''"), ("players", "INTEGER DEFAULT 0"),
+                ("description", "TEXT DEFAULT ''"), ("region_tag", "TEXT DEFAULT ''"),
+                ("revision_tag", "TEXT DEFAULT ''"), ("disc_number", "INTEGER DEFAULT 0"),
+                ("content_flags", "TEXT DEFAULT ''"), ("future_id", "INTEGER"),
+                ("layout_version", "INTEGER DEFAULT 1"), ("cover_thumbnail_path", "TEXT DEFAULT ''"),
+                ("cover_revision", "INTEGER DEFAULT 0"), ("health_cache_key", "TEXT DEFAULT ''"),
+            )
+        if version == 2:
+            return (
+                ("deletion_status", "TEXT DEFAULT 'active'"), ("deletion_requested_at", "TEXT DEFAULT ''"),
+                ("deletion_requested_by", "INTEGER DEFAULT 0"), ("deletion_error", "TEXT DEFAULT ''"),
+                ("analysis_json", "TEXT DEFAULT ''"), ("analysis_cache_key", "TEXT DEFAULT ''"),
+                ("play_status", "TEXT DEFAULT 'untested'"), ("play_status_updated_at", "TEXT DEFAULT ''"),
+                ("play_status_user_id", "INTEGER DEFAULT 0"), ("play_status_health_key", "TEXT DEFAULT ''"),
+                ("last_booted_at", "TEXT DEFAULT ''"),
+            )
+        if version == 3:
+            return (
+                ("content_identity_key", "TEXT DEFAULT ''"),
+                ("play_status_content_key", "TEXT DEFAULT ''"),
+                ("cover_large_path", "TEXT DEFAULT ''"),
+            )
+        raise ValueError(f"지원하지 않는 DB 스키마 버전: {version}")
+
+    def _run_schema_migrations(self, conn):
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS schema_meta (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                version INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute("INSERT OR IGNORE INTO schema_meta(singleton, version) VALUES (1, 0)")
+        row = conn.execute("SELECT version FROM schema_meta WHERE singleton = 1").fetchone()
+        current = int(row[0] if row else 0)
+        if current > self.DB_SCHEMA_VERSION:
+            raise RuntimeError(f"DB 스키마가 플러그인보다 최신입니다: DB={current}, plugin={self.DB_SCHEMA_VERSION}")
+
+        for version in range(current + 1, self.DB_SCHEMA_VERSION + 1):
+            for column, definition in self._schema_migration_columns(version):
+                self._ensure_db_column(conn, "games", column, definition)
+            if version == 3:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS library_migrations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        migration_name TEXT NOT NULL DEFAULT 'phase6',
+                        future_id INTEGER NOT NULL,
+                        legacy_id TEXT NOT NULL,
+                        source_path TEXT DEFAULT '',
+                        target_path TEXT DEFAULT '',
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        stage TEXT NOT NULL DEFAULT 'planned',
+                        transport TEXT DEFAULT '',
+                        source_size INTEGER DEFAULT 0,
+                        attempts INTEGER DEFAULT 0,
+                        last_error TEXT DEFAULT '',
+                        started_at TEXT DEFAULT '',
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                        completed_at TEXT DEFAULT '',
+                        UNIQUE(migration_name, future_id)
+                    )"""
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_library_migrations_status ON library_migrations(migration_name, status)")
+            conn.execute(
+                "UPDATE schema_meta SET version = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1",
+                (version,),
+            )
+
+    @staticmethod
+    def _content_identity_payload(game, analysis_snapshot=None):
+        game = game or {}
+        snapshot = analysis_snapshot if isinstance(analysis_snapshot, dict) else {}
+        sha1 = str(game.get("rom_sha1") or "").strip().lower()
+        md5 = str(game.get("rom_md5") or "").strip().lower()
+        crc32 = str(game.get("rom_crc32") or "").strip().lower()
+        strong = sha1 or md5 or crc32
+        resolved = sorted({os.path.basename(str(x)) for x in (snapshot.get("resolved_disk_files") or []) if str(x or "").strip()})
+        return {
+            "v": 1,
+            "core": str(game.get("core") or snapshot.get("core") or "").strip().lower(),
+            "platform": str(game.get("platform") or snapshot.get("platform") or "").strip().lower(),
+            "size": int(game.get("size_bytes") or 0),
+            "sha1": sha1,
+            "md5": md5,
+            "crc32": crc32,
+            "game_code": str(game.get("game_code") or snapshot.get("game_code") or "").strip(),
+            "serial": str(game.get("serial_code") or snapshot.get("serial_code") or "").strip(),
+            "bundle": resolved,
+            "required_chd": str(snapshot.get("required_chd") or "").strip().lower(),
+            "fallback": "" if strong else "|".join((
+                str(game.get("normalized_title") or "").strip().casefold(),
+                os.path.basename(str(game.get("filename") or "")).casefold(),
+            )),
+        }
+
+    @classmethod
+    def _content_identity_key(cls, game, analysis_snapshot=None):
+        payload = cls._content_identity_payload(game, analysis_snapshot=analysis_snapshot)
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _backfill_content_identity(self, conn):
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(games)").fetchall()}
+        if "content_identity_key" not in columns:
+            return 0
+        rows = conn.execute(
+            """SELECT id, filename, core, platform, size_bytes, game_code, rom_crc32, rom_md5, rom_sha1,
+                      serial_code, normalized_title, analysis_json, content_identity_key,
+                      play_status, play_status_content_key
+               FROM games"""
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            keys = ["id", "filename", "core", "platform", "size_bytes", "game_code", "rom_crc32", "rom_md5", "rom_sha1",
+                    "serial_code", "normalized_title", "analysis_json", "content_identity_key", "play_status", "play_status_content_key"]
+            game = dict(zip(keys, row))
+            snapshot = {}
+            try:
+                parsed = json.loads(game.get("analysis_json") or "{}")
+                snapshot = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                snapshot = {}
+            identity_key = self._content_identity_key(game, snapshot)
+            play_key = str(game.get("play_status_content_key") or "")
+            raw_status = str(game.get("play_status") or "untested")
+            desired_play_key = play_key or (identity_key if raw_status != "untested" else "")
+            if str(game.get("content_identity_key") or "") != identity_key or play_key != desired_play_key:
+                conn.execute(
+                    "UPDATE games SET content_identity_key = ?, play_status_content_key = ? WHERE id = ?",
+                    (identity_key, desired_play_key, game.get("id")),
+                )
+                updated += 1
+        return updated
+
     def _init_db(self):
-        """SQLite 테이블 스키마 초기화 (공유 롬 메타 + 유저별 플레이 데이터 분리)"""
+        """SQLite 스키마를 명시적 버전 마이그레이션으로 초기화하고 Phase 6 불변식을 검증한다."""
         db_path = self._get_db_path()
         with _DB_LOCK:
+            conn = None
             try:
                 conn = sqlite3.connect(db_path, timeout=10)
                 conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.execute("BEGIN")
                 conn.execute(
                     """CREATE TABLE IF NOT EXISTS games (
-                        id TEXT PRIMARY KEY,
-                        filename TEXT,
-                        file_path TEXT,
-                        title TEXT,
-                        game_code TEXT,
-                        maker_code TEXT,
-                        core TEXT DEFAULT 'gba',
-                        platform TEXT DEFAULT 'GBA',
-                        size_bytes INTEGER DEFAULT 0,
-                        mtime REAL DEFAULT 0,
-                        added_at TEXT,
-                        cover_path TEXT,
-                        needed_bios TEXT
+                        id TEXT PRIMARY KEY, filename TEXT, file_path TEXT, title TEXT, game_code TEXT,
+                        maker_code TEXT, core TEXT DEFAULT 'gba', platform TEXT DEFAULT 'GBA',
+                        size_bytes INTEGER DEFAULT 0, mtime REAL DEFAULT 0, added_at TEXT,
+                        cover_path TEXT, needed_bios TEXT
                     )"""
                 )
-                for col, ctype in (
-                    ("core", "TEXT DEFAULT 'gba'"),
-                    ("platform", "TEXT DEFAULT 'GBA'"),
-                    ("mtime", "REAL DEFAULT 0"),
-                    ("needed_bios", "TEXT"),
-                    ("health_status", "TEXT DEFAULT 'pass'"),
-                    ("missing_roms", "TEXT DEFAULT ''"),
-                    ("rom_crc32", "TEXT DEFAULT ''"),
-                    ("rom_md5", "TEXT DEFAULT ''"),
-                    ("rom_sha1", "TEXT DEFAULT ''"),
-                    ("serial_code", "TEXT DEFAULT ''"),
-                    ("normalized_title", "TEXT DEFAULT ''"),
-                    ("source_system", "TEXT DEFAULT ''"),
-                    ("metadata_source", "TEXT DEFAULT ''"),
-                    ("metadata_confidence", "INTEGER DEFAULT 0"),
-                    ("canonical_title", "TEXT DEFAULT ''"),
-                    ("alt_titles", "TEXT DEFAULT ''"),
-                    ("region", "TEXT DEFAULT ''"),
-                    ("genre", "TEXT DEFAULT ''"),
-                    ("developer", "TEXT DEFAULT ''"),
-                    ("publisher", "TEXT DEFAULT ''"),
-                    ("release_year", "TEXT DEFAULT ''"),
-                    ("players", "INTEGER DEFAULT 0"),
-                    ("description", "TEXT DEFAULT ''"),
-                    ("region_tag", "TEXT DEFAULT ''"),
-                    ("revision_tag", "TEXT DEFAULT ''"),
-                    ("disc_number", "INTEGER DEFAULT 0"),
-                    ("content_flags", "TEXT DEFAULT ''"),
-                    ("future_id", "INTEGER"),
-                    ("layout_version", "INTEGER DEFAULT 1"),
-                    ("cover_thumbnail_path", "TEXT DEFAULT ''"),
-                    ("cover_revision", "INTEGER DEFAULT 0"),
-                    ("health_cache_key", "TEXT DEFAULT ''"),
-                    ("deletion_status", "TEXT DEFAULT 'active'"),
-                    ("deletion_requested_at", "TEXT DEFAULT ''"),
-                    ("deletion_requested_by", "INTEGER DEFAULT 0"),
-                    ("deletion_error", "TEXT DEFAULT ''"),
-                    ("analysis_json", "TEXT DEFAULT ''"),
-                    ("analysis_cache_key", "TEXT DEFAULT ''"),
-                    ("play_status", "TEXT DEFAULT 'untested'"),
-                    ("play_status_updated_at", "TEXT DEFAULT ''"),
-                    ("play_status_user_id", "INTEGER DEFAULT 0"),
-                    ("play_status_health_key", "TEXT DEFAULT ''"),
-                    ("last_booted_at", "TEXT DEFAULT ''"),
-                ):
-                    try:
-                        conn.execute(f"ALTER TABLE games ADD COLUMN {col} {ctype}")
-                    except Exception:
-                        pass
-
                 conn.execute(
                     """CREATE TABLE IF NOT EXISTS user_game_data (
-                        user_id INTEGER,
-                        game_id TEXT,
-                        is_favorite INTEGER DEFAULT 0,
-                        last_played_at TEXT,
-                        play_count INTEGER DEFAULT 0,
+                        user_id INTEGER, game_id TEXT, is_favorite INTEGER DEFAULT 0,
+                        last_played_at TEXT, play_count INTEGER DEFAULT 0,
                         PRIMARY KEY (user_id, game_id)
                     )"""
                 )
                 conn.execute(
                     """CREATE TABLE IF NOT EXISTS game_id_map (
-                        future_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        legacy_id TEXT NOT NULL UNIQUE,
-                        migration_status TEXT NOT NULL DEFAULT 'pending',
-                        last_error TEXT DEFAULT '',
-                        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                        future_id INTEGER PRIMARY KEY AUTOINCREMENT, legacy_id TEXT NOT NULL UNIQUE,
+                        migration_status TEXT NOT NULL DEFAULT 'pending', last_error TEXT DEFAULT '',
+                        created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                     )"""
                 )
-                conn.execute(
-                    """CREATE TABLE IF NOT EXISTS settings (
-                        key TEXT PRIMARY KEY,
-                        value TEXT
-                    )"""
-                )
+                conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+                self._run_schema_migrations(conn)
                 self._backfill_future_game_ids(conn)
+                self._backfill_content_identity(conn)
+                # game_id_map.future_id가 영구 ID의 UNIQUE 소유권을 보장한다.
+                # games는 relocation/rebind 중 짧은 전환 구간에 동일 future_id가 두 행에
+                # 존재할 수 있으므로 UNIQUE 인덱스를 걸지 않고 Phase 6 preflight에서
+                # 최종 불변식(중복 0)을 강제한다.
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_games_future_id ON games(future_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_games_deletion_status ON games(deletion_status)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_games_content_identity ON games(content_identity_key)")
                 conn.commit()
-                conn.close()
             except Exception as e:
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                 logger.error(f"[{SELF_ID}] DB Init error: {e}")
+                raise
+            finally:
+                if conn is not None:
+                    conn.close()
 
     # ------------------------------------------------------------------
     # DB 헬퍼 함수
@@ -4147,6 +4263,103 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             finally:
                 conn.close()
 
+    def _ensure_cover_variants(self, game_id, force=False):
+        """원본 커버를 보존하면서 future_id 기반 small/large WebP를 생성한다."""
+        rows = self._db_query(
+            """SELECT id, future_id, cover_path, COALESCE(cover_large_path,'') AS cover_large_path,
+                      COALESCE(cover_thumbnail_path,'') AS cover_thumbnail_path,
+                      COALESCE(cover_revision,0) AS cover_revision
+               FROM games WHERE id = ?""",
+            (game_id,),
+        )
+        if not rows:
+            return {"success": False, "error": "게임을 찾을 수 없습니다."}
+        game = rows[0]
+        future_id = int(game.get("future_id") or 0)
+        if future_id <= 0:
+            return {"success": False, "error": "future_id가 준비되지 않았습니다."}
+        source = str(game.get("cover_path") or "").strip()
+        large = str(game.get("cover_large_path") or "").strip()
+        small = str(game.get("cover_thumbnail_path") or "").strip()
+        if not force and large and small and os.path.isfile(large) and os.path.isfile(small):
+            return {"success": True, "cached": True, "large": large, "small": small, "revision": int(game.get("cover_revision") or 0)}
+        if not source or not os.path.isfile(source):
+            return {"success": False, "error": "원본 커버 파일을 찾을 수 없습니다."}
+
+        result = self._get_library_manager().save_cover(future_id, source)
+        if not result or not result.success or not result.cover_l_dest_path or not result.cover_s_dest_path:
+            errors = list(getattr(result, "errors", None) or []) if result is not None else []
+            return {"success": False, "error": "; ".join(errors) or "WebP 커버 생성에 실패했습니다."}
+        self._db_execute(
+            """UPDATE games SET cover_large_path = ?, cover_thumbnail_path = ?,
+                      cover_revision = COALESCE(cover_revision, 0) + 1
+               WHERE id = ?""",
+            (os.path.abspath(result.cover_l_dest_path), os.path.abspath(result.cover_s_dest_path), game_id),
+        )
+        updated = self._db_query("SELECT cover_revision FROM games WHERE id = ?", (game_id,))
+        revision = int(updated[0].get("cover_revision") or 0) if updated else int(game.get("cover_revision") or 0) + 1
+        return {
+            "success": True, "cached": False,
+            "large": os.path.abspath(result.cover_l_dest_path),
+            "small": os.path.abspath(result.cover_s_dest_path),
+            "revision": revision,
+        }
+
+    def _finalize_cover_source(self, game_id, cover_path, force=False):
+        if cover_path:
+            try:
+                self._ensure_cover_variants(game_id, force=force)
+            except Exception as exc:
+                logger.debug(f"[{SELF_ID}] WebP cover variant skip ({game_id}): {exc}")
+        return cover_path
+
+    def _rebuild_cover_variants_worker(self, force=False):
+        rows = self._db_query(
+            """SELECT id, title, filename, cover_path, cover_large_path, cover_thumbnail_path
+               FROM games WHERE COALESCE(deletion_status,'active')='active' AND COALESCE(cover_path,'')<>'' ORDER BY id"""
+        )
+        total = len(rows)
+        with _COVER_VARIANT_PROGRESS_LOCK:
+            _COVER_VARIANT_PROGRESS.update({
+                "is_running": True, "current": 0, "total": total, "completed": 0, "failed": 0,
+                "current_title": "", "status": "running", "updated_at": time.time(),
+            })
+        try:
+            for index, game in enumerate(rows, start=1):
+                title = str(game.get("title") or game.get("filename") or game.get("id") or "")
+                with _COVER_VARIANT_PROGRESS_LOCK:
+                    _COVER_VARIANT_PROGRESS.update({"current": index - 1, "current_title": title, "updated_at": time.time()})
+                try:
+                    result = self._ensure_cover_variants(game.get("id"), force=force)
+                    with _COVER_VARIANT_PROGRESS_LOCK:
+                        if result.get("success"):
+                            _COVER_VARIANT_PROGRESS["completed"] += 1
+                        else:
+                            _COVER_VARIANT_PROGRESS["failed"] += 1
+                except Exception as exc:
+                    logger.debug(f"[{SELF_ID}] WebP cover rebuild failed ({game.get('id')}): {exc}")
+                    with _COVER_VARIANT_PROGRESS_LOCK:
+                        _COVER_VARIANT_PROGRESS["failed"] += 1
+                with _COVER_VARIANT_PROGRESS_LOCK:
+                    _COVER_VARIANT_PROGRESS["current"] = index
+                    _COVER_VARIANT_PROGRESS["updated_at"] = time.time()
+        finally:
+            with _COVER_VARIANT_PROGRESS_LOCK:
+                _COVER_VARIANT_PROGRESS.update({
+                    "is_running": False, "current_title": "", "status": "completed", "updated_at": time.time(),
+                })
+
+    def _start_cover_variant_rebuild(self, force=False):
+        with _COVER_VARIANT_PROGRESS_LOCK:
+            if _COVER_VARIANT_PROGRESS.get("is_running"):
+                return {"success": True, "started": False, "progress": dict(_COVER_VARIANT_PROGRESS)}
+            _COVER_VARIANT_PROGRESS.update({
+                "is_running": True, "current": 0, "total": 0, "completed": 0, "failed": 0,
+                "current_title": "준비 중...", "status": "queued", "updated_at": time.time(),
+            })
+        threading.Thread(target=self._rebuild_cover_variants_worker, args=(bool(force),), daemon=True).start()
+        return {"success": True, "started": True, "progress": dict(_COVER_VARIANT_PROGRESS)}
+
     def _auto_fetch_and_save_cover(self, game_id, platform_or_core, filename, file_path=None, raw_title=""):
         """Libretro CDN(1차) -> ScreenScraper(2차, Key필요) -> IGDB(3차, Key필요) 순으로 커버 아트를 자동 다운로드/등록합니다."""
         try:
@@ -4157,14 +4370,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 game_id, filename, platform_or_core, current_cover_path=current_cover, update_db=True
             )
             if existing_cover:
-                return existing_cover
+                return self._finalize_cover_source(game_id, existing_cover)
 
             covers_dir = self._get_covers_dir()
             for ext in (".png", ".jpg", ".jpeg", ".webp"):
                 existing_cover = os.path.join(covers_dir, f"{game_id}{ext}")
                 if os.path.exists(existing_cover):
                     self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (existing_cover, game_id))
-                    return existing_cover
+                    return self._finalize_cover_source(game_id, existing_cover)
 
             # 1차: Libretro Thumbnails CDN (무료/API Key 불필요)
             art_bytes = _fetch_libretro_artwork(platform_or_core, filename, raw_title=raw_title)
@@ -4174,7 +4387,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     f.write(art_bytes)
                 self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (save_cover_path, game_id))
                 logger.info(f"[{SELF_ID}] Auto-fetched Libretro cover for {filename} -> {save_cover_path}")
-                return save_cover_path
+                return self._finalize_cover_source(game_id, save_cover_path, force=True)
 
             # 2차: ScreenScraper API (설정에 Key가 등록된 경우에만 실행)
             ss_devid = self._get_setting("SS_DEVID", "").strip()
@@ -4213,7 +4426,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         f.write(art_bytes)
                     self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (save_cover_path, game_id))
                     logger.info(f"[{SELF_ID}] Auto-fetched ScreenScraper cover for {filename} -> {save_cover_path}")
-                    return save_cover_path
+                    return self._finalize_cover_source(game_id, save_cover_path, force=True)
 
             # 3차: IGDB API (설정에 Key가 등록된 경우에만 실행)
             igdb_id = self._get_setting("IGDB_CLIENT_ID", "").strip()
@@ -4247,7 +4460,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         f.write(art_bytes)
                     self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (save_cover_path, game_id))
                     logger.info(f"[{SELF_ID}] Auto-fetched IGDB cover for {filename} -> {save_cover_path}")
-                    return save_cover_path
+                    return self._finalize_cover_source(game_id, save_cover_path, force=True)
 
         except Exception as e:
             logger.debug(f"[{SELF_ID}] Auto cover cascade match error ({filename}): {e}")
@@ -4434,9 +4647,11 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
         try:
             rows = self._db_query(
-                "SELECT id, filename, file_path, core, platform, game_code, needed_bios, health_status, missing_roms, "
+                "SELECT id, filename, file_path, core, platform, game_code, needed_bios, health_status, missing_roms, size_bytes, "
+                "rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, "
                 "metadata_source, metadata_confidence, source_system, COALESCE(health_cache_key, '') AS health_cache_key, "
-                "COALESCE(analysis_json, '') AS analysis_json, COALESCE(analysis_cache_key, '') AS analysis_cache_key "
+                "COALESCE(analysis_json, '') AS analysis_json, COALESCE(analysis_cache_key, '') AS analysis_cache_key, "
+                "COALESCE(content_identity_key, '') AS content_identity_key "
                 "FROM games WHERE COALESCE(deletion_status, 'active') = 'active' ORDER BY id"
             )
             total = len(rows)
@@ -4525,6 +4740,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "source_system": str(game.get("source_system") or ""),
                         "needed_bios": str(game.get("needed_bios") or ""),
                         "cache_key": cache_key,
+                        "content_identity_key": str(game.get("content_identity_key") or self._content_identity_key(game)),
                     }
                     finish_progress(filename, "checked")
                     return ("update", gid, target)
@@ -4540,6 +4756,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "source_system": str(game.get("source_system") or ""),
                         "needed_bios": str(game.get("needed_bios") or ""),
                         "cache_key": cache_key,
+                        "content_identity_key": str(game.get("content_identity_key") or self._content_identity_key(game)),
                     }
                     finish_progress(filename, "checked")
                     return ("update", gid, target)
@@ -4567,11 +4784,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     analysis_cache_key = self._analysis_detail_cache_key(
                         cache_game, path, health_cache_key=final_cache_key
                     )
+                    content_identity_key = self._content_identity_key(cache_game, analysis_snapshot)
                     target = {
                         "status": status,
                         "reason": reason,
                         "analysis_json": analysis_json,
                         "analysis_cache_key": analysis_cache_key,
+                        "content_identity_key": content_identity_key,
                         "metadata_source": analysis.get("metadata_source") or "rom-analyzer",
                         "metadata_confidence": int(analysis.get("metadata_confidence") or 0),
                         "source_system": analysis.get("source_system") or "rom_analyzer",
@@ -4621,6 +4840,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     str(old.get("health_cache_key") or ""),
                     str(old.get("analysis_json") or ""),
                     str(old.get("analysis_cache_key") or ""),
+                    str(old.get("content_identity_key") or ""),
                 )
                 new_values = (
                     target["status"],
@@ -4632,6 +4852,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     target["cache_key"],
                     target["analysis_json"],
                     target["analysis_cache_key"],
+                    target["content_identity_key"],
                 )
                 if old_values != new_values:
                     updates.append(new_values + (gid,))
@@ -4643,7 +4864,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         conn.executemany(
                             "UPDATE games SET health_status=?, missing_roms=?, metadata_source=?, "
                             "metadata_confidence=?, source_system=?, needed_bios=?, health_cache_key=?, "
-                            "analysis_json=?, analysis_cache_key=? WHERE id=?",
+                            "analysis_json=?, analysis_cache_key=?, content_identity_key=? WHERE id=?",
                             updates,
                         )
                         conn.commit()
@@ -5027,7 +5248,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "metadata_source = COALESCE(NULLIF(metadata_source, ''), ?), "
             "metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence = 0 THEN ? ELSE metadata_confidence END, "
             "region_tag = ?, revision_tag = ?, disc_number = ?, content_flags = ?, health_cache_key = ?, "
-            "analysis_json = ?, analysis_cache_key = ?, cover_path = COALESCE(cover_path, ?) WHERE id = ?"
+            "analysis_json = ?, analysis_cache_key = ?, content_identity_key = ?, cover_path = COALESCE(cover_path, ?) WHERE id = ?"
         )
         pending_existing_updates = []
         pending_cover_updates = []
@@ -5212,6 +5433,15 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 analysis_cache_key = self._analysis_detail_cache_key(
                     analysis_cache_game, curr_file_path, health_cache_key=health_cache_key
                 )
+                content_identity_game = dict(identity_info)
+                content_identity_game.update({
+                    "filename": info.get("filename") or "",
+                    "size_bytes": info.get("size_bytes") or 0,
+                    "core": rom_info.get("core") or "",
+                    "platform": rom_info.get("platform") or "",
+                    "game_code": rom_info.get("game_code") or "",
+                })
+                content_identity_key = self._content_identity_key(content_identity_game, analysis_snapshot)
 
                 existing_cover_file = self._resolve_existing_cover(
                     gid,
@@ -5245,8 +5475,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 try:
                     if gid not in existing_games:
                         self._db_execute(
-                            """INSERT OR REPLACE INTO games (id, future_id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence, region_tag, revision_tag, disc_number, content_flags, health_cache_key, analysis_json, analysis_cache_key)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            """INSERT OR REPLACE INTO games (id, future_id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence, region_tag, revision_tag, disc_number, content_flags, health_cache_key, analysis_json, analysis_cache_key, content_identity_key)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 gid,
                                 future_id,
@@ -5279,6 +5509,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 health_cache_key,
                                 analysis_json,
                                 analysis_cache_key,
+                                content_identity_key,
                             ),
                         )
 
@@ -5349,7 +5580,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             identity_info.get("metadata_source") or "", identity_info.get("metadata_confidence") or 0,
                             identity_info.get("region_tag") or "", identity_info.get("revision_tag") or "",
                             identity_info.get("disc_number") or 0, identity_info.get("content_flags") or "",
-                            health_cache_key, analysis_json, analysis_cache_key, existing_cover_file, gid,
+                            health_cache_key, analysis_json, analysis_cache_key, content_identity_key, existing_cover_file, gid,
                         ))
                         existing_entry = existing_games.get(gid)
                         current_cover = existing_entry.get("cover_path") if existing_entry else None
@@ -5748,7 +5979,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     logger.warning(f"[{SELF_ID}] Save delete failed ({save_path}): {exc}")
 
         deleted_cover_files = []
-        for key in ("cover_path", "cover_thumbnail_path"):
+        for key in ("cover_path", "cover_large_path", "cover_thumbnail_path"):
             cover_path = str(game.get(key) or "").strip()
             if not cover_path or not os.path.exists(cover_path):
                 continue
@@ -5775,6 +6006,221 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "deleted_save_count": len(deleted_save_files),
             "deleted_cover_count": len(deleted_cover_files),
             "cleanup_warnings": cleanup_warnings,
+        }
+
+    def _get_db_schema_version(self):
+        try:
+            rows = self._db_query("SELECT version FROM schema_meta WHERE singleton = 1")
+            return int(rows[0].get("version") or 0) if rows else 0
+        except Exception:
+            return 0
+
+    def _create_phase6_db_backup(self):
+        """WAL 상태를 포함한 일관된 SQLite backup API 백업을 생성한다."""
+        source_path = self._get_db_path()
+        backup_dir = os.path.join(self._get_data_dir(), "backups", "phase6")
+        os.makedirs(backup_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target_path = os.path.join(backup_dir, f"gba-{timestamp}.sqlite3")
+        with _DB_LOCK:
+            src = sqlite3.connect(source_path, timeout=60)
+            dst = sqlite3.connect(target_path, timeout=60)
+            try:
+                src.backup(dst)
+                dst.commit()
+                check = dst.execute("PRAGMA integrity_check").fetchone()
+                if not check or str(check[0]).lower() != "ok":
+                    raise RuntimeError(f"백업 무결성 검사 실패: {check}")
+            finally:
+                dst.close()
+                src.close()
+        return {
+            "success": True,
+            "path": target_path,
+            "filename": os.path.basename(target_path),
+            "size_bytes": os.path.getsize(target_path),
+        }
+
+    def _migration_journal_summary(self):
+        rows = self._db_query(
+            "SELECT status, COUNT(*) AS cnt FROM library_migrations WHERE migration_name = 'phase6' GROUP BY status"
+        )
+        counts = {str(row.get("status") or "unknown"): int(row.get("cnt") or 0) for row in rows}
+        return {"total": sum(counts.values()), "counts": counts}
+
+    def _upsert_migration_journal(self, future_id, legacy_id, source_path, target_path, status="pending", stage="planned", transport="", error=""):
+        self._db_execute(
+            """INSERT INTO library_migrations
+               (migration_name, future_id, legacy_id, source_path, target_path, status, stage, transport, source_size, attempts, last_error, started_at, updated_at)
+               VALUES ('phase6', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, '', CURRENT_TIMESTAMP)
+               ON CONFLICT(migration_name, future_id) DO UPDATE SET
+                 legacy_id=excluded.legacy_id, source_path=excluded.source_path, target_path=excluded.target_path,
+                 status=excluded.status, stage=excluded.stage, transport=excluded.transport,
+                 source_size=excluded.source_size, last_error=excluded.last_error, updated_at=CURRENT_TIMESTAMP""",
+            (
+                int(future_id), str(legacy_id or ""), str(source_path or ""), str(target_path or ""),
+                str(status or "pending"), str(stage or "planned"), str(transport or ""),
+                int(os.path.getsize(source_path)) if source_path and os.path.isfile(source_path) else 0,
+                str(error or ""),
+            ),
+        )
+
+    def _phase6_existing_targets(self):
+        """library 하위 future_id 대상 디렉터리를 한 번만 스캔한다 (rclone 반복 listing 방지)."""
+        root = os.path.join(self._get_emulatorjs_root(), "library")
+        targets = {}
+        if not os.path.isdir(root):
+            return targets
+        try:
+            for platform_name in os.listdir(root):
+                roms_dir = os.path.join(root, platform_name, "roms")
+                if not os.path.isdir(roms_dir):
+                    continue
+                try:
+                    names = os.listdir(roms_dir)
+                except OSError:
+                    continue
+                for name in names:
+                    try:
+                        future_id = int(str(name))
+                    except (TypeError, ValueError):
+                        continue
+                    candidate = os.path.join(roms_dir, str(name))
+                    if os.path.isdir(candidate):
+                        targets.setdefault(future_id, []).append(candidate)
+        except OSError:
+            pass
+        return targets
+
+    def _phase6_target_candidates(self, future_id):
+        return list(self._phase6_existing_targets().get(int(future_id), []))
+
+    def _phase6_preflight(self, repair=False):
+        """Phase 6 전에 데이터/저장소 불변식을 검사하고 안전한 DB-only 복구만 선택적으로 수행한다."""
+        repairs = []
+        if repair:
+            with _DB_LOCK:
+                conn = self._get_db_conn(timeout=60)
+                try:
+                    self._backfill_future_game_ids(conn)
+                    repaired_identity = self._backfill_content_identity(conn)
+                    orphan_count = conn.execute(
+                        "SELECT COUNT(*) FROM user_game_data u WHERE NOT EXISTS(SELECT 1 FROM games g WHERE g.id=u.game_id)"
+                    ).fetchone()[0]
+                    if orphan_count:
+                        conn.execute(
+                            "DELETE FROM user_game_data WHERE NOT EXISTS(SELECT 1 FROM games g WHERE g.id=user_game_data.game_id)"
+                        )
+                        repairs.append(f"고아 사용자 기록 {int(orphan_count)}개 정리")
+                    if repaired_identity:
+                        repairs.append(f"content identity {int(repaired_identity)}개 보정")
+                    conn.commit()
+                finally:
+                    conn.close()
+
+            # 존재 위치를 안전하게 찾을 수 있는 stale 경로만 DB를 복구한다. 파일 이동은 하지 않는다.
+            stale_rows = self._db_query(
+                "SELECT id, filename, file_path, core, platform FROM games WHERE COALESCE(deletion_status,'active')='active'"
+            )
+            recovered_count = 0
+            for game in stale_rows:
+                current = str(game.get("file_path") or "")
+                if current and os.path.isfile(current):
+                    continue
+                recovered = self._resolve_existing_rom_path(
+                    game.get("id"), filename=game.get("filename"), current_path=current,
+                    core=game.get("core"), platform=game.get("platform"), update_db=True,
+                )
+                if recovered and os.path.isfile(recovered):
+                    recovered_count += 1
+            if recovered_count:
+                repairs.append(f"ROM 경로 {recovered_count}개 복구")
+
+        games = self._db_query(
+            """SELECT id, future_id, filename, file_path, core, platform, layout_version,
+                      COALESCE(deletion_status,'active') AS deletion_status,
+                      COALESCE(health_status,'unverified') AS health_status,
+                      COALESCE(content_identity_key,'') AS content_identity_key
+               FROM games ORDER BY id"""
+        )
+        mappings = self._db_query("SELECT future_id, legacy_id, migration_status FROM game_id_map")
+        map_by_legacy = {str(row.get("legacy_id") or ""): int(row.get("future_id") or 0) for row in mappings}
+        future_counts = {}
+        existing_targets = self._phase6_existing_targets()
+        missing_future = []
+        mapping_mismatch = []
+        pending_delete = []
+        missing_files = []
+        unmanaged = []
+        incomplete = []
+        target_collisions = []
+        identity_missing = []
+        for game in games:
+            gid = str(game.get("id") or "")
+            fid = int(game.get("future_id") or 0)
+            if fid <= 0:
+                missing_future.append(gid)
+            else:
+                future_counts[fid] = future_counts.get(fid, 0) + 1
+                if map_by_legacy.get(gid) != fid:
+                    mapping_mismatch.append(gid)
+                if int(game.get("layout_version") or 1) < 2:
+                    found_targets = list(existing_targets.get(fid, []))
+                    if found_targets:
+                        target_collisions.append({"id": gid, "future_id": fid, "paths": found_targets})
+            if str(game.get("deletion_status") or "active") != "active":
+                pending_delete.append(gid)
+            path = str(game.get("file_path") or "")
+            if str(game.get("deletion_status") or "active") == "active":
+                if not path or not os.path.isfile(path):
+                    missing_files.append({"id": gid, "path": path})
+                elif not self._is_managed_storage_path(path):
+                    unmanaged.append({"id": gid, "path": path})
+            if str(game.get("health_status") or "") == "incomplete":
+                incomplete.append(gid)
+            if not str(game.get("content_identity_key") or ""):
+                identity_missing.append(gid)
+
+        duplicate_future = [fid for fid, count in future_counts.items() if count > 1]
+        orphan_rows = self._db_query(
+            "SELECT user_id, game_id FROM user_game_data u WHERE NOT EXISTS(SELECT 1 FROM games g WHERE g.id=u.game_id)"
+        )
+        dependency_rows = [g.get("id") for g in games if str(g.get("health_status") or "") in ("chd_required", "bios_required")]
+        root = self._get_emulatorjs_root()
+        root_ready = bool(root and os.path.isdir(root) and os.access(root, os.W_OK))
+        blockers = []
+        warnings = []
+        def add_blocker(code, label, count, sample=None):
+            if count:
+                blockers.append({"code": code, "label": label, "count": int(count), "sample": sample or []})
+        add_blocker("future_id_missing", "future_id 누락", len(missing_future), missing_future[:10])
+        add_blocker("future_id_duplicate", "future_id 중복", len(duplicate_future), duplicate_future[:10])
+        add_blocker("mapping_mismatch", "game_id_map 불일치", len(mapping_mismatch), mapping_mismatch[:10])
+        add_blocker("pending_delete", "삭제 대기/실패", len(pending_delete), pending_delete[:10])
+        add_blocker("missing_file", "ROM 파일 없음", len(missing_files), missing_files[:10])
+        add_blocker("unmanaged_path", "관리 저장소 밖 ROM", len(unmanaged), unmanaged[:10])
+        add_blocker("incomplete_bundle", "불완전 디스크/CHD", len(incomplete), incomplete[:10])
+        add_blocker("target_collision", "Phase 6 대상 경로 충돌", len(target_collisions), target_collisions[:10])
+        add_blocker("content_identity_missing", "content identity 누락", len(identity_missing), identity_missing[:10])
+        if not root_ready:
+            blockers.append({"code": "root_not_writable", "label": "통합 라이브러리 루트 쓰기 불가", "count": 1, "sample": [root]})
+        if orphan_rows:
+            warnings.append({"code": "orphan_user_data", "label": "고아 사용자 기록", "count": len(orphan_rows), "sample": orphan_rows[:10]})
+        if dependency_rows:
+            warnings.append({"code": "runtime_dependency", "label": "실행 의존 파일(BIOS/CHD) 보완 필요", "count": len(dependency_rows), "sample": dependency_rows[:10]})
+
+        return {
+            "success": True,
+            "ready": not blockers,
+            "schema_version": self._get_db_schema_version(),
+            "required_schema_version": self.DB_SCHEMA_VERSION,
+            "total_games": len(games),
+            "layout_v2": sum(1 for g in games if int(g.get("layout_version") or 1) >= 2),
+            "blockers": blockers,
+            "warnings": warnings,
+            "repairs": repairs,
+            "migration_journal": self._migration_journal_summary(),
+            "emulatorjs_root": root,
         }
 
     def _select_launch_bios(self, game, game_file_path):
@@ -5843,8 +6289,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         raw_status = str(game.get("play_status") or "untested").strip().lower()
         if raw_status not in ("untested", "booted", "verified", "issue"):
             raw_status = "untested"
-        current_key = str(game.get("health_cache_key") or "")
-        recorded_key = str(game.get("play_status_health_key") or "")
+        current_key = str(game.get("content_identity_key") or game.get("health_cache_key") or "")
+        recorded_key = str(game.get("play_status_content_key") or game.get("play_status_health_key") or "")
         stale = raw_status != "untested" and current_key != recorded_key
         return {
             "status": "untested" if stale else raw_status,
@@ -5857,9 +6303,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
     def _record_game_boot(self, game_id, user_id):
         rows = self._db_query(
-            "SELECT id, COALESCE(health_cache_key, '') AS health_cache_key, "
+            "SELECT id, COALESCE(health_cache_key, '') AS health_cache_key, COALESCE(content_identity_key, '') AS content_identity_key, "
             "COALESCE(play_status, 'untested') AS play_status, "
-            "COALESCE(play_status_health_key, '') AS play_status_health_key, "
+            "COALESCE(play_status_health_key, '') AS play_status_health_key, COALESCE(play_status_content_key, '') AS play_status_content_key, "
             "COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
             "COALESCE(play_status_user_id, 0) AS play_status_user_id, "
             "COALESCE(last_booted_at, '') AS last_booted_at "
@@ -5876,12 +6322,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         else:
             self._db_execute(
                 "UPDATE games SET play_status = 'booted', play_status_updated_at = ?, "
-                "play_status_user_id = ?, play_status_health_key = COALESCE(health_cache_key, ''), last_booted_at = ? WHERE id = ?",
+                "play_status_user_id = ?, play_status_content_key = CASE WHEN COALESCE(content_identity_key, '') != '' THEN content_identity_key ELSE COALESCE(health_cache_key, '') END, last_booted_at = ? WHERE id = ?",
                 (now_str, int(user_id or 0), now_str, game_id),
             )
         refreshed = self._db_query(
-            "SELECT COALESCE(health_cache_key, '') AS health_cache_key, COALESCE(play_status, 'untested') AS play_status, "
-            "COALESCE(play_status_health_key, '') AS play_status_health_key, COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
+            "SELECT COALESCE(health_cache_key, '') AS health_cache_key, COALESCE(content_identity_key, '') AS content_identity_key, COALESCE(play_status, 'untested') AS play_status, "
+            "COALESCE(play_status_health_key, '') AS play_status_health_key, COALESCE(play_status_content_key, '') AS play_status_content_key, COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
             "COALESCE(play_status_user_id, 0) AS play_status_user_id, COALESCE(last_booted_at, '') AS last_booted_at FROM games WHERE id = ?",
             (game_id,),
         )
@@ -5892,21 +6338,21 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         if status not in ("untested", "verified", "issue"):
             return {"success": False, "error": "지원하지 않는 플레이 상태입니다."}
         rows = self._db_query(
-            "SELECT id, COALESCE(health_cache_key, '') AS health_cache_key FROM games "
+            "SELECT id, COALESCE(health_cache_key, '') AS health_cache_key, COALESCE(content_identity_key, '') AS content_identity_key FROM games "
             "WHERE id = ? AND COALESCE(deletion_status, 'active') = 'active'",
             (game_id,),
         )
         if not rows:
             return {"success": False, "error": "게임을 찾을 수 없습니다."}
         now_str = _get_kst_now_str()
-        health_key = str(rows[0].get("health_cache_key") or "")
+        content_key = str(rows[0].get("content_identity_key") or rows[0].get("health_cache_key") or "")
         self._db_execute(
-            "UPDATE games SET play_status = ?, play_status_updated_at = ?, play_status_user_id = ?, play_status_health_key = ? WHERE id = ?",
-            (status, now_str, int(user_id or 0), health_key if status != "untested" else "", game_id),
+            "UPDATE games SET play_status = ?, play_status_updated_at = ?, play_status_user_id = ?, play_status_content_key = ? WHERE id = ?",
+            (status, now_str, int(user_id or 0), content_key if status != "untested" else "", game_id),
         )
         refreshed = self._db_query(
-            "SELECT COALESCE(health_cache_key, '') AS health_cache_key, COALESCE(play_status, 'untested') AS play_status, "
-            "COALESCE(play_status_health_key, '') AS play_status_health_key, COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
+            "SELECT COALESCE(health_cache_key, '') AS health_cache_key, COALESCE(content_identity_key, '') AS content_identity_key, COALESCE(play_status, 'untested') AS play_status, "
+            "COALESCE(play_status_health_key, '') AS play_status_health_key, COALESCE(play_status_content_key, '') AS play_status_content_key, COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
             "COALESCE(play_status_user_id, 0) AS play_status_user_id, COALESCE(last_booted_at, '') AS last_booted_at FROM games WHERE id = ?",
             (game_id,),
         )
@@ -5921,10 +6367,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "COALESCE(source_system, '') AS source_system, COALESCE(metadata_source, '') AS metadata_source, "
             "COALESCE(metadata_confidence, 0) AS metadata_confidence, COALESCE(region_tag, '') AS region_tag, "
             "COALESCE(revision_tag, '') AS revision_tag, COALESCE(disc_number, 0) AS disc_number, "
-            "COALESCE(content_flags, '') AS content_flags, COALESCE(health_cache_key, '') AS health_cache_key, "
+            "COALESCE(content_flags, '') AS content_flags, COALESCE(health_cache_key, '') AS health_cache_key, COALESCE(content_identity_key, '') AS content_identity_key, "
             "COALESCE(analysis_json, '') AS analysis_json, COALESCE(analysis_cache_key, '') AS analysis_cache_key, "
             "COALESCE(play_status, 'untested') AS play_status, COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
-            "COALESCE(play_status_user_id, 0) AS play_status_user_id, COALESCE(play_status_health_key, '') AS play_status_health_key, "
+            "COALESCE(play_status_user_id, 0) AS play_status_user_id, COALESCE(play_status_health_key, '') AS play_status_health_key, COALESCE(play_status_content_key, '') AS play_status_content_key, "
             "COALESCE(last_booted_at, '') AS last_booted_at, COALESCE(deletion_status, 'active') AS deletion_status "
             "FROM games WHERE id = ?",
             (game_id,),
@@ -5966,10 +6412,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 fresh = analyze_rom(file_path)
                 analysis = _build_analysis_snapshot(fresh)
                 cache_key = self._analysis_detail_cache_key(game, file_path)
+                content_key = self._content_identity_key(game, analysis)
                 self._db_execute(
-                    "UPDATE games SET analysis_json = ?, analysis_cache_key = ? WHERE id = ?",
-                    (json.dumps(analysis, ensure_ascii=False, sort_keys=True), cache_key, game_id),
+                    "UPDATE games SET analysis_json = ?, analysis_cache_key = ?, content_identity_key = ? WHERE id = ?",
+                    (json.dumps(analysis, ensure_ascii=False, sort_keys=True), cache_key, content_key, game_id),
                 )
+                game["content_identity_key"] = content_key
                 analysis_stale = False
             except Exception as exc:
                 analysis_error = str(exc)
@@ -6568,28 +7016,37 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         return resp
 
     def _route_cover_file(self, game_id):
-        """DB에 저장된 cover_path의 커버 이미지를 그대로 서빙한다."""
-        from flask import Response, abort
+        """small/large WebP를 우선하고 기존 원본 커버로 안전하게 fallback한다."""
+        from flask import Response, abort, request
 
         if _get_current_user_id() <= 0:
             abort(401, "Authentication required")
 
-        rows = self._db_query("SELECT cover_path FROM games WHERE id = ?", (game_id,))
+        rows = self._db_query(
+            """SELECT cover_path, COALESCE(cover_large_path,'') AS cover_large_path,
+                      COALESCE(cover_thumbnail_path,'') AS cover_thumbnail_path
+               FROM games WHERE id = ?""",
+            (game_id,),
+        )
         if not rows:
             abort(404, "Cover image not found")
-        cover_path = str(rows[0].get("cover_path") or "").strip()
+        game = rows[0]
+        size = str(request.args.get("size", "large") or "large").strip().lower()
+        if size in ("small", "thumb", "thumbnail"):
+            candidates = (game.get("cover_thumbnail_path"), game.get("cover_large_path"), game.get("cover_path"))
+        else:
+            candidates = (game.get("cover_large_path"), game.get("cover_path"), game.get("cover_thumbnail_path"))
+        cover_path = next((str(path).strip() for path in candidates if path and os.path.isfile(str(path))), "")
         if not cover_path:
             abort(404, "Cover image not found")
 
         ext = os.path.splitext(cover_path)[1].lower().replace(".", "")
         mime = "image/png" if ext == "png" else "image/jpeg" if ext in ("jpg", "jpeg") else "image/webp"
-
         try:
             with open(cover_path, "rb") as f:
                 data = f.read()
         except OSError:
             abort(404, "Cover image not found")
-
         resp = Response(data, 200, mimetype=mime)
         resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp
@@ -6703,6 +7160,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             dest_path = os.path.join(self._get_covers_dir(), f"{game_id}{ext}")
             file.save(dest_path)
             self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (dest_path, game_id))
+            self._finalize_cover_source(game_id, dest_path, force=True)
             return jsonify({"success": True, "message": "커버 이미지가 성공적으로 등록되었습니다.", "type": "cover"})
 
         return jsonify({"success": False, "error": f"지원하지 않는 파일 형식입니다. ({ext})"}), 400
@@ -6923,6 +7381,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 with open(cover_path, "wb") as cf:
                     cf.write(cover_bytes)
                 self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (cover_path, game_id))
+                self._finalize_cover_source(game_id, cover_path, force=True)
             except Exception as e:
                 logger.debug(f"[{SELF_ID}] Homebrew cover skip: {e}")
         return True, f"'{entry.get('title') or slug}' 을(를) 라이브러리에 등록했습니다."
@@ -6968,6 +7427,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "migrate_bios_batch", "migrate_cover_batch",
             "library_sync", "scan_new_roms", "scan_roms", "full_scan", "health_check", "health_refresh", "health_progress",
             "fetch_missing_covers", "delete_game", "cancel_delete_game", "delete_queue_status", "update_title", "save_settings", "search_artwork", "set_artwork",
+            "phase6_preflight", "phase6_repair", "phase6_backup", "migration_journal_status", "cover_webp_refresh", "cover_webp_progress",
         }
         if action in admin_actions and not is_admin:
             return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
@@ -7072,7 +7532,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
                 games = self._db_query(
                     """SELECT g.id, g.filename, g.title, g.game_code,
-                              g.size_bytes, g.cover_path, g.core, g.platform, g.needed_bios,
+                              g.size_bytes, g.cover_path, COALESCE(g.cover_large_path,'') AS cover_large_path,
+                              COALESCE(g.cover_thumbnail_path,'') AS cover_thumbnail_path, COALESCE(g.cover_revision,0) AS cover_revision,
+                              g.core, g.platform, g.needed_bios,
                               COALESCE(g.health_status, 'pass') AS health_status,
                               COALESCE(g.missing_roms, '') AS missing_roms,
                               COALESCE(g.metadata_source, '') AS metadata_source,
@@ -7082,8 +7544,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                               COALESCE(g.disc_number, 0) AS disc_number,
                               COALESCE(g.content_flags, '') AS content_flags,
                               COALESCE(g.health_cache_key, '') AS health_cache_key,
+                              COALESCE(g.content_identity_key, '') AS content_identity_key,
                               COALESCE(g.play_status, 'untested') AS play_status,
                               COALESCE(g.play_status_health_key, '') AS play_status_health_key,
+                              COALESCE(g.play_status_content_key, '') AS play_status_content_key,
                               COALESCE(g.play_status_updated_at, '') AS play_status_updated_at,
                               COALESCE(g.play_status_user_id, 0) AS play_status_user_id,
                               COALESCE(g.last_booted_at, '') AS last_booted_at,
@@ -7110,7 +7574,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     g["play_status_updated_at"] = play["updated_at"]
                     g["last_booted_at"] = play["last_booted_at"]
                     g.pop("health_cache_key", None)
+                    g.pop("content_identity_key", None)
                     g.pop("play_status_health_key", None)
+                    g.pop("play_status_content_key", None)
                     g.pop("play_status_user_id", None)
                     # 목록 응답은 DB에 저장된 값만 사용한다. 실제 파일 상태는 목록 렌더 후
                     # runtime_state 액션이 비동기로 보정한다.
@@ -7127,10 +7593,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     g["rom_url"] = f"{ROUTE_BASE}/rom/{gid}/{urllib.parse.quote(url_fname)}"
                     g["save_url"] = f"{ROUTE_BASE}/save/{gid}"
                     g["state_url"] = f"{ROUTE_BASE}/state/{gid}"
-                    g["cover_url"] = f"{ROUTE_BASE}/cover/{gid}"
+                    revision = int(g.get("cover_revision") or 0)
+                    g["cover_url"] = f"{ROUTE_BASE}/cover/{gid}?size=small&rev={revision}"
                     g["has_needed_bios"] = 1
                     # 목록 화면은 커버의 실제 서버 경로가 필요하지 않다.
-                    g["cover_path"] = bool(g.get("cover_path"))
+                    g["cover_path"] = bool(g.get("cover_path") or g.get("cover_large_path") or g.get("cover_thumbnail_path"))
+                    g.pop("cover_large_path", None)
+                    g.pop("cover_thumbnail_path", None)
                     g.pop("file_path", None)
                     visible_games.append(g)
 
@@ -7228,6 +7697,26 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         "max_upload_bytes": int(os.environ.get("MAX_CONTENT_LENGTH_MB", "100") or 100) * 1024 * 1024,
                     }
                 return result
+
+            elif action == "cover_webp_refresh":
+                force = str(request.args.get("force", "0") or "0").lower() in ("1", "true", "yes", "on")
+                return self._start_cover_variant_rebuild(force=force)
+
+            elif action == "cover_webp_progress":
+                with _COVER_VARIANT_PROGRESS_LOCK:
+                    return {"success": True, "progress": dict(_COVER_VARIANT_PROGRESS)}
+
+            elif action == "phase6_preflight":
+                return self._phase6_preflight(repair=False)
+
+            elif action == "phase6_repair":
+                return self._phase6_preflight(repair=True)
+
+            elif action == "phase6_backup":
+                return self._create_phase6_db_backup()
+
+            elif action == "migration_journal_status":
+                return {"success": True, "journal": self._migration_journal_summary()}
 
             elif action == "check_game":
                 game_id = request.args.get("game_id", "").strip()
@@ -7935,7 +8424,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         f.write(img_bytes)
 
                     self._db_execute("UPDATE games SET cover_path = ? WHERE id = ?", (dest_path, game_id))
-                    return {"success": True, "message": "커버 이미지가 성공적으로 변경되었습니다.", "cover_path": dest_path}
+                    variant = self._ensure_cover_variants(game_id, force=True)
+                    return {"success": True, "message": "커버 이미지가 성공적으로 변경되었습니다.", "cover_path": dest_path, "cover_variant": variant}
                 except Exception as e:
                     logger.error(f"[{SELF_ID}] Set artwork error: {e}")
                     return {"success": False, "error": f"이미지 다운로드 실패: {e}"}

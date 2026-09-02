@@ -248,6 +248,12 @@
             <button id="gbaFullScanBtn" class="gba-btn gba-btn-secondary" title="기존 캐시를 무시하고 모든 ROM을 전수 분석해 진단 캐시까지 새로 구성">
               <i class="fa-solid fa-arrows-spin"></i> <span>라이브러리 전체 재구축</span>
             </button>
+            <button id="gbaPhase6PreflightBtn" class="gba-btn gba-btn-secondary" title="실제 파일 이동 없이 Phase 6 마이그레이션 준비 상태를 검사">
+              <i class="fa-solid fa-list-check"></i> <span>Phase 6 준비 점검</span>
+            </button>
+            <button id="gbaCoverWebpBtn" class="gba-btn gba-btn-secondary" title="원본 커버를 보존하고 future_id 기반 small/large WebP를 생성">
+              <i class="fa-solid fa-images"></i> <span>WebP 커버 생성</span>
+            </button>
           </div>
         </div>
       </div>
@@ -281,6 +287,43 @@
       <div class="gba-modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
         <span id="gbaDeleteQueueSummary" class="gba-help-text">삭제 대기 0개</span>
         <button class="gba-btn gba-btn-secondary" id="gbaDeleteQueueOkBtn">닫기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Phase 6 준비 점검 모달 -->
+  <div id="gbaPhase6PreflightModal" class="gba-modal" style="display: none;">
+    <div class="gba-modal-box gba-phase6-modal-box">
+      <div class="gba-modal-header">
+        <h3><i class="fa-solid fa-list-check"></i> Phase 6 준비 점검</h3>
+        <button class="gba-modal-close" id="gbaPhase6PreflightCloseBtn">&times;</button>
+      </div>
+      <div class="gba-modal-body">
+        <div id="gbaPhase6PreflightLoading" class="gba-analysis-loading">
+          <div class="gba-spinner"></div>
+          <strong>라이브러리 준비 상태를 확인하고 있습니다.</strong>
+          <span>이 점검은 ROM을 이동하지 않습니다.</span>
+        </div>
+        <div id="gbaPhase6PreflightContent" style="display: none;">
+          <div id="gbaPhase6PreflightSummary" class="gba-phase6-summary"></div>
+          <div class="gba-phase6-section">
+            <h4>시작 전 해결해야 할 항목</h4>
+            <div id="gbaPhase6Blockers"></div>
+          </div>
+          <div class="gba-phase6-section">
+            <h4>참고 / 보완 권장</h4>
+            <div id="gbaPhase6Warnings"></div>
+          </div>
+          <div id="gbaPhase6Repairs" class="gba-help-text"></div>
+          <p class="gba-help-text gba-phase6-notice">여기서는 준비 상태만 점검·복구합니다. <strong>Phase 6 실제 ROM 마이그레이션은 시작하지 않습니다.</strong></p>
+        </div>
+      </div>
+      <div class="gba-modal-footer gba-phase6-footer">
+        <div class="gba-phase6-actions">
+          <button class="gba-btn gba-btn-secondary" id="gbaPhase6RepairBtn"><i class="fa-solid fa-wand-magic-sparkles"></i> 안전 복구 후 재점검</button>
+          <button class="gba-btn gba-btn-secondary" id="gbaPhase6BackupBtn"><i class="fa-solid fa-database"></i> DB 백업 생성</button>
+        </div>
+        <button class="gba-btn gba-btn-primary" id="gbaPhase6PreflightOkBtn">닫기</button>
       </div>
     </div>
   </div>
