@@ -129,7 +129,7 @@ class UpdateCompatibilityTests(unittest.TestCase):
                 shutil.copy2(src, dst)
 
             version = json.loads((installed / "VERSION").read_text(encoding="utf-8"))["plugin version"]
-            self.assertEqual(version, "1.9.20")
+            self.assertEqual(version, "1.9.21")
             self.assertEqual((installed / "runtime_marker.txt").read_text(), "keep-runtime")
             self.assertEqual((persistent / "user_marker.txt").read_text(), "keep-user-data")
             for rel in self.files:

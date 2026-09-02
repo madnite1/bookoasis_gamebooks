@@ -151,7 +151,7 @@ Game Books는 `rom_analyzer`, `rom_database` 및 SQLite 참조 DB를 함께 배�
 │       ├── __init__.py                    # 모듈 패키지 진입점
 │       ├── bookoasis_gamebooks.py         # 플러그인 백엔드 (Flask 라우트 & 멀티 코어 감지)
 │       ├── arcade_dat.db                  # 27,000+ 게임 내장 All-In-One DAT DB (CRC32 정밀 매칭)
-│       ├── VERSION                        # 버전 정보 (v1.9.20)
+│       ├── VERSION                        # 버전 정보 (v1.9.21)
 │       ├── LICENSE                        # 오픈소스 라이선스 (GNU AGPL-3.0)
 │       ├── THIRD_PARTY_NOTICES.md         # vendor 코드/참조 데이터 provenance
 │       ├── index.html                     # UI 레이아웃, 조작키, 설정 & 바이오스 모달
