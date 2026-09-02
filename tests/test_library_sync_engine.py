@@ -249,6 +249,202 @@ class LibrarySyncEngineTests(unittest.TestCase):
             self.assertFalse(old_state.exists())
             self.assertEqual(new_state.read_bytes(), b"new")
 
+    def test_health_diagnose_reuses_cache_for_unchanged_rom(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "gba.db"
+            bios = root / "bios"
+            bios.mkdir()
+            rom = root / "game.nes"
+            rom.write_bytes(b"NES\x1a" + b"x" * 128)
+
+            provider = self._provider_with_db(db_path)
+            provider._get_bios_dir = lambda: str(bios)
+            provider._init_db()
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, core, platform, health_status) VALUES (?, ?, ?, ?, ?, ?)",
+                ("game", rom.name, str(rom), "nes", "NES", "pass"),
+            )
+            analysis = {
+                "metadata_source": "rom-analyzer",
+                "metadata_confidence": 100,
+                "source_system": "header",
+            }
+
+            with mock.patch("rom_analysis_adapter.analyze_rom", return_value=analysis) as analyze, \
+                 mock.patch.object(gamebooks, "_derive_health_status_from_analysis", return_value=("pass", "")):
+                provider._refresh_health_statuses()
+                analyze.assert_called_once_with(str(rom))
+
+            first = provider._db_query(
+                "SELECT health_cache_key, health_status FROM games WHERE id = ?", ("game",)
+            )[0]
+            self.assertTrue(first["health_cache_key"])
+            self.assertEqual(first["health_status"], "pass")
+
+            with mock.patch("rom_analysis_adapter.analyze_rom") as analyze_again:
+                provider._refresh_health_statuses()
+                analyze_again.assert_not_called()
+            self.assertEqual(gamebooks._HEALTH_PROGRESS["cached"], 1)
+            self.assertEqual(gamebooks._HEALTH_PROGRESS["failed"], 0)
+
+    def test_health_diagnose_reports_path_mismatch_without_updating_db_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "gba.db"
+            bios = root / "bios"
+            bios.mkdir()
+            actual = root / "actual.nes"
+            actual.write_bytes(b"rom")
+            stale = root / "old" / "actual.nes"
+
+            provider = self._provider_with_db(db_path)
+            provider._get_bios_dir = lambda: str(bios)
+            provider._init_db()
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, core, platform, health_status) VALUES (?, ?, ?, ?, ?, ?)",
+                ("game", actual.name, str(stale), "nes", "NES", "pass"),
+            )
+            resolver = mock.Mock(return_value=str(actual))
+            provider._resolve_existing_rom_path = resolver
+
+            with mock.patch("rom_analysis_adapter.analyze_rom") as analyze:
+                provider._refresh_health_statuses()
+                analyze.assert_not_called()
+
+            self.assertFalse(resolver.call_args.kwargs["update_db"])
+            row = provider._db_query(
+                "SELECT file_path, health_status, missing_roms FROM games WHERE id = ?", ("game",)
+            )[0]
+            self.assertEqual(row["file_path"], str(stale))
+            self.assertEqual(row["health_status"], "path_mismatch")
+            self.assertIn("라이브러리 동기화", row["missing_roms"])
+
+    def test_health_diagnose_distinguishes_missing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "gba.db"
+            bios = root / "bios"
+            bios.mkdir()
+            missing = root / "missing.nes"
+
+            provider = self._provider_with_db(db_path)
+            provider._get_bios_dir = lambda: str(bios)
+            provider._init_db()
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, core, platform, health_status) VALUES (?, ?, ?, ?, ?, ?)",
+                ("game", missing.name, str(missing), "nes", "NES", "unverified"),
+            )
+            provider._resolve_existing_rom_path = mock.Mock(return_value=None)
+
+            with mock.patch("rom_analysis_adapter.analyze_rom") as analyze:
+                provider._refresh_health_statuses()
+                analyze.assert_not_called()
+
+            row = provider._db_query(
+                "SELECT health_status, missing_roms FROM games WHERE id = ?", ("game",)
+            )[0]
+            self.assertEqual(row["health_status"], "missing_file")
+            self.assertIn("찾을 수 없습니다", row["missing_roms"])
+
+    def test_health_diagnose_transient_analyzer_failure_keeps_previous_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            db_path = root / "gba.db"
+            bios = root / "bios"
+            bios.mkdir()
+            rom = root / "game.nes"
+            rom.write_bytes(b"rom")
+
+            provider = self._provider_with_db(db_path)
+            provider._get_bios_dir = lambda: str(bios)
+            provider._init_db()
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, core, platform, health_status, missing_roms, metadata_source, metadata_confidence, source_system) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("game", rom.name, str(rom), "nes", "NES", "pass", "기존 판정", "rom-analyzer", 90, "header"),
+            )
+
+            with mock.patch("rom_analysis_adapter.analyze_rom", side_effect=RuntimeError("temporary")):
+                provider._refresh_health_statuses()
+
+            row = provider._db_query(
+                "SELECT health_status, missing_roms, metadata_confidence, health_cache_key FROM games WHERE id = ?",
+                ("game",),
+            )[0]
+            self.assertEqual(row["health_status"], "pass")
+            self.assertEqual(row["missing_roms"], "기존 판정")
+            self.assertEqual(row["metadata_confidence"], 90)
+            self.assertEqual(row["health_cache_key"], "")
+            self.assertEqual(gamebooks._HEALTH_PROGRESS["failed"], 1)
+
+    def test_health_bundle_cache_invalidates_when_sidecar_set_changes(self):
+        provider = self._provider()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cue = root / "disc.cue"
+            bin_file = root / "disc.bin"
+            cue.write_text('FILE "disc.bin" BINARY\n', encoding="utf-8")
+            bin_file.write_bytes(b"disc")
+            game = {"id": "disc", "core": "psx", "platform": "PS1", "file_path": str(cue)}
+
+            state1 = provider._health_bundle_cache_state(game, str(cue), state_cache={})
+            key1 = provider._health_cache_key(
+                game, "engine", "ok", str(cue), os.stat(cue), bundle_state=state1
+            )
+
+            bin_file.unlink()
+            now = os.stat(root).st_mtime_ns + 1_000_000_000
+            os.utime(root, ns=(now, now))
+            state2 = provider._health_bundle_cache_state(game, str(cue), state_cache={})
+            key2 = provider._health_cache_key(
+                game, "engine", "ok", str(cue), os.stat(cue), bundle_state=state2
+            )
+
+            self.assertNotEqual(state1, state2)
+            self.assertNotEqual(key1, key2)
+
+    def test_health_bios_cache_reuses_same_required_bios_check(self):
+        provider = self._provider()
+        cache = {}
+        game1 = {"needed_bios": "neogeo.zip", "health_status": "pass"}
+        game2 = {"needed_bios": "neogeo.zip", "health_status": "bios_required"}
+        with mock.patch.object(gamebooks, "_is_required_bios_available", return_value=True) as check:
+            first = provider._health_bios_cache_state(game1, {"neogeo.zip"}, "/bios", state_cache=cache)
+            second = provider._health_bios_cache_state(game2, {"neogeo.zip"}, "/bios", state_cache=cache)
+        self.assertEqual(first, "neogeo.zip:1")
+        self.assertEqual(second, first)
+        check.assert_called_once()
+
+    def test_health_diagnose_cache_hit_does_not_write_database(self):
+        provider = self._provider()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bios = root / "bios"
+            bios.mkdir()
+            rom = root / "game.nes"
+            rom.write_bytes(b"rom")
+            provider._get_bios_dir = lambda: str(bios)
+            provider._health_engine_signature = lambda _bios: "engine"
+            game = {
+                "id": "game", "filename": rom.name, "file_path": str(rom),
+                "core": "nes", "platform": "NES", "game_code": "",
+                "health_status": "pass", "missing_roms": "",
+                "metadata_source": "rom-analyzer", "metadata_confidence": 100,
+                "source_system": "header",
+            }
+            game["health_cache_key"] = provider._health_cache_key(
+                game, "engine", "ok", str(rom), os.stat(rom)
+            )
+            provider._db_query = mock.Mock(return_value=[game])
+            provider._get_db_conn = mock.Mock(side_effect=AssertionError("cache hit must not write"))
+
+            with mock.patch("rom_analysis_adapter.analyze_rom") as analyze:
+                provider._refresh_health_statuses()
+                analyze.assert_not_called()
+            provider._get_db_conn.assert_not_called()
+            self.assertEqual(gamebooks._HEALTH_PROGRESS["cached"], 1)
+
     def test_background_diagnose_does_not_leave_queued_on_lock_contention(self):
         provider = self._provider()
         original = dict(gamebooks._HEALTH_PROGRESS)
@@ -283,6 +479,32 @@ class LibrarySyncEngineTests(unittest.TestCase):
         self.assertEqual(script.count("apiCall('library_sync'"), 4)
         self.assertIn('id="gbaScanBtn" class="gba-btn gba-btn-secondary gba-admin-only"', index)
         self.assertIn("라이브러리 전체 재구축", index)
+        self.assertIn("분석 결과 저장 ${saveCurrent} / ${saveTotal}", script)
+        self.assertNotIn("percent = 95;", script)
+
+    def test_db_execute_batches_uses_one_transaction_for_multiple_groups(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "batch.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT)")
+            conn.executemany("INSERT INTO items (id, value) VALUES (?, ?)", [(1, "a"), (2, "b")])
+            conn.commit()
+            conn.close()
+
+            provider = self._provider_with_db(db_path)
+            original_get_conn = provider._get_db_conn
+            with mock.patch.object(provider, "_get_db_conn", wraps=original_get_conn) as get_conn:
+                affected = provider._db_execute_batches([
+                    ("UPDATE items SET value = ? WHERE id = ?", [("x", 1), ("y", 2)]),
+                    ("UPDATE items SET value = value WHERE id = ?", [(1,), (2,)]),
+                ])
+
+            self.assertEqual(get_conn.call_count, 1)
+            self.assertGreaterEqual(affected, 2)
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute("SELECT id, value FROM items ORDER BY id").fetchall()
+            conn.close()
+            self.assertEqual(rows, [(1, "x"), (2, "y")])
 
     def test_ingest_places_new_rom_in_structured_game_id_directory(self):
         provider = self._provider()

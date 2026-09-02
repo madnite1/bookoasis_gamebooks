@@ -536,6 +536,8 @@
         <div class="gba-card-badges">
           <span class="gba-badge ${sysInfo.colorClass}" title="${escapeHtml(sysInfo.name)}">${escapeHtml(sysInfo.label)}</span>
           ${game.has_save ? `<span class="gba-badge gba-badge-save" title="클라우드 세이브 보관됨"><i class="fa-solid fa-floppy-disk"></i> SAVE</span>` : ''}
+          ${game.health_status === 'missing_file' ? `<span class="gba-badge" style="background: rgba(220, 38, 38, 0.95); color: #fff; font-weight: 700;" title="DB에 등록된 ROM 파일을 찾을 수 없습니다."><i class="fa-solid fa-file-circle-xmark"></i> 파일 없음</span>` : ''}
+          ${game.health_status === 'path_mismatch' ? `<span class="gba-badge" style="background: rgba(217, 119, 6, 0.95); color: #fff; font-weight: 700;" title="DB 경로와 실제 ROM 위치가 다릅니다. 라이브러리 동기화가 필요합니다."><i class="fa-solid fa-route"></i> 경로 불일치</span>` : ''}
           ${game.health_status === 'incomplete' ? `<span class="gba-badge" style="background: rgba(245, 158, 11, 0.9); color: #000; font-weight: 700;" title="M3U/CUE/GDI 등에서 참조하는 파일이 누락되었습니다."><i class="fa-solid fa-triangle-exclamation"></i> 참조 파일 누락</span>` : ''}
           ${game.health_status === 'bios_required' ? `<span class="gba-badge" style="background: rgba(249, 115, 22, 0.92); color: #fff; font-weight: 700;" title="필수 BIOS 또는 시스템 파일이 누락되었습니다."><i class="fa-solid fa-microchip"></i> BIOS 필요</span>` : ''}
           ${game.health_status === 'bad_dump_or_unknown' || game.health_status === 'unverified' ? `<span class="gba-badge" style="background: rgba(107, 114, 128, 0.95); color: #fff; font-weight: 700;" title="rom-analyzer가 충분한 근거로 판정하지 못했습니다."><i class="fa-solid fa-circle-question"></i> 판정 미확인</span>` : ''}
@@ -863,6 +865,34 @@
 
     // 서버의 rom-analyzer 기반 진단 상태를 단일 진실 공급원으로 사용한다.
     // 파일명/접미사만으로 Parent, CHD, 기판 BIOS를 추측하지 않는다.
+    if (game.health_status === 'missing_file') {
+      return {
+        type: 'missing_file',
+        needed: '등록된 ROM 파일',
+        systemName: '라이브러리 파일 경로',
+        title: 'ROM 파일을 찾을 수 없음',
+        reason: `${escapeHtml(game.missing_roms || 'DB에 등록된 ROM 파일을 현재 경로 또는 관리 저장소에서 찾을 수 없습니다.')}`,
+        notice: '파일을 다시 배치하거나 라이브러리 동기화를 실행해 등록 상태를 확인하세요.',
+        btnText: '',
+        hideUpload: true,
+        isOptional: false,
+      };
+    }
+
+    if (game.health_status === 'path_mismatch') {
+      return {
+        type: 'path_mismatch',
+        needed: '라이브러리 경로 동기화',
+        systemName: 'DB 경로와 실제 ROM 위치 불일치',
+        title: 'ROM 경로 동기화 필요',
+        reason: `${escapeHtml(game.missing_roms || 'DB의 ROM 경로와 실제 발견 위치가 다릅니다.')}`,
+        notice: '<strong>라이브러리 동기화</strong>를 실행하면 실제 위치를 기준으로 DB 경로를 갱신할 수 있습니다.',
+        btnText: '',
+        hideUpload: true,
+        isOptional: false,
+      };
+    }
+
     if (game.health_status === 'bios_required') {
       if (hasNeededBios) return null;
       const requiredBios = (game.needed_bios || game.missing_roms || '').trim() || '필수 BIOS';
@@ -2691,8 +2721,13 @@
               if (p.total > 0) {
                 let percent = 8;
                 if (p.status === 'saving') {
-                  percent = 95;
-                  if (scanDetails) scanDetails.textContent = '분석 결과를 데이터베이스에 반영하는 중...';
+                  const saveTotal = Math.max(Number(p.total || 0), 1);
+                  const saveCurrent = Math.min(Math.max(Number(p.current || 0), 0), saveTotal);
+                  percent = Math.min(94 + Math.round((saveCurrent / saveTotal) * 5), 99);
+                  if (scanDetails) {
+                    const currentName = p.current_file ? ` - ${p.current_file}` : '';
+                    scanDetails.textContent = `분석 결과 저장 ${saveCurrent} / ${saveTotal}${currentName}`;
+                  }
                 } else if (p.status === 'completed') {
                   percent = 100;
                   if (scanDetails) scanDetails.textContent = '라이브러리 동기화 완료!';
@@ -2775,9 +2810,12 @@
               if (p.total > 0) {
                 let percent = 5;
                 if (p.status === 'saving') {
-                  percent = 95;
+                  const saveTotal = Math.max(Number(p.total || 0), 1);
+                  const saveCurrent = Math.min(Math.max(Number(p.current || 0), 0), saveTotal);
+                  percent = Math.min(94 + Math.round((saveCurrent / saveTotal) * 5), 99);
                   if (scanDetails) {
-                    scanDetails.textContent = '분석 완료. 데이터베이스 및 메타데이터 일괄 동기화 중...';
+                    const currentName = p.current_file ? ` - ${p.current_file}` : '';
+                    scanDetails.textContent = `분석 결과 저장 ${saveCurrent} / ${saveTotal}${currentName}`;
                   }
                 } else if (p.status === 'completed') {
                   percent = 100;
@@ -2932,7 +2970,7 @@
       modal.style.display = 'flex';
       if (loading) loading.style.display = 'block';
       if (result) result.style.display = 'none';
-      if (loadingText) loadingText.textContent = 'rom-analyzer 전수 재분석을 시작하는 중입니다...';
+      if (loadingText) loadingText.textContent = '무결성 증분 진단을 시작하는 중입니다...';
 
       try {
         const startRes = await apiCall('library_sync', { mode: 'diagnose' });
@@ -2948,10 +2986,13 @@
           const current = Number(progress.current || 0);
           const total = Number(progress.total || 0);
           const percent = total > 0 ? Math.min(100, Math.round(current * 100 / total)) : 0;
+          const cached = Number(progress.cached || 0);
+          const failed = Number(progress.failed || 0);
           if (loadingText) {
+            const stats = `캐시 재사용 ${cached.toLocaleString()}${failed > 0 ? ` · 실패 ${failed.toLocaleString()}` : ''}`;
             loadingText.textContent = total > 0
-              ? `rom-analyzer 재분석 중... ${current.toLocaleString()} / ${total.toLocaleString()} (${percent}%) · ${progress.current_file || ''}`
-              : 'rom-analyzer 재분석 준비 중...';
+              ? `무결성 진단 중... ${current.toLocaleString()} / ${total.toLocaleString()} (${percent}%) · ${stats} · ${progress.current_file || ''}`
+              : '무결성 진단 준비 중...';
           }
           if (!progress.is_running && progress.status === 'completed') {
             finished = true;
@@ -2987,7 +3028,11 @@
         if (result) result.style.display = 'block';
         renderHealthTable();
         await loadLibrary(true);
-        showToast(`무결성 재진단 완료: ${res.summary.total || 0}개 분석`);
+        {
+          const cached = Number(res.progress?.cached || 0);
+          const failed = Number(res.progress?.failed || 0);
+          showToast(`무결성 진단 완료: ${res.summary.total || 0}개 확인 · 캐시 재사용 ${cached}${failed > 0 ? ` · 실패 ${failed}` : ''}`);
+        }
       } catch (err) {
         console.error('[GBA] Health check error:', err);
         showToast('무결성 진단 중 오류가 발생했습니다: ' + (err.message || err), true);
