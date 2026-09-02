@@ -3766,6 +3766,10 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     ("cover_thumbnail_path", "TEXT DEFAULT ''"),
                     ("cover_revision", "INTEGER DEFAULT 0"),
                     ("health_cache_key", "TEXT DEFAULT ''"),
+                    ("deletion_status", "TEXT DEFAULT 'active'"),
+                    ("deletion_requested_at", "TEXT DEFAULT ''"),
+                    ("deletion_requested_by", "INTEGER DEFAULT 0"),
+                    ("deletion_error", "TEXT DEFAULT ''"),
                 ):
                     try:
                         conn.execute(f"ALTER TABLE games ADD COLUMN {col} {ctype}")
@@ -4373,7 +4377,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             rows = self._db_query(
                 "SELECT id, filename, file_path, core, platform, game_code, needed_bios, health_status, missing_roms, "
                 "metadata_source, metadata_confidence, source_system, COALESCE(health_cache_key, '') AS health_cache_key "
-                "FROM games ORDER BY id"
+                "FROM games WHERE COALESCE(deletion_status, 'active') = 'active' ORDER BY id"
             )
             total = len(rows)
             bios_dir = self._get_bios_dir()
@@ -4674,10 +4678,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         try:
             if mode == "ingest":
                 return self._scan_roms(new_only=True)
-            if mode == "sync":
-                return self._scan_roms()
-            if mode == "rebuild":
-                return self._scan_roms(force_full=True)
+            if mode in {"sync", "rebuild"}:
+                deletion_stats = self._process_pending_deletions()
+                scan_stats = self._scan_roms(force_full=(mode == "rebuild"))
+                if isinstance(scan_stats, dict):
+                    scan_stats.update(deletion_stats)
+                return scan_stats
             self._refresh_health_statuses()
             return {"success": True, "mode": mode}
         finally:
@@ -4759,7 +4765,36 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         # 독립 게임 카드로 중복 등록하지 않고 M3U의 sidecar로만 유지한다.
         found_files, claimed_disk_paths = _filter_m3u_claimed_files(found_files)
 
-        existing_games = {g["id"]: g for g in self._db_query("SELECT * FROM games")}
+        # 삭제 예약/처리 실패 행은 물리 파일이 아직 남아 있어도 다시 신규 게임으로 등록하지 않는다.
+        tombstones = self._db_query(
+            "SELECT id, filename, file_path, size_bytes, deletion_status FROM games "
+            "WHERE COALESCE(deletion_status, 'active') != 'active'"
+        )
+        tombstone_ids = {str(row.get("id") or "") for row in tombstones if row.get("id")}
+        tombstone_paths = {
+            os.path.realpath(str(row.get("file_path") or ""))
+            for row in tombstones if str(row.get("file_path") or "").strip()
+        }
+        found_files = {
+            gid: info for gid, info in found_files.items()
+            if gid not in tombstone_ids
+            and os.path.realpath(str(info.get("file_path") or "")) not in tombstone_paths
+        }
+
+        existing_games = {
+            g["id"]: g for g in self._db_query(
+                "SELECT * FROM games WHERE COALESCE(deletion_status, 'active') = 'active'"
+            )
+        }
+
+        # 전체 재구축은 기존 진단 캐시를 신뢰하지 않는다. 먼저 무효화한 뒤 이번 전수 분석에
+        # 성공한 게임만 새 health_cache_key를 저장한다. 중간 실패/중단 항목은 빈 키로 남아
+        # 다음 무결성 진단에서 자동 재분석된다.
+        if force_full:
+            self._db_execute(
+                "UPDATE games SET health_cache_key = '' "
+                "WHERE COALESCE(deletion_status, 'active') = 'active' AND COALESCE(health_cache_key, '') != ''"
+            )
 
         # 외부에서 ROM을 다른 폴더로 옮긴 경우 경로 기반 game_id가 바뀐다.
         # 파일명+크기가 같은 이전 항목이 유일할 때만 동일 게임의 이동으로 간주한다.
@@ -4794,6 +4829,37 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 available_bios_names = {f.lower() for f in os.listdir(bios_dir) if not f.startswith(".")}
             except Exception:
                 available_bios_names = set()
+
+        health_engine_signature = self._health_engine_signature(available_bios_names)
+        health_bios_state_cache = {}
+        health_bundle_state_cache = {}
+
+        def _build_scan_health_cache_key(gid, file_path, rom_info, health_status, missing_roms):
+            """스캔에서 이미 얻은 분석 결과를 다음 무결성 진단 캐시로 재사용한다."""
+            try:
+                stat_result = os.stat(file_path)
+            except OSError:
+                return ""
+            cache_game = {
+                "id": str(gid or ""),
+                "file_path": str(file_path or ""),
+                "core": str((rom_info or {}).get("core") or ""),
+                "platform": str((rom_info or {}).get("platform") or ""),
+                "game_code": str((rom_info or {}).get("game_code") or ""),
+                "needed_bios": _normalize_required_archive((rom_info or {}).get("needed_bios") or ""),
+                "health_status": str(health_status or ""),
+                "missing_roms": str(missing_roms or ""),
+            }
+            bios_state = self._health_bios_cache_state(
+                cache_game, available_bios_names, bios_dir, state_cache=health_bios_state_cache
+            )
+            bundle_state = self._health_bundle_cache_state(
+                cache_game, file_path, state_cache=health_bundle_state_cache
+            )
+            return self._health_cache_key(
+                cache_game, health_engine_signature, "ok", file_path, stat_result,
+                bios_state=bios_state, bundle_state=bundle_state,
+            )
 
         # 병렬 분석이 필요한 파일 목록 선별
         files_to_process = []
@@ -4884,7 +4950,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "rom_md5 = ?, rom_sha1 = ?, serial_code = ?, normalized_title = ?, source_system = ?, "
             "metadata_source = COALESCE(NULLIF(metadata_source, ''), ?), "
             "metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence = 0 THEN ? ELSE metadata_confidence END, "
-            "region_tag = ?, revision_tag = ?, disc_number = ?, content_flags = ?, "
+            "region_tag = ?, revision_tag = ?, disc_number = ?, content_flags = ?, health_cache_key = ?, "
             "cover_path = COALESCE(cover_path, ?) WHERE id = ?"
         )
         pending_existing_updates = []
@@ -5055,6 +5121,9 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     db_core=rom_info.get("core") or "", db_platform=rom_info.get("platform") or "",
                     available_bios_names=available_bios_names, bios_dir=bios_dir,
                 )
+                health_cache_key = _build_scan_health_cache_key(
+                    gid, curr_file_path, rom_info, health_status, missing_roms_str
+                )
 
                 existing_cover_file = self._resolve_existing_cover(
                     gid,
@@ -5088,8 +5157,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 try:
                     if gid not in existing_games:
                         self._db_execute(
-                            """INSERT OR REPLACE INTO games (id, future_id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence, region_tag, revision_tag, disc_number, content_flags)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            """INSERT OR REPLACE INTO games (id, future_id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence, region_tag, revision_tag, disc_number, content_flags, health_cache_key)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 gid,
                                 future_id,
@@ -5119,6 +5188,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 identity_info.get("revision_tag") or "",
                                 identity_info.get("disc_number") or 0,
                                 identity_info.get("content_flags") or "",
+                                health_cache_key,
                             ),
                         )
 
@@ -5135,15 +5205,19 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                     info["filename"] = os.path.basename(curr_file_path)
                                     info["size_bytes"] = os.path.getsize(curr_file_path)
                                     info["mtime"] = os.path.getmtime(curr_file_path)
+                                    health_cache_key = _build_scan_health_cache_key(
+                                        gid, curr_file_path, rom_info, health_status, missing_roms_str
+                                    )
                                     self._db_execute(
                                         """UPDATE games
-                                           SET layout_version = 2, filename = ?, file_path = ?, size_bytes = ?, mtime = ?
+                                           SET layout_version = 2, filename = ?, file_path = ?, size_bytes = ?, mtime = ?, health_cache_key = ?
                                            WHERE id = ?""",
                                         (
                                             info["filename"],
                                             curr_file_path,
                                             info["size_bytes"],
                                             info["mtime"],
+                                            health_cache_key,
                                             gid,
                                         ),
                                     )
@@ -5180,7 +5254,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             identity_info.get("metadata_source") or "", identity_info.get("metadata_confidence") or 0,
                             identity_info.get("region_tag") or "", identity_info.get("revision_tag") or "",
                             identity_info.get("disc_number") or 0, identity_info.get("content_flags") or "",
-                            existing_cover_file, gid,
+                            health_cache_key, existing_cover_file, gid,
                         ))
                         existing_entry = existing_games.get(gid)
                         current_cover = existing_entry.get("cover_path") if existing_entry else None
@@ -5298,6 +5372,315 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
     def _is_managed_storage_path(self, path):
         return bool(path) and _path_within_any(path, self._managed_storage_roots())
+
+    def _request_game_deletion(self, game_id, requesting_user_id=0):
+        """파일은 유지하고 게임을 삭제 예약 상태로 전환한다."""
+        game_id = str(game_id or "").strip()
+        if not game_id:
+            return {"success": False, "error": "game_id 파라미터가 누락되었습니다."}
+        rows = self._db_query(
+            "SELECT id, deletion_status FROM games WHERE id = ?",
+            (game_id,),
+        )
+        if not rows:
+            return {"success": False, "error": "삭제 예약할 게임을 찾을 수 없습니다."}
+
+        status = str(rows[0].get("deletion_status") or "active").strip().lower()
+        if status == "deleting":
+            return {"success": False, "error": "현재 라이브러리 동기화에서 실제 삭제를 처리 중입니다."}
+
+        requested_at = _get_kst_now_str()
+        self._db_execute(
+            "UPDATE games SET deletion_status = 'pending', deletion_requested_at = ?, "
+            "deletion_requested_by = ?, deletion_error = '' WHERE id = ?",
+            (requested_at, int(requesting_user_id or 0), game_id),
+        )
+        return {
+            "success": True,
+            "status": "pending",
+            "message": "삭제 대기로 전환했습니다. 실제 파일은 다음 라이브러리 동기화 또는 전체 재구축에서 삭제됩니다.",
+        }
+
+    def _cancel_game_deletion(self, game_id):
+        """아직 물리 삭제가 시작되지 않은 예약/실패 항목을 다시 활성화한다."""
+        game_id = str(game_id or "").strip()
+        if not game_id:
+            return {"success": False, "error": "game_id 파라미터가 누락되었습니다."}
+        rows = self._db_query(
+            "SELECT deletion_status FROM games WHERE id = ?",
+            (game_id,),
+        )
+        if not rows:
+            return {"success": False, "error": "게임을 찾을 수 없습니다."}
+        status = str(rows[0].get("deletion_status") or "active").strip().lower()
+        if status == "deleting":
+            return {"success": False, "error": "실제 파일 삭제 처리 중에는 취소할 수 없습니다."}
+        if status == "active":
+            return {"success": True, "status": "active", "message": "이미 활성 상태입니다."}
+        self._db_execute(
+            "UPDATE games SET deletion_status = 'active', deletion_requested_at = '', "
+            "deletion_requested_by = 0, deletion_error = '' WHERE id = ?",
+            (game_id,),
+        )
+        return {"success": True, "status": "active", "message": "삭제 예약을 취소했습니다."}
+
+    def _mark_game_deletion_failed(self, game_id, error):
+        message = str(error or "실제 파일 삭제에 실패했습니다.")[:2000]
+        try:
+            self._db_execute(
+                "UPDATE games SET deletion_status = 'failed', deletion_error = ? WHERE id = ?",
+                (message, game_id),
+            )
+        except Exception:
+            logger.exception(f"[{SELF_ID}] deletion failure state update failed ({game_id})")
+        return message
+
+    def _process_pending_deletions(self):
+        """동기화/전체 재구축 시작 전에 삭제 예약 및 이전 실패 항목을 실제 삭제한다."""
+        rows = self._db_query(
+            "SELECT id, filename, deletion_status FROM games "
+            "WHERE COALESCE(deletion_status, 'active') IN ('pending', 'deleting', 'failed') "
+            "ORDER BY COALESCE(deletion_requested_at, ''), id"
+        )
+        total = len(rows)
+        stats = {
+            "delete_queue_count": total,
+            "delete_processed_count": 0,
+            "delete_failed_count": 0,
+            "delete_preserved_shared_count": 0,
+        }
+        if not rows:
+            return stats
+
+        _update_scan_progress(
+            current=0, total=total, current_file="삭제 예약 처리 준비 중...",
+            status="deleting", is_running=True,
+        )
+        for index, row in enumerate(rows, start=1):
+            game_id = str(row.get("id") or "")
+            filename = str(row.get("filename") or game_id)
+            _update_scan_progress(
+                current=index - 1, total=total, current_file=filename,
+                status="deleting", is_running=True,
+            )
+            result = self._delete_game_permanently(game_id)
+            if result.get("success"):
+                stats["delete_processed_count"] += 1
+                stats["delete_preserved_shared_count"] += int(result.get("preserved_shared_count") or 0)
+            else:
+                stats["delete_failed_count"] += 1
+            _update_scan_progress(
+                current=index, total=total, current_file=filename,
+                status="deleting", is_running=True,
+            )
+        return stats
+
+    def _delete_game_permanently(self, game_id, requesting_user_id=0):
+        """삭제 예약 항목의 ROM/번들/세이브/커버와 DB 레코드를 실제로 삭제한다.
+
+        사용자 UI에서는 직접 호출하지 않고 라이브러리 동기화/전체 재구축에서만 호출한다.
+        ROM은 같은 디렉터리의 숨김 임시 이름으로 먼저 원자적으로 옮긴 뒤 DB 삭제를
+        커밋하고 실제 unlink한다. 실패 시 games 행을 failed tombstone으로 유지한다.
+        """
+        game_id = str(game_id or "").strip()
+        if not game_id:
+            return {"success": False, "error": "game_id 파라미터가 누락되었습니다."}
+
+        rows = self._db_query(
+            "SELECT id, future_id, file_path, layout_version, cover_path, cover_thumbnail_path, "
+            "COALESCE(deletion_status, 'active') AS deletion_status, COALESCE(deletion_requested_by, 0) AS deletion_requested_by "
+            "FROM games WHERE id = ?",
+            (game_id,),
+        )
+        if not rows:
+            return {"success": True, "message": "이미 삭제된 게임입니다.", "deleted_rom_count": 0}
+        game = rows[0]
+        deletion_status = str(game.get("deletion_status") or "active").strip().lower()
+        if deletion_status == "active":
+            return {"success": False, "error": "삭제 예약되지 않은 게임은 물리 삭제할 수 없습니다."}
+
+        self._db_execute(
+            "UPDATE games SET deletion_status = 'deleting', deletion_error = '' WHERE id = ?",
+            (game_id,),
+        )
+
+        primary_path = str(game.get("file_path") or "").strip()
+        primary_abs = os.path.abspath(primary_path) if primary_path else ""
+        candidates = []
+        if primary_abs and os.path.exists(primary_abs):
+            candidates = _collect_disk_bundle_paths(primary_abs) or [primary_abs]
+            candidates = [os.path.abspath(path) for path in candidates if path and os.path.exists(path)]
+
+        # 아직 DB에 남아 있는 다른 게임이 사용하는 primary/sidecar는 보호한다.
+        protected = set()
+        for other in self._db_query(
+            "SELECT id, file_path FROM games WHERE id != ? AND file_path IS NOT NULL AND file_path != ''",
+            (game_id,),
+        ):
+            other_path = str(other.get("file_path") or "").strip()
+            if not other_path or not os.path.exists(other_path):
+                continue
+            other_abs = os.path.abspath(other_path)
+            other_bundle = _collect_disk_bundle_paths(other_abs) or [other_abs]
+            protected.update(os.path.realpath(path) for path in other_bundle if path and os.path.exists(path))
+
+        primary_real = os.path.realpath(primary_abs) if primary_abs and os.path.exists(primary_abs) else ""
+        if primary_real and primary_real in protected:
+            error = self._mark_game_deletion_failed(
+                game_id, "이 ROM 파일을 다른 게임 항목도 사용 중이어서 삭제할 수 없습니다."
+            )
+            return {"success": False, "error": error}
+
+        delete_paths = []
+        preserved_shared = []
+        seen = set()
+        for path in candidates:
+            real = os.path.realpath(path)
+            if real in seen:
+                continue
+            seen.add(real)
+            if real in protected:
+                preserved_shared.append(path)
+                continue
+            if not self._is_managed_storage_path(path):
+                error = self._mark_game_deletion_failed(
+                    game_id, f"관리 대상 저장소 밖의 파일은 삭제할 수 없습니다: {os.path.basename(path)}"
+                )
+                return {"success": False, "error": error}
+            if os.path.isdir(path) and not os.path.islink(path):
+                error = self._mark_game_deletion_failed(
+                    game_id, "게임 파일 경로가 디렉터리여서 안전하게 삭제할 수 없습니다."
+                )
+                return {"success": False, "error": error}
+            delete_paths.append(path)
+
+        staged = []
+        delete_tag = hashlib.sha256(
+            f"{game_id}:{time.time_ns()}:{threading.get_ident()}".encode("utf-8")
+        ).hexdigest()[:16]
+        try:
+            for index, original in enumerate(delete_paths):
+                staged_path = os.path.join(
+                    os.path.dirname(original),
+                    f".bookoasis-delete-{delete_tag}-{index}-{os.path.basename(original)}",
+                )
+                if os.path.lexists(staged_path):
+                    raise FileExistsError(staged_path)
+                os.replace(original, staged_path)
+                staged.append((original, staged_path))
+        except Exception as exc:
+            for original, staged_path in reversed(staged):
+                try:
+                    if os.path.lexists(staged_path) and not os.path.lexists(original):
+                        os.replace(staged_path, original)
+                except Exception:
+                    logger.exception(f"[{SELF_ID}] delete rollback failed: {staged_path} -> {original}")
+            error = self._mark_game_deletion_failed(game_id, f"ROM 파일 삭제 준비에 실패했습니다: {exc}")
+            logger.warning(f"[{SELF_ID}] Game file delete staging failed ({game_id}): {exc}")
+            return {"success": False, "error": error}
+
+        save_user_ids = set()
+        requested_by = int(game.get("deletion_requested_by") or requesting_user_id or 0)
+        if requested_by > 0:
+            save_user_ids.add(requested_by)
+        try:
+            for row in self._db_query("SELECT DISTINCT user_id FROM user_game_data WHERE game_id = ?", (game_id,)):
+                uid = int(row.get("user_id") or 0)
+                if uid > 0:
+                    save_user_ids.add(uid)
+        except Exception:
+            pass
+
+        try:
+            with _DB_LOCK:
+                conn = self._get_db_conn(timeout=60)
+                try:
+                    conn.execute("DELETE FROM user_game_data WHERE game_id = ?", (game_id,))
+                    conn.execute("DELETE FROM games WHERE id = ?", (game_id,))
+                    conn.execute("DELETE FROM game_id_map WHERE legacy_id = ?", (game_id,))
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
+        except Exception as exc:
+            for original, staged_path in reversed(staged):
+                try:
+                    if os.path.lexists(staged_path) and not os.path.lexists(original):
+                        os.replace(staged_path, original)
+                except Exception:
+                    logger.exception(f"[{SELF_ID}] delete DB rollback file restore failed: {staged_path} -> {original}")
+            error = self._mark_game_deletion_failed(game_id, f"DB 삭제에 실패했습니다: {exc}")
+            logger.exception(f"[{SELF_ID}] Game DB delete failed ({game_id}): {exc}")
+            return {"success": False, "error": error}
+
+        deleted_rom_files = []
+        cleanup_warnings = []
+        for original, staged_path in staged:
+            try:
+                os.remove(staged_path)
+                deleted_rom_files.append(os.path.basename(original))
+            except Exception as exc:
+                cleanup_warnings.append(os.path.basename(original))
+                logger.error(f"[{SELF_ID}] staged ROM cleanup failed ({staged_path}): {exc}")
+
+        if int(game.get("layout_version") or 1) >= 2 and primary_abs:
+            try:
+                game_dir = os.path.dirname(primary_abs)
+                structured_root = os.path.join(self._get_emulatorjs_root(), "library")
+                if _path_within(game_dir, structured_root) and not os.listdir(game_dir):
+                    os.rmdir(game_dir)
+            except Exception:
+                pass
+
+        deleted_save_files = []
+        suffixes = (".sav", ".state", "_slot1.state", "_slot2.state", "_slot3.state")
+        for uid in sorted(save_user_ids):
+            try:
+                user_saves_dir = self._get_user_saves_dir(uid)
+            except Exception:
+                continue
+            for suffix in suffixes:
+                save_path = os.path.join(user_saves_dir, f"{game_id}{suffix}")
+                if not os.path.exists(save_path):
+                    continue
+                try:
+                    if self._is_managed_storage_path(save_path):
+                        os.remove(save_path)
+                        deleted_save_files.append(f"{uid}:{os.path.basename(save_path)}")
+                except Exception as exc:
+                    logger.warning(f"[{SELF_ID}] Save delete failed ({save_path}): {exc}")
+
+        deleted_cover_files = []
+        for key in ("cover_path", "cover_thumbnail_path"):
+            cover_path = str(game.get(key) or "").strip()
+            if not cover_path or not os.path.exists(cover_path):
+                continue
+            try:
+                if self._is_managed_storage_path(cover_path):
+                    os.remove(cover_path)
+                    deleted_cover_files.append(os.path.basename(cover_path))
+            except Exception as exc:
+                logger.warning(f"[{SELF_ID}] Cover delete failed ({cover_path}): {exc}")
+
+        message = "삭제 예약 게임의 실제 ROM 파일과 라이브러리 데이터를 삭제했습니다."
+        if not candidates:
+            message = "ROM 파일은 이미 없었으며 삭제 예약된 라이브러리/세이브 데이터를 정리했습니다."
+        if cleanup_warnings:
+            message += " 일부 숨김 임시 파일 정리가 실패해 서버 로그 확인이 필요합니다."
+
+        return {
+            "success": True,
+            "message": message,
+            "deleted_rom_count": len(deleted_rom_files),
+            "deleted_rom_files": deleted_rom_files,
+            "preserved_shared_count": len(preserved_shared),
+            "preserved_shared_files": [os.path.basename(path) for path in preserved_shared],
+            "deleted_save_count": len(deleted_save_files),
+            "deleted_cover_count": len(deleted_cover_files),
+            "cleanup_warnings": cleanup_warnings,
+        }
 
     # ------------------------------------------------------------------
     # 라우트 동적 등록 (Werkzeug Rule 기반)
@@ -6120,7 +6503,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "get_cover_migration_candidates", "get_bios_migration_candidates",
             "migrate_bios_batch", "migrate_cover_batch",
             "library_sync", "scan_new_roms", "scan_roms", "full_scan", "health_check", "health_refresh", "health_progress",
-            "fetch_missing_covers", "delete_game", "update_title", "save_settings", "search_artwork", "set_artwork",
+            "fetch_missing_covers", "delete_game", "cancel_delete_game", "delete_queue_status", "update_title", "save_settings", "search_artwork", "set_artwork",
         }
         if action in admin_actions and not is_admin:
             return {"success": False, "error": "관리자(admin) 권한이 필요합니다."}
@@ -6130,8 +6513,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 # 목록 화면은 DB-only 서버 페이징을 사용한다. 최초 진입이 rclone/GDrive,
                 # 커버/BIOS/세이브 디렉터리 상태에 영향을 받지 않도록 이 경로에서는
                 # 파일시스템 조회/복구/자동 스캔을 수행하지 않는다.
-                game_count_row = self._db_query("SELECT COUNT(*) AS cnt FROM games")
+                game_count_row = self._db_query(
+                    "SELECT COUNT(*) AS cnt FROM games WHERE COALESCE(deletion_status, 'active') = 'active'"
+                )
                 library_total_count = int(game_count_row[0]["cnt"] if game_count_row else 0)
+                pending_delete_row = self._db_query(
+                    "SELECT COUNT(*) AS cnt FROM games WHERE COALESCE(deletion_status, 'active') != 'active'"
+                )
+                pending_delete_count = int(pending_delete_row[0]["cnt"] if pending_delete_row else 0)
 
                 def _request_int(name, default, minimum, maximum):
                     try:
@@ -6148,7 +6537,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 favorite_only = str(request.args.get("favorite_only", "0") or "0").strip().lower() in ("1", "true", "yes", "on")
                 search_query = str(request.args.get("q", "") or "").strip().casefold()
 
-                where_parts = []
+                where_parts = ["COALESCE(g.deletion_status, 'active') = 'active'"]
                 where_args = []
 
                 if favorite_only:
@@ -6272,6 +6661,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     "games": visible_games,
                     "total_count": filtered_total_count,
                     "library_total_count": library_total_count,
+                    "pending_delete_count": pending_delete_count,
                     "offset": page_offset,
                     "limit": page_limit,
                     "next_offset": page_offset + len(visible_games),
@@ -6797,29 +7187,19 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
 
             elif action == "delete_game":
                 game_id = request.args.get("game_id", "")
-                if game_id:
-                    rows = self._db_query("SELECT file_path FROM games WHERE id = ?", (game_id,))
-                    if rows and rows[0]["file_path"] and os.path.exists(rows[0]["file_path"]):
-                        try:
-                            if self._is_managed_storage_path(rows[0]["file_path"]):
-                                os.remove(rows[0]["file_path"])
-                        except Exception:
-                            pass
+                return self._request_game_deletion(game_id, requesting_user_id=user_id)
 
-                    user_saves_dir = self._get_user_saves_dir(user_id)
-                    for f in (f"{game_id}.sav", f"{game_id}.state", f"{game_id}_slot1.state", f"{game_id}_slot2.state", f"{game_id}_slot3.state"):
-                        p = os.path.join(user_saves_dir, f)
-                        if os.path.exists(p):
-                            try:
-                                os.remove(p)
-                            except Exception:
-                                pass
+            elif action == "cancel_delete_game":
+                game_id = request.args.get("game_id", "")
+                return self._cancel_game_deletion(game_id)
 
-                    self._db_execute("DELETE FROM games WHERE id = ?", (game_id,))
-                    self._db_execute("DELETE FROM user_game_data WHERE game_id = ?", (game_id,))
-                    self._delete_future_game_id(game_id)
-                    return {"success": True, "message": "게임이 성공적으로 삭제되었습니다."}
-                return {"success": False, "error": "game_id 파라미터가 누락되었습니다."}
+            elif action == "delete_queue_status":
+                rows = self._db_query(
+                    "SELECT id, title, filename, deletion_status, deletion_requested_at, deletion_error "
+                    "FROM games WHERE COALESCE(deletion_status, 'active') != 'active' "
+                    "ORDER BY COALESCE(deletion_requested_at, ''), id"
+                )
+                return {"success": True, "count": len(rows), "items": rows}
 
             elif action == "update_title":
                 game_id = request.args.get("game_id", "")

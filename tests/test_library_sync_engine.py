@@ -21,22 +21,29 @@ class LibrarySyncEngineTests(unittest.TestCase):
     def test_modes_share_single_entrypoint(self):
         provider = self._provider()
         with mock.patch.object(provider, "_scan_roms", return_value={"success": True}) as scan, \
+             mock.patch.object(provider, "_process_pending_deletions", return_value={"delete_processed_count": 0}) as deletes, \
              mock.patch.object(provider, "_refresh_health_statuses") as health:
             provider._run_library_sync("ingest")
             scan.assert_called_once_with(new_only=True)
+            deletes.assert_not_called()
             scan.reset_mock()
 
             provider._run_library_sync("sync")
-            scan.assert_called_once_with()
+            scan.assert_called_once_with(force_full=False)
+            deletes.assert_called_once_with()
             scan.reset_mock()
+            deletes.reset_mock()
 
             provider._run_library_sync("rebuild")
             scan.assert_called_once_with(force_full=True)
+            deletes.assert_called_once_with()
             scan.reset_mock()
+            deletes.reset_mock()
 
             provider._run_library_sync("diagnose")
             health.assert_called_once_with()
             scan.assert_not_called()
+            deletes.assert_not_called()
 
     def test_invalid_mode_is_rejected(self):
         provider = self._provider()
@@ -83,6 +90,330 @@ class LibrarySyncEngineTests(unittest.TestCase):
             self.assertTrue(any("DELETE FROM games" in sql for sql, _ in deleted))
             self.assertTrue(any("DELETE FROM user_game_data" in sql for sql, _ in deleted))
             self.assertEqual(deleted_future_ids, ["roms_missing_zip"])
+
+    def test_rebuild_replaces_old_health_cache_with_scan_result(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            roms = root / "roms"
+            system_dir = roms / "nes"
+            bios = root / "bios"
+            covers = root / "covers"
+            library_root = root / "emulatorjs"
+            system_dir.mkdir(parents=True)
+            bios.mkdir()
+            covers.mkdir()
+            library_root.mkdir()
+            rom = system_dir / "game.nes"
+            rom.write_bytes(b"NES\x1a" + b"x" * 128)
+
+            db_path = root / "gba.db"
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            provider._migrate_bios_files = lambda: None
+            provider._get_roms_dir = lambda: str(roms)
+            provider._get_bios_dir = lambda: str(bios)
+            provider._get_covers_dir = lambda: str(covers)
+            provider._get_emulatorjs_root = lambda: str(library_root)
+            provider._get_setting = lambda key, default="": default
+
+            rel = os.path.relpath(str(rom), str(roms))
+            gid = gamebooks._sanitize_id(f"{roms.name}_{rel}")
+            stat = os.stat(rom)
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, title, core, platform, size_bytes, mtime, health_cache_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (gid, rom.name, str(rom), "Game", "nes", "NES", stat.st_size, stat.st_mtime, "old-cache"),
+            )
+            rom_info = {
+                "title": "Game",
+                "game_code": "",
+                "maker_code": "",
+                "core": "nes",
+                "platform": "NES",
+                "needed_bios": "",
+                "metadata_source": "rom-analyzer",
+                "metadata_confidence": 100,
+                "source_system": "header",
+                "disk_missing_files": [],
+            }
+
+            with mock.patch.object(gamebooks, "_analyze_rom_context", return_value=(None, rom_info)) as analyze, \
+                 mock.patch.object(gamebooks, "_enqueue_cover_downloads") as enqueue_covers, \
+                 mock.patch.object(gamebooks, "_collect_identity_fields", return_value={
+                     "rom_crc32": "", "rom_md5": "", "rom_sha1": "", "serial_code": "",
+                     "normalized_title": "Game", "source_system": "header",
+                     "metadata_source": "rom-analyzer", "metadata_confidence": 100,
+                     "region_tag": "", "revision_tag": "", "disc_number": 0, "content_flags": "",
+                 }), \
+                 mock.patch.object(gamebooks, "_derive_health_status_from_analysis", return_value=("pass", "")):
+                result = provider._scan_roms(force_full=True)
+
+            self.assertTrue(result["success"])
+            analyze.assert_called_once_with(str(rom))
+            enqueue_covers.assert_called_once()
+            row = provider._db_query(
+                "SELECT health_cache_key, health_status FROM games WHERE id = ?", (gid,)
+            )[0]
+            self.assertTrue(row["health_cache_key"])
+            self.assertNotEqual(row["health_cache_key"], "old-cache")
+            self.assertEqual(row["health_status"], "pass")
+
+    def test_delete_request_marks_pending_without_removing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            rom = root / "game.zip"
+            rom.write_bytes(b"rom")
+            db_path = root / "gba.db"
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, title) VALUES (?, ?, ?, ?)",
+                ("game", rom.name, str(rom), "Game"),
+            )
+
+            result = provider._request_game_deletion("game", requesting_user_id=7)
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["status"], "pending")
+            self.assertTrue(rom.exists())
+            row = provider._db_query(
+                "SELECT deletion_status, deletion_requested_by, deletion_error FROM games WHERE id = ?",
+                ("game",),
+            )[0]
+            self.assertEqual(row["deletion_status"], "pending")
+            self.assertEqual(row["deletion_requested_by"], 7)
+            self.assertEqual(row["deletion_error"], "")
+
+    def test_cancel_delete_request_restores_active_game(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            rom = root / "game.zip"
+            rom.write_bytes(b"rom")
+            db_path = root / "gba.db"
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, title) VALUES (?, ?, ?, ?)",
+                ("game", rom.name, str(rom), "Game"),
+            )
+            provider._request_game_deletion("game", requesting_user_id=1)
+
+            result = provider._cancel_game_deletion("game")
+
+            self.assertTrue(result["success"])
+            self.assertTrue(rom.exists())
+            row = provider._db_query(
+                "SELECT deletion_status, deletion_requested_at, deletion_requested_by, deletion_error FROM games WHERE id = ?",
+                ("game",),
+            )[0]
+            self.assertEqual(row["deletion_status"], "active")
+            self.assertEqual(row["deletion_requested_at"], "")
+            self.assertEqual(row["deletion_requested_by"], 0)
+            self.assertEqual(row["deletion_error"], "")
+
+    def test_pending_delete_is_physically_removed_by_sync_delete_phase(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            roms = root / "roms"
+            saves = root / "saves"
+            covers = root / "covers"
+            emulator = root / "emulatorjs"
+            for path in (roms, saves, covers, emulator):
+                path.mkdir()
+            rom = roms / "game.zip"
+            rom.write_bytes(b"rom")
+            cover = covers / "game.webp"
+            cover.write_bytes(b"cover")
+            user_dir = saves / "1"
+            user_dir.mkdir()
+            save = user_dir / "game.sav"
+            save.write_bytes(b"save")
+
+            db_path = root / "gba.db"
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            provider._managed_storage_roots = lambda: [str(root)]
+            provider._get_emulatorjs_root = lambda: str(emulator)
+            provider._get_user_saves_dir = lambda uid: str(saves / str(uid))
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, title, cover_path) VALUES (?, ?, ?, ?, ?)",
+                ("game", rom.name, str(rom), "Game", str(cover)),
+            )
+            provider._db_execute(
+                "INSERT INTO user_game_data (user_id, game_id, is_favorite) VALUES (?, ?, ?)",
+                (1, "game", 1),
+            )
+            provider._request_game_deletion("game", requesting_user_id=1)
+
+            stats = provider._process_pending_deletions()
+
+            self.assertEqual(stats["delete_queue_count"], 1)
+            self.assertEqual(stats["delete_processed_count"], 1)
+            self.assertEqual(stats["delete_failed_count"], 0)
+            self.assertFalse(rom.exists())
+            self.assertFalse(save.exists())
+            self.assertFalse(cover.exists())
+            self.assertEqual(provider._db_query("SELECT id FROM games WHERE id = ?", ("game",)), [])
+            self.assertEqual(provider._db_query("SELECT game_id FROM user_game_data WHERE game_id = ?", ("game",)), [])
+
+    def test_pending_delete_removes_m3u_cue_bin_bundle(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            roms = root / "roms"
+            saves = root / "saves"
+            emulator = root / "emulatorjs"
+            roms.mkdir()
+            saves.mkdir()
+            emulator.mkdir()
+            playlist = roms / "game.m3u"
+            cue = roms / "disc1.cue"
+            bin_file = roms / "disc1.bin"
+            playlist.write_text("disc1.cue\n", encoding="utf-8")
+            cue.write_text('FILE "disc1.bin" BINARY\n', encoding="utf-8")
+            bin_file.write_bytes(b"disc")
+
+            db_path = root / "gba.db"
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            provider._managed_storage_roots = lambda: [str(root)]
+            provider._get_emulatorjs_root = lambda: str(emulator)
+            provider._get_user_saves_dir = lambda uid: str(saves / str(uid))
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, title, core, platform) VALUES (?, ?, ?, ?, ?, ?)",
+                ("game", playlist.name, str(playlist), "Game", "psx", "PS1"),
+            )
+            provider._request_game_deletion("game", requesting_user_id=1)
+
+            stats = provider._process_pending_deletions()
+
+            self.assertEqual(stats["delete_processed_count"], 1)
+            self.assertFalse(playlist.exists())
+            self.assertFalse(cue.exists())
+            self.assertFalse(bin_file.exists())
+
+    def test_pending_delete_preserves_bundle_files_shared_by_other_game(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            roms = root / "roms"
+            saves = root / "saves"
+            emulator = root / "emulatorjs"
+            roms.mkdir()
+            saves.mkdir()
+            emulator.mkdir()
+            first = roms / "first.m3u"
+            second = roms / "second.m3u"
+            cue = roms / "shared.cue"
+            bin_file = roms / "shared.bin"
+            first.write_text("shared.cue\n", encoding="utf-8")
+            second.write_text("shared.cue\n", encoding="utf-8")
+            cue.write_text('FILE "shared.bin" BINARY\n', encoding="utf-8")
+            bin_file.write_bytes(b"disc")
+
+            db_path = root / "gba.db"
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            provider._managed_storage_roots = lambda: [str(root)]
+            provider._get_emulatorjs_root = lambda: str(emulator)
+            provider._get_user_saves_dir = lambda uid: str(saves / str(uid))
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, title) VALUES (?, ?, ?, ?)",
+                ("first", first.name, str(first), "First"),
+            )
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, title) VALUES (?, ?, ?, ?)",
+                ("second", second.name, str(second), "Second"),
+            )
+            provider._request_game_deletion("first", requesting_user_id=1)
+
+            stats = provider._process_pending_deletions()
+
+            self.assertEqual(stats["delete_processed_count"], 1)
+            self.assertEqual(stats["delete_preserved_shared_count"], 2)
+            self.assertFalse(first.exists())
+            self.assertTrue(second.exists())
+            self.assertTrue(cue.exists())
+            self.assertTrue(bin_file.exists())
+            self.assertEqual(provider._db_query("SELECT id FROM games ORDER BY id"), [{"id": "second"}])
+
+    def test_failed_pending_delete_stays_tombstoned_and_is_not_reimported(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            roms = root / "roms"
+            managed = root / "managed"
+            bios = root / "bios"
+            covers = root / "covers"
+            emulator = root / "emulatorjs"
+            for path in (roms, managed, bios, covers, emulator):
+                path.mkdir()
+            rom = roms / "game.zip"
+            rom.write_bytes(b"rom")
+            db_path = root / "gba.db"
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            provider._managed_storage_roots = lambda: [str(managed)]
+            provider._get_roms_dir = lambda: str(roms)
+            provider._get_bios_dir = lambda: str(bios)
+            provider._get_covers_dir = lambda: str(covers)
+            provider._get_emulatorjs_root = lambda: str(emulator)
+            provider._get_setting = lambda key, default="": default
+            provider._migrate_bios_files = lambda: None
+            stat = os.stat(rom)
+            gid = gamebooks._sanitize_id(f"{roms.name}_{rom.name}")
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, title, size_bytes, mtime) VALUES (?, ?, ?, ?, ?, ?)",
+                (gid, rom.name, str(rom), "Game", stat.st_size, stat.st_mtime),
+            )
+            provider._request_game_deletion(gid, requesting_user_id=1)
+
+            delete_stats = provider._process_pending_deletions()
+            self.assertEqual(delete_stats["delete_failed_count"], 1)
+            self.assertTrue(rom.exists())
+            row = provider._db_query(
+                "SELECT deletion_status, deletion_error FROM games WHERE id = ?", (gid,)
+            )[0]
+            self.assertEqual(row["deletion_status"], "failed")
+            self.assertTrue(row["deletion_error"])
+
+            with mock.patch.object(gamebooks, "_analyze_rom_context") as analyze, \
+                 mock.patch.object(gamebooks, "_enqueue_cover_downloads") as enqueue_covers:
+                scan_stats = provider._scan_roms(new_only=True)
+
+            analyze.assert_not_called()
+            enqueue_covers.assert_not_called()
+            self.assertEqual(scan_stats["new_count"], 0)
+            rows = provider._db_query("SELECT id, deletion_status FROM games")
+            self.assertEqual(rows, [{"id": gid, "deletion_status": "failed"}])
+
+    def test_failed_pending_delete_is_retried_on_next_sync_phase(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            roms = root / "roms"
+            managed = root / "managed"
+            roms.mkdir()
+            managed.mkdir()
+            rom = roms / "game.zip"
+            rom.write_bytes(b"rom")
+            db_path = root / "gba.db"
+            provider = self._provider_with_db(db_path)
+            provider._init_db()
+            provider._managed_storage_roots = lambda: [str(managed)]
+            provider._db_execute(
+                "INSERT INTO games (id, filename, file_path, title) VALUES (?, ?, ?, ?)",
+                ("game", rom.name, str(rom), "Game"),
+            )
+            provider._request_game_deletion("game", requesting_user_id=1)
+
+            first = provider._process_pending_deletions()
+            self.assertEqual(first["delete_failed_count"], 1)
+            self.assertTrue(rom.exists())
+
+            provider._managed_storage_roots = lambda: [str(root)]
+            second = provider._process_pending_deletions()
+
+            self.assertEqual(second["delete_processed_count"], 1)
+            self.assertEqual(second["delete_failed_count"], 0)
+            self.assertFalse(rom.exists())
+            self.assertEqual(provider._db_query("SELECT id FROM games WHERE id = ?", ("game",)), [])
 
     def test_future_ids_backfill_once_and_survive_reinit(self):
         with tempfile.TemporaryDirectory() as td:
@@ -480,7 +811,16 @@ class LibrarySyncEngineTests(unittest.TestCase):
         self.assertIn('id="gbaScanBtn" class="gba-btn gba-btn-secondary gba-admin-only"', index)
         self.assertIn("라이브러리 전체 재구축", index)
         self.assertIn("분석 결과 저장 ${saveCurrent} / ${saveTotal}", script)
+        self.assertIn("삭제 대기로 전환하시겠습니까?", script)
+        self.assertIn("실제 ROM 파일을 삭제하지 않습니다", script)
+        self.assertIn("삭제 예약 처리 ${deleteCurrent} / ${deleteTotal}", script)
+        self.assertIn('id="gbaDeleteQueueBtn"', index)
+        self.assertIn('id="gbaDeleteQueueModal"', index)
+        self.assertIn("apiCall('delete_queue_status'", script)
+        self.assertIn("apiCall('cancel_delete_game'", script)
         self.assertNotIn("percent = 95;", script)
+        self.assertIn("다음 라이브러리 동기화 또는 전체 재구축 시 실제 ROM/관련 디스크/세이브 데이터가 삭제됩니다", script)
+        self.assertIn("무결성 캐시 갱신이 완료되었습니다", script)
 
     def test_db_execute_batches_uses_one_transaction_for_multiple_groups(self):
         with tempfile.TemporaryDirectory() as td:

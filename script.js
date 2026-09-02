@@ -56,6 +56,7 @@
     pageSize: 40,
     totalCount: 0,
     libraryTotalCount: 0,
+    pendingDeleteCount: 0,
     nextOffset: 0,
     hasMore: false,
     isLoadingMore: false,
@@ -254,6 +255,8 @@
         state.games = data.games || [];
         state.totalCount = Number(data.total_count || 0);
         state.libraryTotalCount = Number(data.library_total_count ?? state.totalCount);
+        state.pendingDeleteCount = Number(data.pending_delete_count || 0);
+        updateDeleteQueueCount();
         state.nextOffset = Number(data.next_offset ?? state.games.length);
         state.hasMore = !!data.has_more;
         if (data.user_id) state.userId = data.user_id;
@@ -580,7 +583,7 @@
           <button class="gba-card-icon-btn" data-action="edit-title" title="이름 변경"><i class="fa-solid fa-pen"></i></button>
           ${state.isAdmin ? `
             <button class="gba-card-icon-btn" data-action="set-cover" title="커버 이미지 등록"><i class="fa-regular fa-image"></i></button>
-            <button class="gba-card-icon-btn gba-btn-danger" data-action="delete" title="게임 삭제"><i class="fa-regular fa-trash-can"></i></button>
+            <button class="gba-card-icon-btn gba-btn-danger" data-action="delete" title="게임 삭제 예약"><i class="fa-regular fa-trash-can"></i></button>
           ` : ''}
         </div>
       </div>
@@ -2362,8 +2365,74 @@
     }
   }
 
+  function updateDeleteQueueCount() {
+    const countEl = $('gbaDeleteQueueCount');
+    if (countEl) countEl.textContent = String(Number(state.pendingDeleteCount || 0));
+  }
+
+  function deletionStatusLabel(status) {
+    const value = String(status || '').toLowerCase();
+    if (value === 'pending') return '삭제 대기';
+    if (value === 'deleting') return '삭제 중';
+    if (value === 'failed') return '삭제 실패';
+    return value || '알 수 없음';
+  }
+
+  async function loadDeleteQueue(openModal = false) {
+    const res = await apiCall('delete_queue_status');
+    if (!res || !res.success) throw new Error((res && res.error) || '삭제 대기 목록 조회 실패');
+    const items = Array.isArray(res.items) ? res.items : [];
+    state.pendingDeleteCount = Number(res.count ?? items.length);
+    updateDeleteQueueCount();
+
+    const body = $('gbaDeleteQueueBody');
+    const empty = $('gbaDeleteQueueEmpty');
+    const wrap = $('gbaDeleteQueueTableWrap');
+    const summary = $('gbaDeleteQueueSummary');
+    if (summary) summary.textContent = `삭제 대기/실패 ${items.length}개`;
+    if (empty) empty.style.display = items.length ? 'none' : 'block';
+    if (wrap) wrap.style.display = items.length ? 'block' : 'none';
+    if (body) {
+      body.innerHTML = items.map((item) => {
+        const status = String(item.deletion_status || 'pending').toLowerCase();
+        const failed = status === 'failed';
+        const deleting = status === 'deleting';
+        const detail = failed && item.deletion_error
+          ? `<div style="color: var(--gba-danger, #ef4444); margin-top: 4px; max-width: 360px; white-space: normal;">${escapeHtml(item.deletion_error)}</div>`
+          : '';
+        const disabled = deleting ? 'disabled' : '';
+        return `
+          <tr>
+            <td><strong>${escapeHtml(item.title || item.filename || item.id)}</strong><br><small>${escapeHtml(item.filename || '')}</small></td>
+            <td>${escapeHtml(deletionStatusLabel(status))}</td>
+            <td>${escapeHtml(item.deletion_requested_at || '-')} ${detail}</td>
+            <td><button type="button" class="gba-btn gba-btn-secondary gba-delete-cancel-btn" data-game-id="${escapeHtml(String(item.id || ''))}" ${disabled}>삭제 취소</button></td>
+          </tr>`;
+      }).join('');
+      body.querySelectorAll('.gba-delete-cancel-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const gameId = btn.dataset.gameId || '';
+          if (!gameId) return;
+          btn.disabled = true;
+          try {
+            const cancelRes = await apiCall('cancel_delete_game', { game_id: gameId });
+            if (!cancelRes || !cancelRes.success) throw new Error((cancelRes && cancelRes.error) || '삭제 취소 실패');
+            showToast(cancelRes.message || '삭제 예약을 취소했습니다.');
+            await loadDeleteQueue(false);
+            await loadLibrary(true);
+          } catch (err) {
+            showToast(err.message || '삭제 취소 중 오류가 발생했습니다.', true);
+            btn.disabled = false;
+          }
+        });
+      });
+    }
+    if (openModal && $('gbaDeleteQueueModal')) $('gbaDeleteQueueModal').style.display = 'flex';
+    return items;
+  }
+
   async function confirmDeleteGame(game) {
-    if (!confirm(`'${game.title}' 게임을 정말로 라이브러리에서 삭제하시겠습니까?\n(유저 세이브 데이터도 함께 삭제됩니다)`)) {
+    if (!confirm(`'${game.title}' 게임을 삭제 대기로 전환하시겠습니까?\n\n지금은 실제 ROM 파일을 삭제하지 않습니다.\n다음 라이브러리 동기화 또는 전체 재구축 시 실제 ROM/관련 디스크/세이브 데이터가 삭제됩니다.\n삭제 대기 게임은 목록에서 즉시 숨겨집니다.`)) {
       return;
     }
 
@@ -2371,13 +2440,15 @@
       const res = await apiCall('delete_game', { game_id: game.id });
       if (res.success) {
         state.games = state.games.filter((g) => g.id !== game.id);
+        state.pendingDeleteCount = Number(state.pendingDeleteCount || 0) + 1;
+        updateDeleteQueueCount();
         await loadLibrary(true);
-        showToast('게임이 삭제되었습니다.');
+        showToast(res.message || '삭제 대기로 전환했습니다.');
       } else {
-        showToast(res.error || '삭제 실패', true);
+        showToast(res.error || '삭제 예약 실패', true);
       }
     } catch (e) {
-      showToast('삭제 중 오류가 발생했습니다.', true);
+      showToast('삭제 예약 중 오류가 발생했습니다.', true);
     }
   }
 
@@ -2720,7 +2791,12 @@
               const p = pollRes.progress;
               if (p.total > 0) {
                 let percent = 8;
-                if (p.status === 'saving') {
+                if (p.status === 'deleting') {
+                  const deleteTotal = Math.max(Number(p.total || 0), 1);
+                  const deleteCurrent = Math.min(Math.max(Number(p.current || 0), 0), deleteTotal);
+                  percent = Math.min(5 + Math.round((deleteCurrent / deleteTotal) * 12), 17);
+                  if (scanDetails) scanDetails.textContent = `삭제 예약 처리 ${deleteCurrent} / ${deleteTotal} - ${p.current_file || ''}`;
+                } else if (p.status === 'saving') {
                   const saveTotal = Math.max(Number(p.total || 0), 1);
                   const saveCurrent = Math.min(Math.max(Number(p.current || 0), 0), saveTotal);
                   percent = Math.min(94 + Math.round((saveCurrent / saveTotal) * 5), 99);
@@ -2758,8 +2834,11 @@
         const stats = res.stats || {};
         const newCount = Number(stats.new_count || 0);
         const deletedCount = Number(stats.deleted_count || 0);
-        if (newCount > 0 || deletedCount > 0) {
-          showToast(`라이브러리 동기화 완료 (신규 ${newCount}개 / 삭제 ${deletedCount}개)`);
+        const queuedDeletedCount = Number(stats.delete_processed_count || 0);
+        const deleteFailedCount = Number(stats.delete_failed_count || 0);
+        if (newCount > 0 || deletedCount > 0 || queuedDeletedCount > 0 || deleteFailedCount > 0) {
+          const failedText = deleteFailedCount > 0 ? ` / 삭제 실패 ${deleteFailedCount}개` : '';
+          showToast(`라이브러리 동기화 완료 (신규 ${newCount}개 / 누락 정리 ${deletedCount}개 / 예약 삭제 ${queuedDeletedCount}개${failedText})`, deleteFailedCount > 0);
         } else {
           showToast('라이브러리가 최신 상태입니다.');
         }
@@ -2780,7 +2859,7 @@
       const fullScanBtn = $('gbaFullScanBtn');
       if (fullScanBtn.classList.contains('gba-btn-scanning')) return;
 
-      if (!confirm('라이브러리를 전체 재구축하시겠습니까?\n\n- 모든 ROM을 최신 분석 기준으로 처음부터 다시 분석합니다.\n- 기종 판정에 따라 ROM 파일이 다른 폴더로 이동될 수 있습니다.\n- 7z 파일은 ZIP으로 변환될 수 있습니다.\n- 유저 세이브와 즐겨찾기는 보존됩니다.')) {
+      if (!confirm('라이브러리를 전체 재구축하시겠습니까?\n\n- 삭제 대기 게임의 실제 파일을 먼저 삭제합니다.\n- 모든 ROM을 최신 분석 기준으로 처음부터 다시 분석합니다.\n- 기종 판정에 따라 ROM 파일이 다른 폴더로 이동될 수 있습니다.\n- 7z 파일은 ZIP으로 변환될 수 있습니다.\n- 삭제 예약되지 않은 게임의 유저 세이브와 즐겨찾기는 보존됩니다.')) {
         return;
       }
 
@@ -2797,9 +2876,9 @@
       let pollTimer = null;
       if (scanModal) {
         scanModal.style.display = 'flex';
-        if (scanStatus) scanStatus.textContent = '모든 ROM을 최신 분석 기준으로 전체 재구축하는 중...';
+        if (scanStatus) scanStatus.textContent = '기존 진단 캐시를 무시하고 모든 ROM을 전체 재구축하는 중...';
         if (scanProgressBar) scanProgressBar.style.width = '5%';
-        if (scanDetails) scanDetails.textContent = '통합 DAT DB 및 바이너리 헤더 전수 분석 준비 중...';
+        if (scanDetails) scanDetails.textContent = '기존 캐시 무효화 · 통합 DAT DB 및 바이너리 헤더 전수 분석 준비 중...';
 
         // 0.35초 간격으로 실시간 파일 단위 프로그레스 폴링
         pollTimer = setInterval(async () => {
@@ -2809,7 +2888,12 @@
               const p = pollRes.progress;
               if (p.total > 0) {
                 let percent = 5;
-                if (p.status === 'saving') {
+                if (p.status === 'deleting') {
+                  const deleteTotal = Math.max(Number(p.total || 0), 1);
+                  const deleteCurrent = Math.min(Math.max(Number(p.current || 0), 0), deleteTotal);
+                  percent = Math.min(5 + Math.round((deleteCurrent / deleteTotal) * 12), 17);
+                  if (scanDetails) scanDetails.textContent = `삭제 예약 처리 ${deleteCurrent} / ${deleteTotal} - ${p.current_file || ''}`;
+                } else if (p.status === 'saving') {
                   const saveTotal = Math.max(Number(p.total || 0), 1);
                   const saveCurrent = Math.min(Math.max(Number(p.current || 0), 0), saveTotal);
                   percent = Math.min(94 + Math.round((saveCurrent / saveTotal) * 5), 99);
@@ -2869,7 +2953,7 @@
         await loadLibrary(true);
 
         if (scanProgressBar) scanProgressBar.style.width = '100%';
-        showToast('라이브러리 전체 재구축이 완료되었습니다!');
+        showToast('라이브러리 전체 재구축과 무결성 캐시 갱신이 완료되었습니다!');
       } catch (err) {
         if (pollTimer) clearInterval(pollTimer);
         console.error('[GBA] Library rebuild error:', err);
@@ -2878,7 +2962,7 @@
       } finally {
         if (pollTimer) clearInterval(pollTimer);
         fullScanBtn.classList.remove('gba-btn-scanning');
-        fullScanBtn.title = '모든 ROM을 최신 분석 기준으로 다시 구성';
+        fullScanBtn.title = '기존 캐시를 무시하고 모든 ROM을 전수 분석해 진단 캐시까지 새로 구성';
         if (scanModal) {
           scanModal.style.display = 'none';
         }
@@ -3182,8 +3266,29 @@
       if ($('gbaSettingBiosPath')) {
         $('gbaSettingBiosPath').value = state.config.bios_path || '';
       }
+      if (state.isAdmin) {
+        try {
+          await loadDeleteQueue(false);
+        } catch (err) {
+          console.warn('[GBA] Delete queue status load error:', err);
+        }
+      }
 
       $('gbaSettingsModal').style.display = 'flex';
+    });
+
+    $('gbaDeleteQueueBtn')?.addEventListener('click', async () => {
+      try {
+        await loadDeleteQueue(true);
+      } catch (err) {
+        showToast(err.message || '삭제 대기 목록을 불러오지 못했습니다.', true);
+      }
+    });
+    $('gbaDeleteQueueCloseBtn')?.addEventListener('click', () => {
+      $('gbaDeleteQueueModal').style.display = 'none';
+    });
+    $('gbaDeleteQueueOkBtn')?.addEventListener('click', () => {
+      $('gbaDeleteQueueModal').style.display = 'none';
     });
 
     $('gbaSettingsCloseBtn').addEventListener('click', () => {
