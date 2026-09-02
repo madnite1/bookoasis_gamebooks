@@ -53,6 +53,9 @@
       meta: '',
       percent: null,
     },
+    launchPlan: null,
+    analysisDetailGameId: null,
+    analysisDetailData: null,
     pageSize: 40,
     totalCount: 0,
     libraryTotalCount: 0,
@@ -73,6 +76,8 @@
       current_title: '',
     },
   };
+
+  let launchSlowTimerId = null;
 
   // DOM 헬퍼
   const $ = (id) => document.getElementById(id);
@@ -490,6 +495,253 @@
     return '';
   }
 
+  function getPlayStatusInfo(status) {
+    const value = String(status || 'untested').toLowerCase();
+    const map = {
+      booted: { label: '부팅 확인', icon: 'fa-power-off', className: 'booted', desc: 'EmulatorJS의 실제 게임 시작 이벤트가 확인되었습니다.' },
+      verified: { label: '플레이 확인', icon: 'fa-circle-check', className: 'verified', desc: '사용자가 실제 플레이 가능함을 확인했습니다.' },
+      issue: { label: '실행 문제', icon: 'fa-triangle-exclamation', className: 'issue', desc: '사용자가 실제 플레이 중 문제가 있음을 확인했습니다.' },
+      untested: { label: '플레이 미확인', icon: 'fa-circle-question', className: 'untested', desc: '아직 실제 부팅 또는 플레이 결과가 확인되지 않았습니다.' },
+    };
+    return map[value] || map.untested;
+  }
+
+  function playStatusBadgeHtml(game) {
+    const status = String(game.play_status || 'untested').toLowerCase();
+    if (status === 'untested') return '';
+    const info = getPlayStatusInfo(status);
+    return `<span class="gba-badge gba-play-badge gba-play-${info.className}" title="${escapeHtml(info.desc)}"><i class="fa-solid ${info.icon}"></i> ${escapeHtml(info.label)}</span>`;
+  }
+
+  function applyPlayStateToGame(gameId, play) {
+    if (!play) return;
+    const game = state.games.find((item) => String(item.id) === String(gameId));
+    if (!game) return;
+    game.play_status = play.status || 'untested';
+    game.play_status_stale = play.stale ? 1 : 0;
+    game.play_status_updated_at = play.updated_at || '';
+    game.last_booted_at = play.last_booted_at || game.last_booted_at || '';
+    refreshRuntimeCards([gameId]);
+  }
+
+  function analysisText(value, fallback = '—') {
+    const text = String(value ?? '').trim();
+    return escapeHtml(text || fallback);
+  }
+
+  function analysisList(items) {
+    const values = Array.isArray(items) ? items.filter((v) => String(v || '').trim()) : [];
+    if (!values.length) return '<span class="gba-analysis-empty">없음</span>';
+    return `<div class="gba-analysis-chip-list">${values.map((v) => `<span class="gba-analysis-chip">${escapeHtml(String(v))}</span>`).join('')}</div>`;
+  }
+
+  function analysisRow(label, value, options = {}) {
+    const content = options.html ? value : analysisText(value);
+    return `<div class="gba-analysis-row"><span>${escapeHtml(label)}</span><strong class="${options.mono ? 'mono' : ''}">${content}</strong></div>`;
+  }
+
+  function healthStatusInfo(status) {
+    const value = String(status || 'unverified').toLowerCase();
+    const map = {
+      pass: ['진단 통과', 'good'],
+      missing_file: ['파일 없음', 'bad'],
+      path_mismatch: ['경로 불일치', 'warn'],
+      bios_required: ['BIOS 필요', 'warn'],
+      chd_required: ['CHD 필요', 'bad'],
+      incomplete: ['참조 파일 누락', 'warn'],
+      unsupported: ['코어 미지원', 'bad'],
+      reclassify_required: ['재분류 필요', 'warn'],
+      unverified: ['판정 미확인', 'neutral'],
+    };
+    const item = map[value] || map.unverified;
+    return { label: item[0], className: item[1] };
+  }
+
+  async function setRomPlayStatus(gameId, status) {
+    try {
+      const res = await apiCall('set_play_status', { game_id: gameId, status });
+      if (!res || !res.success) throw new Error((res && res.error) || '플레이 상태를 저장하지 못했습니다.');
+      applyPlayStateToGame(gameId, res.play);
+      if (state.analysisDetailData && String(state.analysisDetailGameId) === String(gameId)) {
+        state.analysisDetailData.play = res.play;
+        renderRomAnalysisDetail(state.analysisDetailData);
+      }
+      showToast(status === 'verified' ? '플레이 가능 상태로 확인했습니다.' : status === 'issue' ? '실행 문제 상태로 기록했습니다.' : '플레이 확인 상태를 초기화했습니다.');
+    } catch (err) {
+      showToast(err && err.message ? err.message : '플레이 상태 저장에 실패했습니다.', true);
+    }
+  }
+
+  function closeRomAnalysis() {
+    const modal = $('gbaAnalysisModal');
+    if (modal) modal.style.display = 'none';
+    state.analysisDetailGameId = null;
+    state.analysisDetailData = null;
+  }
+
+  function renderRomAnalysisDetail(data) {
+    const content = $('gbaAnalysisContent');
+    const loading = $('gbaAnalysisLoading');
+    const errorEl = $('gbaAnalysisError');
+    if (!content) return;
+    if (loading) loading.style.display = 'none';
+    if (errorEl) errorEl.style.display = 'none';
+    content.style.display = 'block';
+
+    const health = data.health || {};
+    const healthInfo = healthStatusInfo(health.status);
+    const play = data.play || { status: 'untested' };
+    const playInfo = getPlayStatusInfo(play.status);
+    const analysis = data.analysis || {};
+    const identity = data.identity || {};
+    const file = data.file || {};
+    const hashes = data.hashes || {};
+    const bios = data.bios || {};
+    const confidence = Number(analysis.metadata_confidence ?? identity.metadata_confidence ?? 0);
+    const emulatorSupported = !!analysis.emulatorjs_supported;
+    const analyzerPlayable = !!analysis.is_playable;
+    const cacheText = data.analysis_cache_reused
+      ? '저장된 상세 분석 캐시 사용'
+      : (data.analysis_error ? '기존 상세 분석 표시' : '이번 조회에서 상세 분석 갱신');
+
+    const warnings = Array.isArray(analysis.analysis_warnings) ? analysis.analysis_warnings : [];
+    const conflicts = Array.isArray(analysis.analysis_conflicts) ? analysis.analysis_conflicts : [];
+    const missingDisks = Array.isArray(analysis.disk_missing_files) ? analysis.disk_missing_files : [];
+    const resolvedDisks = Array.isArray(analysis.resolved_disk_files) ? analysis.resolved_disk_files : [];
+
+    content.innerHTML = `
+      <div class="gba-analysis-heading">
+        <div>
+          <h4>${analysisText(data.title)}</h4>
+          <p>${analysisText(file.name)}</p>
+        </div>
+        <span class="gba-analysis-cache-note">${escapeHtml(cacheText)}</span>
+      </div>
+
+      ${data.analysis_error ? `<div class="gba-analysis-notice warn"><i class="fa-solid fa-triangle-exclamation"></i><span>새 상세 분석에 실패해 저장된 정보를 표시합니다. ${escapeHtml(data.analysis_error)}</span></div>` : ''}
+      ${play.stale ? `<div class="gba-analysis-notice warn"><i class="fa-solid fa-clock-rotate-left"></i><span>ROM 또는 진단 기준이 변경되어 이전 플레이 확인은 만료되었습니다.</span></div>` : ''}
+
+      <div class="gba-analysis-summary-grid">
+        <div class="gba-analysis-summary ${healthInfo.className}"><span>정적 진단</span><strong>${escapeHtml(healthInfo.label)}</strong></div>
+        <div class="gba-analysis-summary play-${playInfo.className}"><span>실제 실행</span><strong><i class="fa-solid ${playInfo.icon}"></i> ${escapeHtml(playInfo.label)}</strong></div>
+        <div class="gba-analysis-summary"><span>분석 신뢰도</span><strong>${confidence > 0 ? `${confidence}%` : '미확인'}</strong></div>
+        <div class="gba-analysis-summary ${emulatorSupported ? 'good' : 'neutral'}"><span>EmulatorJS</span><strong>${emulatorSupported ? '지원 판정' : '지원 미확인'}</strong></div>
+      </div>
+
+      <section class="gba-analysis-section gba-play-verify-panel">
+        <div class="gba-analysis-section-title"><i class="fa-solid fa-gamepad"></i><span>실제 플레이 확인</span></div>
+        <p>${escapeHtml(playInfo.desc)}${play.last_booted_at ? ` · 마지막 부팅 확인 ${escapeHtml(play.last_booted_at)}` : ''}</p>
+        <div class="gba-analysis-play-actions">
+          <button class="gba-btn gba-btn-secondary ${play.status === 'verified' ? 'active' : ''}" data-play-status="verified"><i class="fa-solid fa-circle-check"></i> 실제 플레이 가능</button>
+          <button class="gba-btn gba-btn-secondary ${play.status === 'issue' ? 'active' : ''}" data-play-status="issue"><i class="fa-solid fa-triangle-exclamation"></i> 플레이 문제 있음</button>
+          <button class="gba-btn gba-btn-secondary" data-play-status="untested"><i class="fa-solid fa-rotate-left"></i> 확인 초기화</button>
+        </div>
+      </section>
+
+      <div class="gba-analysis-columns">
+        <section class="gba-analysis-section">
+          <div class="gba-analysis-section-title"><i class="fa-solid fa-fingerprint"></i><span>ROM 식별</span></div>
+          ${analysisRow('플랫폼', analysis.platform || identity.platform)}
+          ${analysisRow('코어', analysis.core || identity.core)}
+          ${analysisRow('게임 코드', analysis.game_code || identity.game_code, { mono: true })}
+          ${analysisRow('시리얼', analysis.serial_code || identity.serial_code, { mono: true })}
+          ${analysisRow('정규화 제목', identity.normalized_title)}
+          ${analysisRow('지역 / 리비전', [identity.region_tag, identity.revision_tag].filter(Boolean).join(' · '))}
+          ${analysisRow('판정 근거', analysis.source_system || identity.source_system)}
+          ${analysisRow('분석 출처', analysis.metadata_source || identity.metadata_source)}
+          ${analysisRow('Identity 상태', analysis.identity_status)}
+        </section>
+
+        <section class="gba-analysis-section">
+          <div class="gba-analysis-section-title"><i class="fa-solid fa-file-shield"></i><span>파일 / 해시</span></div>
+          ${analysisRow('파일 존재', file.exists ? '확인됨' : '찾을 수 없음')}
+          ${analysisRow('파일 크기', formatBytes(Number(file.size_bytes || 0)))}
+          ${analysisRow('상대 경로', file.relative_path || file.name, { mono: true })}
+          ${file.server_path ? analysisRow('서버 경로', file.server_path, { mono: true }) : ''}
+          ${analysisRow('CRC32', hashes.crc32, { mono: true })}
+          ${analysisRow('MD5', hashes.md5, { mono: true })}
+          ${analysisRow('SHA1', hashes.sha1, { mono: true })}
+        </section>
+      </div>
+
+      <div class="gba-analysis-columns">
+        <section class="gba-analysis-section">
+          <div class="gba-analysis-section-title"><i class="fa-solid fa-microchip"></i><span>BIOS / 디스크 구성</span></div>
+          ${analysisRow('필요 BIOS', analysis.needed_bios || bios.name)}
+          ${analysisRow('BIOS 상태', (analysis.needed_bios || bios.name) ? (bios.available ? '파일 확인됨' : '파일 없음') : '불필요 / 미확인')}
+          ${analysisRow('BIOS 필수 판정', analysis.bios_mandatory ? '필수' : (analysis.bios_needed ? '필요 가능성 있음' : '아님'))}
+          ${analysisRow('Parent ROM', analysis.parent_hint)}
+          ${analysisRow('필수 CHD', analysis.required_chd)}
+          ${analysisRow('디스크 / 트랙 수', Number(analysis.disc_count || 0) || '—')}
+          ${analysisRow('확인된 참조 파일', analysisList(resolvedDisks), { html: true })}
+          ${analysisRow('누락 참조 파일', analysisList(missingDisks), { html: true })}
+        </section>
+
+        <section class="gba-analysis-section">
+          <div class="gba-analysis-section-title"><i class="fa-solid fa-chart-simple"></i><span>rom-analyzer 판정</span></div>
+          ${analysisRow('분석상 플레이 가능', analyzerPlayable ? '가능 판정' : '보장하지 않음')}
+          ${analysisRow('분석 신뢰도', confidence > 0 ? `${confidence}%` : '—')}
+          ${analysisRow('Arcade 매칭', Number(analysis.total_roms || 0) > 0 ? `${Number(analysis.matched_count || 0)} / ${Number(analysis.total_roms || 0)} (${Number(analysis.match_rate || 0).toFixed(1)}%)` : '해당 없음')}
+          ${analysisRow('분석 방법', analysisList(analysis.analysis_methods), { html: true })}
+          ${health.reason ? `<div class="gba-analysis-reason"><strong>진단 사유</strong><span>${escapeHtml(health.reason)}</span></div>` : ''}
+        </section>
+      </div>
+
+      <section class="gba-analysis-section">
+        <div class="gba-analysis-section-title"><i class="fa-solid fa-display"></i><span>EmulatorJS 호환성</span></div>
+        <div class="gba-analysis-inline-grid">
+          ${analysisRow('지원 판정', emulatorSupported ? '지원' : '미지원 / 미확인')}
+          ${analysisRow('권장 코어', analysis.emulatorjs_core)}
+          ${analysisRow('시스템', analysis.emulatorjs_system)}
+        </div>
+        ${analysis.emulatorjs_reason ? `<div class="gba-analysis-reason"><strong>판정 이유</strong><span>${escapeHtml(analysis.emulatorjs_reason)}</span></div>` : ''}
+      </section>
+
+      <section class="gba-analysis-section">
+        <div class="gba-analysis-section-title"><i class="fa-solid fa-triangle-exclamation"></i><span>경고 / 충돌</span></div>
+        <div class="gba-analysis-warning-grid">
+          <div><strong>경고</strong>${analysisList(warnings)}</div>
+          <div><strong>충돌</strong>${analysisList(conflicts)}</div>
+        </div>
+      </section>
+    `;
+
+    content.querySelectorAll('[data-play-status]').forEach((btn) => {
+      btn.onclick = () => setRomPlayStatus(data.game_id, btn.dataset.playStatus);
+    });
+  }
+
+  async function showRomAnalysis(game) {
+    const modal = $('gbaAnalysisModal');
+    const loading = $('gbaAnalysisLoading');
+    const content = $('gbaAnalysisContent');
+    const errorEl = $('gbaAnalysisError');
+    if (!modal) return;
+    state.analysisDetailGameId = game.id;
+    state.analysisDetailData = null;
+    modal.style.display = 'flex';
+    if (loading) loading.style.display = 'flex';
+    if (content) content.style.display = 'none';
+    if (errorEl) errorEl.style.display = 'none';
+    if ($('gbaAnalysisCloseBtn')) $('gbaAnalysisCloseBtn').onclick = closeRomAnalysis;
+    if ($('gbaAnalysisOkBtn')) $('gbaAnalysisOkBtn').onclick = closeRomAnalysis;
+    try {
+      const data = await apiCall('analysis_detail', { game_id: game.id });
+      if (!data || !data.success) throw new Error((data && data.error) || 'ROM 분석 정보를 불러오지 못했습니다.');
+      if (String(state.analysisDetailGameId) !== String(game.id)) return;
+      state.analysisDetailData = data;
+      applyPlayStateToGame(game.id, data.play);
+      renderRomAnalysisDetail(data);
+    } catch (err) {
+      if (loading) loading.style.display = 'none';
+      if (content) content.style.display = 'none';
+      if (errorEl) {
+        errorEl.style.display = 'flex';
+        errorEl.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i><span>${escapeHtml(err && err.message ? err.message : 'ROM 분석 정보를 불러오지 못했습니다.')}</span>`;
+      }
+    }
+  }
+
   function createGameCard(game) {
     const card = document.createElement('div');
     card.className = 'gba-card';
@@ -502,7 +754,6 @@
     const sysInfo = getSystemInfo(game);
     const metaConfidence = Number(game.metadata_confidence || 0);
     const metaConfidenceLabel = metadataConfidenceLabel(metaConfidence);
-    const metaSource = game.metadata_source || '';
 
     // 커버 영역 (브라우저 디스크 캐시 즉시 활용)
     let coverHtml = '';
@@ -539,6 +790,7 @@
         <div class="gba-card-badges">
           <span class="gba-badge ${sysInfo.colorClass}" title="${escapeHtml(sysInfo.name)}">${escapeHtml(sysInfo.label)}</span>
           ${game.has_save ? `<span class="gba-badge gba-badge-save" title="클라우드 세이브 보관됨"><i class="fa-solid fa-floppy-disk"></i> SAVE</span>` : ''}
+          ${playStatusBadgeHtml(game)}
           ${game.health_status === 'missing_file' ? `<span class="gba-badge" style="background: rgba(220, 38, 38, 0.95); color: #fff; font-weight: 700;" title="DB에 등록된 ROM 파일을 찾을 수 없습니다."><i class="fa-solid fa-file-circle-xmark"></i> 파일 없음</span>` : ''}
           ${game.health_status === 'path_mismatch' ? `<span class="gba-badge" style="background: rgba(217, 119, 6, 0.95); color: #fff; font-weight: 700;" title="DB 경로와 실제 ROM 위치가 다릅니다. 라이브러리 동기화가 필요합니다."><i class="fa-solid fa-route"></i> 경로 불일치</span>` : ''}
           ${game.health_status === 'incomplete' ? `<span class="gba-badge" style="background: rgba(245, 158, 11, 0.9); color: #000; font-weight: 700;" title="M3U/CUE/GDI 등에서 참조하는 파일이 누락되었습니다."><i class="fa-solid fa-triangle-exclamation"></i> 참조 파일 누락</span>` : ''}
@@ -547,7 +799,7 @@
           ${game.health_status === 'reclassify_required' ? `<span class="gba-badge" style="background: rgba(234, 88, 12, 0.95); color: #fff; font-weight: 700;" title="현재 DB 기종과 최신 rom-analyzer 판정 기종이 다릅니다."><i class="fa-solid fa-shuffle"></i> 재분류 필요</span>` : ''}
           ${game.health_status === 'unsupported' ? `<span class="gba-badge" style="background: rgba(124, 58, 237, 0.95); color: #fff; font-weight: 700;" title="ROM/BIOS는 확인되었지만 현재 EmulatorJS Stable 코어의 게임별 호환성 제한으로 구동할 수 없습니다."><i class="fa-solid fa-ban"></i> 코어 미지원</span>` : ''}
           ${game.health_status === 'chd_required' ? `<span class="gba-badge" style="background: rgba(239, 68, 68, 0.9); color: #fff; font-weight: 700;" title="대용량 CHD 음원 디스크 이미지가 필요합니다."><i class="fa-solid fa-compact-disc"></i> CHD 필요</span>` : ''}
-          ${metaConfidenceLabel ? `<span class="gba-badge" style="background: rgba(59, 130, 246, 0.16); color: #bfdbfe; border: 1px solid rgba(96, 165, 250, 0.3);" title="메타 출처: ${escapeHtml(metaSource || '미확인')} / 신뢰도: ${metaConfidence}"><i class="fa-solid fa-database"></i> 메타 ${escapeHtml(metaConfidenceLabel)}</span>` : ''}
+          ${metaConfidenceLabel ? `<span class="gba-badge" style="background: var(--gba-accent-soft); color: var(--gba-primary); border: 1px solid var(--gba-border);" title="ROM 분석 신뢰도: ${metaConfidence}"><i class="fa-solid fa-database"></i> 메타 ${escapeHtml(metaConfidenceLabel)}</span>` : ''}
         </div>
         ${isBiosMissing ? `
           <div class="gba-card-missing-bios" title="구동 필수 바이오스 '${escapeHtml(neededBios)}' 누락됨 (바이오스 업로드 필요)">
@@ -567,14 +819,14 @@
           ${game.region_tag ? `<span title="지역 태그">${escapeHtml(game.region_tag)}</span>` : ''}
           ${game.disc_number ? `<span title="디스크 번호">Disc ${escapeHtml(String(game.disc_number))}</span>` : ''}
         </div>
-        ${state.isAdmin ? `
-          <div class="gba-card-meta" style="margin-top: 6px; flex-wrap: wrap; gap: 6px;">
-            ${metaSource ? `<span title="메타 출처">출처: ${escapeHtml(metaSource)}</span>` : ''}
+        <div class="gba-card-meta gba-card-analysis-row">
+          <button type="button" class="gba-analysis-icon-btn" data-action="analysis-detail" title="ROM 분석 상세 보기" aria-label="ROM 분석 상세 보기"><i class="fa-solid fa-microscope"></i></button>
+          ${state.isAdmin ? `
             ${game.relative_path ? `<span title="ROM 상대경로"><i class="fa-regular fa-folder-open"></i> ${escapeHtml(game.relative_path)}</span>` : ''}
             ${game.revision_tag ? `<span title="리비전 태그">Rev: ${escapeHtml(game.revision_tag)}</span>` : ''}
             ${game.content_flags ? `<span title="콘텐츠 플래그">${escapeHtml(game.content_flags)}</span>` : ''}
-          </div>
-        ` : ''}
+          ` : ''}
+        </div>
       </div>
 
       <div class="gba-card-footer">
@@ -597,6 +849,10 @@
         if (action === 'toggle-fav') {
           e.stopPropagation();
           toggleFavorite(game.id);
+          return;
+        } else if (action === 'analysis-detail') {
+          e.stopPropagation();
+          showRomAnalysis(game);
           return;
         } else if (action === 'edit-title') {
           e.stopPropagation();
@@ -1006,10 +1262,10 @@
     return null;
   }
 
-  function showBiosWarningModal(game, missing) {
+  function showBiosWarningModal(game, missing, launchPlan = null) {
     const modal = $('gbaBiosWarningModal');
     if (!modal) {
-      _startEmulator(game);
+      _startEmulator(game, launchPlan);
       return;
     }
     const isParent = missing.type === 'parent';
@@ -1059,7 +1315,8 @@
 
     $('gbaBiosWarningProceedBtn').onclick = () => {
       modal.style.display = 'none';
-      _startEmulator(game);
+      prepareLaunchUi(game);
+      _startEmulator(game, launchPlan);
     };
 
     $('gbaBiosWarningUploadBtn').onclick = () => {
@@ -1075,57 +1332,218 @@
   // --------------------------------------------------------------------------
   // 에뮬레이터 실행 & 플레이어 관리 (커스텀 툴바 연동)
   // --------------------------------------------------------------------------
-  async function launchGame(game, bypassBiosCheck = false) {
-    // 목록은 DB-only로 즉시 표시하므로, 실제 실행 직전에 세이브/BIOS 상태를 보장한다.
-    try {
-      await ensureRuntimeState(game);
-    } catch (err) {
-      console.warn('[GBA] Runtime state check before launch failed:', err);
+  function handleLaunchProgressEvent(payload = {}) {
+    const phase = String(payload.phase || 'loading');
+    const loaded = Number(payload.loaded || 0);
+    const total = Number(payload.total || 0);
+    const plan = state.launchPlan || {};
+    const deliveryMode = String(payload.deliveryMode || plan.delivery_mode || 'direct');
+
+    if (phase === 'emulator-core') {
+      setLaunchProgress('emulator-core', '에뮬레이터 코어 준비 중...', 'EmulatorJS와 실행 코어를 초기화하고 있습니다.', '측정할 수 없는 준비 단계이므로 완료될 때까지 기다려 주세요.', null);
+      return;
     }
-    if (!bypassBiosCheck) {
-      const missing = checkMissingBios(game);
-      if (missing) {
-        if (!missing.isOptional) {
-          showBiosWarningModal(game, missing);
-          return;
-        } else {
-          showToast(`💡 ${missing.systemName}: ${missing.needed} 등록 권장`, false);
-        }
+    if (phase === 'bios-wait') {
+      const meta = Number(plan.bios_size || 0) > 0 ? `BIOS 크기 ${formatBytes(plan.bios_size)} · 서버 응답 대기 중` : '서버에서 BIOS 파일을 준비하고 있습니다.';
+      setLaunchProgress('bios-wait', 'BIOS 파일 준비 중...', '서버의 BIOS를 브라우저로 전송할 준비를 하고 있습니다.', meta, null);
+      return;
+    }
+    if (phase === 'bios-transfer') {
+      if (loaded <= 0) {
+        handleLaunchProgressEvent({ phase: 'bios-wait' });
+        return;
       }
+      const meta = total > 0 ? `${formatBytes(loaded)} / ${formatBytes(total)} 전송` : `${formatBytes(loaded)} 전송됨`;
+      const percent = total > 0 ? Math.round((loaded / total) * 100) : null;
+      setLaunchProgress('bios-transfer', 'BIOS 전송 중...', '서버의 BIOS를 브라우저 메모리로 전송하고 있습니다.', meta, percent);
+      return;
     }
-    await _startEmulator(game);
+    if (phase === 'bios-ready') {
+      setLaunchProgress('bios-ready', 'BIOS 준비 완료', 'BIOS 전송이 완료되었습니다.', '게임 데이터를 준비합니다.', 100);
+      return;
+    }
+    if (phase === 'rom-wait') {
+      let title = '게임 데이터 요청 중...';
+      let desc = '서버에서 ROM 데이터를 준비하고 있습니다.';
+      if (deliveryMode === 'bundle_zip') {
+        title = '디스크 번들 준비 중...';
+        desc = '서버에서 CUE/GDI와 관련 디스크를 실행용 ZIP으로 구성하고 있습니다.';
+      } else if (deliveryMode === 'convert_7z') {
+        title = '실행 데이터 변환 중...';
+        desc = '서버에서 7z ROM을 EmulatorJS용 ZIP으로 변환하고 있습니다.';
+      } else if (deliveryMode === 'zip') {
+        desc = '서버에서 압축 ROM 데이터를 준비하고 있습니다.';
+      }
+      const sourceSize = Number(plan.rom_source_size || 0);
+      const meta = sourceSize > 0 ? `원본 데이터 ${formatBytes(sourceSize)} · 첫 응답 대기 중` : '첫 데이터가 도착할 때까지 기다려 주세요.';
+      setLaunchProgress('rom-wait', title, desc, meta, null);
+      return;
+    }
+    if (phase === 'rom-transfer') {
+      if (loaded <= 0) {
+        handleLaunchProgressEvent({ phase: 'rom-wait', deliveryMode });
+        return;
+      }
+      const meta = total > 0 ? `${formatBytes(loaded)} / ${formatBytes(total)} 전송` : `${formatBytes(loaded)} 전송됨`;
+      const percent = total > 0 ? Math.round((loaded / total) * 100) : null;
+      setLaunchProgress('rom-transfer', '게임 데이터 전송 중...', '서버에서 브라우저로 게임 데이터를 전송하고 있습니다.', meta, percent);
+      return;
+    }
+    if (phase === 'rom-unpack') {
+      let title = 'ROM 압축 해제 중...';
+      let desc = '브라우저에서 압축된 게임 데이터를 풀고 있습니다.';
+      if (deliveryMode === 'bundle_zip') {
+        title = '디스크 번들 압축 해제 중...';
+        desc = '브라우저에서 실행용 디스크 번들을 준비하고 있습니다.';
+      } else if (deliveryMode === 'convert_7z') {
+        title = '변환된 게임 데이터 압축 해제 중...';
+      }
+      const completed = total > 0 ? formatBytes(total) : (loaded > 0 ? formatBytes(loaded) : '완료');
+      setLaunchProgress('rom-unpack', title, desc, `전송 완료: ${completed}`, null);
+      return;
+    }
+    if (phase === 'rom-ready') {
+      const completed = total > 0 ? formatBytes(total) : (loaded > 0 ? formatBytes(loaded) : '완료');
+      setLaunchProgress('rom-ready', '게임 데이터 준비 완료', 'ROM 데이터를 에뮬레이터 코어에 전달하고 있습니다.', `전송 완료: ${completed}`, 100);
+      return;
+    }
+    if (phase === 'state-wait') {
+      setLaunchProgress('state-wait', '저장 상태 준비 중...', '이전 플레이 상태를 서버에서 확인하고 있습니다.', '저장 상태 파일 응답을 기다리고 있습니다.', null);
+      return;
+    }
+    if (phase === 'state-transfer') {
+      if (loaded <= 0) {
+        handleLaunchProgressEvent({ phase: 'state-wait' });
+        return;
+      }
+      const meta = total > 0 ? `${formatBytes(loaded)} / ${formatBytes(total)} 전송` : `${formatBytes(loaded)} 전송됨`;
+      const percent = total > 0 ? Math.round((loaded / total) * 100) : null;
+      setLaunchProgress('state-transfer', '저장 상태 복원 중...', '저장 상태 데이터를 브라우저로 가져오고 있습니다.', meta, percent);
+      return;
+    }
+    if (phase === 'state-ready') {
+      setLaunchProgress('state-ready', '저장 상태 준비 완료', '이전 플레이 상태를 코어에 적용하고 있습니다.', '복원 데이터 전송 완료', 100);
+      return;
+    }
+    if (phase === 'starting') {
+      setLaunchProgress('starting', '에뮬레이터 시작 중...', '코어 초기화와 첫 화면 구성을 마무리하고 있습니다.', '거의 완료되었습니다.', null);
+      return;
+    }
+    if (phase === 'error') {
+      showLaunchFailure(payload.message || '게임 데이터를 불러오지 못했습니다.', payload.detail || '네트워크 연결과 서버 파일 상태를 확인해 주세요.');
+    }
   }
 
-  async function _startEmulator(game) {
+  function prepareLaunchUi(game) {
+    if (state.autoSaveIntervalId) {
+      clearInterval(state.autoSaveIntervalId);
+      state.autoSaveIntervalId = null;
+    }
+    stopGamepadPoller();
     state.activeGame = game;
     state.isPaused = false;
     state.currentSpeed = 1;
     state.isMuted = false;
-    hideLaunchProgress();
-    setLaunchProgress('prepare', '에뮬레이터 준비 중...', '플레이어를 초기화하고 있습니다.', '대용량 ROM은 다운로드와 압축 해제에 시간이 걸릴 수 있습니다.');
-
-    if ($('gbaCurrentGameTitle')) {
-      $('gbaCurrentGameTitle').textContent = game.title;
-    }
+    if ($('gbaCurrentGameTitle')) $('gbaCurrentGameTitle').textContent = game.title;
     if ($('gbaPlayerBadge')) {
       const sys = getSystemInfo(game);
       $('gbaPlayerBadge').textContent = sys.label;
     }
-    $('gbaPlayerModal').style.display = 'flex';
-    setSaveStatus('클라우드 세이브 확인 중...', 'saving');
+    const playerModal = $('gbaPlayerModal');
+    if (playerModal) playerModal.style.display = 'flex';
+    setSaveStatus('실행 상태 확인 중...', 'saving');
     updatePlayerToolbarUI();
+    setLaunchProgress('plan', '게임 실행 준비 중...', '실행 환경을 확인하고 있습니다.', 'ROM, BIOS, 저장 상태를 확인하는 중입니다.', null);
+  }
 
-    // 유저별 재생 기록 업데이트
-    try {
-      const res = await apiCall('record_play', { game_id: game.id });
-      const found = state.games.find((g) => g.id === game.id);
-      if (found) {
-        found.play_count = (found.play_count || 0) + 1;
-        found.last_played_at = (res && res.last_played_at) || new Date(Date.now() + 9 * 3600 * 1000).toISOString().replace('T', ' ').substring(0, 19);
-      }
-    } catch (e) {
-      console.warn('[GBA] Record play error:', e);
+  function applyLaunchPlanToGame(game, plan) {
+    if (!game || !plan) return;
+    game.has_save = Number(plan.has_save || 0);
+    game.has_state = Number(plan.has_state || 0);
+    game.runtime_state_loaded = true;
+    game.has_needed_bios = plan.bios_available ? 1 : 0;
+    if (!game.needed_bios && plan.bios_name) game.needed_bios = plan.bios_name;
+    if (plan.rom_url) game.rom_url = plan.rom_url;
+    if (plan.state_url) game.state_url = plan.state_url;
+  }
+
+  function abortLaunchUi() {
+    if (launchSlowTimerId) {
+      clearTimeout(launchSlowTimerId);
+      launchSlowTimerId = null;
     }
+    if (state.autoSaveIntervalId) {
+      clearInterval(state.autoSaveIntervalId);
+      state.autoSaveIntervalId = null;
+    }
+    stopGamepadPoller();
+    const container = $('gbaEmulatorContainer');
+    if (container) container.innerHTML = '';
+    window.__GBA_ON_GAME_START__ = null;
+    window.__GBA_ON_LAUNCH_PROGRESS__ = null;
+    state.launchPlan = null;
+    hideLaunchProgress();
+    const playerModal = $('gbaPlayerModal');
+    if (playerModal) playerModal.style.display = 'none';
+    state.activeGame = null;
+  }
+
+  function showLaunchFailure(message, detail = '') {
+    const safeMessage = String(message || '게임 실행 중 오류가 발생했습니다.');
+    const safeDetail = String(detail || '네트워크 연결과 ROM/BIOS 파일 상태를 확인한 뒤 다시 시도하세요.');
+    setLaunchProgress('error', '게임 실행에 실패했습니다', safeMessage, safeDetail, null);
+  }
+
+  async function launchGame(game, bypassBiosCheck = false) {
+    prepareLaunchUi(game);
+    try {
+      const plan = await apiCall('launch_plan', { game_id: game.id });
+      if (!plan || !plan.success) {
+        throw new Error((plan && (plan.error || plan.blocked_reason)) || '실행 정보를 확인할 수 없습니다.');
+      }
+      if (!plan.launchable) {
+        showLaunchFailure(plan.blocked_reason || '이 게임은 현재 실행할 수 없습니다.');
+        return;
+      }
+
+      state.launchPlan = plan;
+      applyLaunchPlanToGame(game, plan);
+
+      if (!bypassBiosCheck) {
+        const missing = checkMissingBios(game);
+        if (missing) {
+          if (!missing.isOptional) {
+            hideLaunchProgress();
+            const playerModal = $('gbaPlayerModal');
+            if (playerModal) playerModal.style.display = 'none';
+            showBiosWarningModal(game, missing, plan);
+            return;
+          }
+          showToast(`💡 ${missing.systemName}: ${missing.needed} 등록 권장`, false);
+        }
+      }
+      await _startEmulator(game, plan);
+    } catch (err) {
+      console.error('[GBA] Launch plan error:', err);
+      showLaunchFailure(err && err.message ? err.message : '실행 환경 확인에 실패했습니다.');
+    }
+  }
+
+  async function _startEmulator(game, launchPlan = null) {
+    state.activeGame = game;
+    state.launchPlan = launchPlan || state.launchPlan || null;
+    setLaunchProgress('emulator-core', '에뮬레이터 코어 준비 중...', 'EmulatorJS와 실행 코어를 초기화하고 있습니다.', '코어 준비 시간은 다운로드 환경에 따라 달라질 수 있습니다.', null);
+
+    // 재생 기록은 게임 실행에 필수 작업이 아니므로 코어 준비와 병렬 처리한다.
+    apiCall('record_play', { game_id: game.id })
+      .then((res) => {
+        const found = state.games.find((g) => g.id === game.id);
+        if (found) {
+          found.play_count = (found.play_count || 0) + 1;
+          found.last_played_at = (res && res.last_played_at) || new Date(Date.now() + 9 * 3600 * 1000).toISOString().replace('T', ' ').substring(0, 19);
+        }
+      })
+      .catch((e) => console.warn('[GBA] Record play error:', e));
 
     const container = $('gbaEmulatorContainer');
     container.innerHTML = '';
@@ -1230,45 +1648,36 @@
       }
     }
 
-    // 시스템 바이오스(BIOS) EJS_biosUrl 자동 매핑 (DB needed_bios 우선 연동)
+    // 실행 계획이 있으면 서버가 확정한 BIOS/ROM/세이브 경로를 사용한다.
+    const activePlan = launchPlan || state.launchPlan || null;
     const biosList = (state.available_bios || []).map((b) => b.toLowerCase());
-    let neededBiosFile = null;
+    let neededBiosFile = activePlan && activePlan.bios_available && activePlan.bios_name ? activePlan.bios_name : null;
 
-    if (game.needed_bios) {
-      neededBiosFile = game.needed_bios;
-    } else {
-      // 폴백: DB에 바이오스가 미기록된 레거시 롬 동적 보정
-      if (platformKey === 'neo-geo' || (isArcade && (rawStem.startsWith('mslug') || rawStem.startsWith('kof') || rawStem.startsWith('samsho') || rawStem.startsWith('fatfur') || rawStem.startsWith('garou')))) {
-        if (biosList.includes('neogeo.zip')) neededBiosFile = 'neogeo.zip';
-      } else if (isArcade && (rawStem.startsWith('olds') || rawStem.startsWith('kov') || rawStem.startsWith('orlegend') || rawStem.startsWith('dmnfrnt'))) {
-        if (biosList.includes('pgm.zip')) neededBiosFile = 'pgm.zip';
-      } else if (isArcade && (rawStem.startsWith('bldyror') || rawStem.startsWith('brvblade') || rawStem.startsWith('sfex') || rawStem.startsWith('rvschool') || rawStem.startsWith('starglad') || rawStem.startsWith('strider2') || rawStem.startsWith('techromn') || rawStem.startsWith('jgts') || rawStem.startsWith('raiden2') || rawStem.startsWith('raidendx'))) {
-        if (biosList.includes('acpsx.zip')) neededBiosFile = 'acpsx.zip';
-        else if (biosList.includes('atluspsx.zip')) neededBiosFile = 'atluspsx.zip';
-        else if (biosList.includes('boardrom.zip')) neededBiosFile = 'boardrom.zip';
-      } else if (coreToUse === 'psx' || platformKey === 'ps1') {
-        const psxBios = biosList.find((b) => b.startsWith('scph5501') || b.startsWith('scph1001') || b.startsWith('scph5500') || b.startsWith('scph5502') || b.startsWith('scph7001'));
-        if (psxBios) neededBiosFile = psxBios;
-      } else if (platformKey === 'fds' || (game.filename || '').toLowerCase().endsWith('.fds')) {
-        if (biosList.includes('disksys.rom')) neededBiosFile = 'disksys.rom';
-      } else if (platformKey === 'segacd' || coreToUse === 'segacd') {
-        const cdBios = biosList.find((b) => b.startsWith('bios_cd'));
-        if (cdBios) neededBiosFile = cdBios;
-      } else if (platformKey === 'pce' || coreToUse === 'pce') {
-        if (biosList.includes('syscard3.pce')) neededBiosFile = 'syscard3.pce';
-      } else if (platformKey === 'saturn' || coreToUse === 'saturn' || coreToUse === 'segasaturn') {
-        const saturnBios = biosList.find((b) => b.includes('saturn'));
-        if (saturnBios) neededBiosFile = saturnBios;
-      } else if (platformKey === '3do' || coreToUse === '3do') {
-        const d3doBios = biosList.find((b) => b.includes('3do'));
-        if (d3doBios) neededBiosFile = d3doBios;
+    if (!activePlan) {
+      if (game.needed_bios) {
+        neededBiosFile = game.needed_bios;
+      } else {
+        if (platformKey === 'neo-geo' || (isArcade && (rawStem.startsWith('mslug') || rawStem.startsWith('kof') || rawStem.startsWith('samsho') || rawStem.startsWith('fatfur') || rawStem.startsWith('garou')))) {
+          if (biosList.includes('neogeo.zip')) neededBiosFile = 'neogeo.zip';
+        } else if (isArcade && (rawStem.startsWith('olds') || rawStem.startsWith('kov') || rawStem.startsWith('orlegend') || rawStem.startsWith('dmnfrnt'))) {
+          if (biosList.includes('pgm.zip')) neededBiosFile = 'pgm.zip';
+        } else if (coreToUse === 'psx' || platformKey === 'ps1') {
+          const psxBios = biosList.find((b) => b.startsWith('scph5501') || b.startsWith('scph1001') || b.startsWith('scph5500') || b.startsWith('scph5502') || b.startsWith('scph7001'));
+          if (psxBios) neededBiosFile = psxBios;
+        }
       }
     }
 
-    const biosUrl = neededBiosFile ? `${window.location.origin}/api/webhook/bookoasis_gamebooks/bios/${encodeURIComponent(neededBiosFile)}?game_id=${encodeURIComponent(game.id)}` : null;
-    const gameUrl = window.location.origin + game.rom_url;
+    const biosUrl = activePlan && activePlan.bios_url
+      ? window.location.origin + activePlan.bios_url
+      : (neededBiosFile ? `${window.location.origin}/api/webhook/bookoasis_gamebooks/bios/${encodeURIComponent(neededBiosFile)}?game_id=${encodeURIComponent(game.id)}` : null);
+    const gameUrl = window.location.origin + ((activePlan && activePlan.rom_url) || game.rom_url);
     const gameName = isArcade ? (game.game_code || rawStem) : game.title;
-    const loadStateUrl = game.has_state ? window.location.origin + game.state_url : null;
+    const loadStateUrl = activePlan && activePlan.state_url
+      ? window.location.origin + activePlan.state_url
+      : (game.has_state ? window.location.origin + game.state_url : null);
+    const deliveryMode = String((activePlan && activePlan.delivery_mode) || 'direct');
+    const browserUnpack = !!(activePlan && activePlan.browser_unpack);
 
     // SPA 환경에서의 전역 변수 충돌(let EJS_STORAGE redeclaration) 및 WASM 메모리 누수 방지를 위해
     // 완전히 독립된 iframe 샌드박스를 생성하여 EmulatorJS를 격리 실행
@@ -1313,19 +1722,40 @@
       }
     };
 
-    __GBA_PROGRESS__.emit({ phase: 'boot' });
-    ${biosUrl ? `__GBA_PROGRESS__.emit({ phase: 'bios-check' });` : `__GBA_PROGRESS__.emit({ phase: 'rom-fetch' });`}
+    const __GBA_GAME_URL__ = ${JSON.stringify(gameUrl)};
+    const __GBA_BIOS_URL__ = ${JSON.stringify(biosUrl || '')};
+    const __GBA_STATE_URL__ = ${JSON.stringify(loadStateUrl || '')};
+    const __GBA_DELIVERY_MODE__ = ${JSON.stringify(deliveryMode)};
+    const __GBA_BROWSER_UNPACK__ = ${JSON.stringify(browserUnpack)};
+
+    __GBA_PROGRESS__.emit({ phase: 'emulator-core', deliveryMode: __GBA_DELIVERY_MODE__ });
+
+    function __gbaTargetPhase(url, waitPhase) {
+      if (url === __GBA_GAME_URL__) return waitPhase === 'wait' ? 'rom-wait' : 'rom-transfer';
+      if (__GBA_BIOS_URL__ && url === __GBA_BIOS_URL__) return waitPhase === 'wait' ? 'bios-wait' : 'bios-transfer';
+      if (__GBA_STATE_URL__ && url === __GBA_STATE_URL__) return waitPhase === 'wait' ? 'state-wait' : 'state-transfer';
+      return '';
+    }
 
     try {
       const origFetch = window.fetch ? window.fetch.bind(window) : null;
       if (origFetch) {
         window.fetch = async function(input, init) {
           const url = typeof input === 'string' ? input : ((input && input.url) || '');
-          const response = await origFetch(input, init);
-          if (url === ${JSON.stringify(biosUrl || '')}) {
-            __GBA_PROGRESS__.emit({ phase: 'bios-ready' });
+          const waitPhase = __gbaTargetPhase(url, 'wait');
+          if (waitPhase) __GBA_PROGRESS__.emit({ phase: waitPhase, deliveryMode: __GBA_DELIVERY_MODE__ });
+          try {
+            const response = await origFetch(input, init);
+            if (!response.ok && waitPhase) {
+              __GBA_PROGRESS__.emit({ phase: 'error', message: '서버가 게임 실행 파일 요청을 처리하지 못했습니다.', detail: 'HTTP ' + response.status });
+            }
+            // fetch()는 응답 헤더 시점에 resolve되므로 전송 완료로 오인하지 않는다.
+            // 실제 완료/바이트 진행률은 XHR 이벤트가 제공되는 경우에만 표시한다.
+            return response;
+          } catch (error) {
+            if (waitPhase) __GBA_PROGRESS__.emit({ phase: 'error', message: '게임 실행 데이터를 가져오지 못했습니다.', detail: String(error && error.message ? error.message : error) });
+            throw error;
           }
-          return response;
         };
       }
     } catch (e) {}
@@ -1341,26 +1771,45 @@
           return origOpen.apply(xhr, arguments);
         };
         xhr.addEventListener('loadstart', function() {
-          if (trackedUrl === ${JSON.stringify(gameUrl)}) {
-            __GBA_PROGRESS__.emit({ phase: 'rom-fetch', loaded: 0, total: 0 });
-          } else if (trackedUrl === ${JSON.stringify(biosUrl || '')}) {
-            __GBA_PROGRESS__.emit({ phase: 'bios-download', loaded: 0, total: 0 });
-          }
+          const phase = __gbaTargetPhase(trackedUrl, 'wait');
+          if (!phase) return;
+          __GBA_PROGRESS__.lastLoaded = 0;
+          __GBA_PROGRESS__.lastTotal = 0;
+          __GBA_PROGRESS__.emit({ phase, deliveryMode: __GBA_DELIVERY_MODE__ });
         });
         xhr.addEventListener('progress', function(e) {
-          if (trackedUrl === ${JSON.stringify(gameUrl)}) {
-            __GBA_PROGRESS__.updateDownload('rom-fetch', e.loaded, e.lengthComputable ? e.total : 0);
-          } else if (trackedUrl === ${JSON.stringify(biosUrl || '')}) {
-            __GBA_PROGRESS__.updateDownload('bios-download', e.loaded, e.lengthComputable ? e.total : 0);
-          }
+          const phase = __gbaTargetPhase(trackedUrl, 'transfer');
+          if (!phase || Number(e.loaded || 0) <= 0) return;
+          __GBA_PROGRESS__.updateDownload(phase, e.loaded, e.lengthComputable ? e.total : 0);
         });
         xhr.addEventListener('load', function() {
-          if (trackedUrl === ${JSON.stringify(gameUrl)}) {
-            __GBA_PROGRESS__.emit({ phase: 'rom-unpack', loaded: __GBA_PROGRESS__.lastLoaded, total: __GBA_PROGRESS__.lastTotal });
-          } else if (trackedUrl === ${JSON.stringify(biosUrl || '')}) {
+          const tracked = __gbaTargetPhase(trackedUrl, 'wait');
+          if (!tracked) return;
+          if (xhr.status >= 400) {
+            __GBA_PROGRESS__.emit({ phase: 'error', message: '서버가 게임 실행 파일 요청을 처리하지 못했습니다.', detail: 'HTTP ' + xhr.status });
+            return;
+          }
+          if (trackedUrl === __GBA_GAME_URL__) {
+            __GBA_PROGRESS__.emit({
+              phase: __GBA_BROWSER_UNPACK__ ? 'rom-unpack' : 'rom-ready',
+              loaded: __GBA_PROGRESS__.lastLoaded,
+              total: __GBA_PROGRESS__.lastTotal,
+              deliveryMode: __GBA_DELIVERY_MODE__
+            });
+          } else if (trackedUrl === __GBA_BIOS_URL__) {
             __GBA_PROGRESS__.emit({ phase: 'bios-ready' });
+          } else if (__GBA_STATE_URL__ && trackedUrl === __GBA_STATE_URL__) {
+            __GBA_PROGRESS__.emit({ phase: 'state-ready' });
           }
         });
+        const emitNetworkError = function() {
+          if (__gbaTargetPhase(trackedUrl, 'wait')) {
+            __GBA_PROGRESS__.emit({ phase: 'error', message: '게임 실행 데이터 전송이 중단되었습니다.', detail: '네트워크 연결 또는 서버 파일 상태를 확인해 주세요.' });
+          }
+        };
+        xhr.addEventListener('error', emitNetworkError);
+        xhr.addEventListener('abort', emitNetworkError);
+        xhr.addEventListener('timeout', emitNetworkError);
         return xhr;
       }
       ProgressXHR.prototype = OrigXHR.prototype;
@@ -1436,39 +1885,18 @@
       return false;
     }, true);
   <\/script>
-  <script src="https://cdn.emulatorjs.org/stable/data/loader.js"><\/script>
+  <script src="https://cdn.emulatorjs.org/stable/data/loader.js" onerror="__GBA_PROGRESS__.emit({phase:'error',message:'EmulatorJS 로더를 불러오지 못했습니다.',detail:'CDN 연결 상태를 확인해 주세요.'})"><\/script>
 </body>
 </html>`;
 
     // 부모-자식 프레임 브릿지 콜백 등록
-    window.__GBA_ON_LAUNCH_PROGRESS__ = (payload = {}) => {
-      const phase = String(payload.phase || 'loading');
-      const loaded = Number(payload.loaded || 0);
-      const total = Number(payload.total || 0);
-      if (phase === 'boot') {
-        setLaunchProgress('boot', '에뮬레이터 준비 중...', '런처를 불러오고 있습니다.', '초기 스크립트와 코어를 준비하고 있습니다.');
-      } else if (phase === 'bios-check') {
-        setLaunchProgress('bios-check', '바이오스 확인 중...', '필수 바이오스를 확인하고 있습니다.', 'PS1 BIOS 확인 단계입니다.');
-      } else if (phase === 'bios-download') {
-        const meta = total > 0 ? `${formatBytes(loaded)} / ${formatBytes(total)}` : `${formatBytes(loaded)} 다운로드`;
-        const percent = total > 0 ? Math.round((loaded / total) * 100) : null;
-        setLaunchProgress('bios-download', '바이오스 다운로드 중...', '필수 바이오스를 불러오고 있습니다.', meta, percent);
-      } else if (phase === 'bios-ready') {
-        setLaunchProgress('bios-ready', '바이오스 준비 완료', '이제 게임 데이터를 불러옵니다.', '다음 단계에서 대용량 ROM 다운로드가 시작됩니다.', 100);
-      } else if (phase === 'rom-fetch') {
-        const meta = total > 0 ? `${formatBytes(loaded)} / ${formatBytes(total)}` : (loaded > 0 ? `${formatBytes(loaded)} 다운로드` : 'ROM 다운로드를 시작하는 중입니다.');
-        const percent = total > 0 ? Math.round((loaded / total) * 100) : null;
-        setLaunchProgress('rom-fetch', '게임 ZIP 다운로드 중...', '대용량 ROM 데이터를 가져오고 있습니다.', meta, percent);
-      } else if (phase === 'rom-unpack') {
-        const meta = total > 0 ? `다운로드 완료: ${formatBytes(total)}` : (loaded > 0 ? `다운로드 완료: ${formatBytes(loaded)}` : '다운로드 완료');
-        setLaunchProgress('rom-unpack', '압축 해제 중...', '브라우저에서 ZIP을 풀고 있습니다.', meta, null);
-      } else if (phase === 'starting') {
-        setLaunchProgress('starting', '에뮬레이터 시작 중...', '코어 초기화와 첫 화면 구성을 마무리하고 있습니다.', '거의 완료되었습니다.', null);
-      }
-    };
+    window.__GBA_ON_LAUNCH_PROGRESS__ = (payload = {}) => handleLaunchProgressEvent(payload);
 
     window.__GBA_ON_GAME_START__ = () => {
       setLaunchProgress('started', '게임 시작 완료', '첫 화면 진입을 마무리합니다.', '잠시 후 오버레이가 사라집니다.', 100);
+      apiCall('record_boot', { game_id: game.id })
+        .then((res) => { if (res && res.success) applyPlayStateToGame(game.id, res.play); })
+        .catch((err) => console.warn('[GBA] Boot status record error:', err));
       focusEmulator();
       setTimeout(() => {
         applyGraphicsSettings();
@@ -3925,6 +4353,11 @@
   }
 
   function setLaunchProgress(phase, title, desc = '', meta = '', percent = null) {
+    if (launchSlowTimerId) {
+      clearTimeout(launchSlowTimerId);
+      launchSlowTimerId = null;
+    }
+
     state.launchProgress = {
       visible: true,
       phase: phase || 'loading',
@@ -3939,29 +4372,65 @@
     const descEl = $('gbaLaunchDesc');
     const metaEl = $('gbaLaunchMeta');
     const barEl = $('gbaLaunchProgressBar');
+    const actionsEl = $('gbaLaunchActions');
+    const retryBtn = $('gbaLaunchRetryBtn');
+    const closeBtn = $('gbaLaunchCloseBtn');
     if (!overlay || !titleEl || !descEl || !metaEl || !barEl) return;
 
+    const isError = state.launchProgress.phase === 'error';
     overlay.style.display = 'flex';
+    overlay.classList.toggle('is-error', isError);
     titleEl.textContent = state.launchProgress.title;
     descEl.textContent = state.launchProgress.desc;
-    metaEl.textContent = state.launchProgress.meta || '대용량 ROM은 다운로드와 압축 해제에 시간이 걸릴 수 있습니다.';
+    metaEl.textContent = state.launchProgress.meta || '실행 준비 상태를 확인하고 있습니다.';
+    if (actionsEl) actionsEl.style.display = isError ? 'flex' : 'none';
 
-    if (state.launchProgress.percent === null) {
+    if (retryBtn) {
+      retryBtn.onclick = () => {
+        const game = state.activeGame;
+        if (game) launchGame(game);
+      };
+    }
+    if (closeBtn) closeBtn.onclick = abortLaunchUi;
+
+    if (isError) {
+      barEl.classList.remove('indeterminate');
+      barEl.style.width = '100%';
+    } else if (state.launchProgress.percent === null) {
       barEl.classList.add('indeterminate');
       barEl.style.width = '';
     } else {
       barEl.classList.remove('indeterminate');
       barEl.style.width = `${state.launchProgress.percent}%`;
     }
+
+    if (!isError && state.launchProgress.percent === null && state.launchProgress.phase !== 'started') {
+      const expectedPhase = state.launchProgress.phase;
+      launchSlowTimerId = setTimeout(() => {
+        if (!state.launchProgress.visible || state.launchProgress.phase !== expectedPhase) return;
+        const current = state.launchProgress.meta || '작업을 계속 진행하고 있습니다.';
+        const suffix = '응답이 평소보다 오래 걸리고 있습니다.';
+        if (!current.includes(suffix)) metaEl.textContent = `${current} · ${suffix}`;
+      }, 8000);
+    }
   }
 
   function hideLaunchProgress() {
+    if (launchSlowTimerId) {
+      clearTimeout(launchSlowTimerId);
+      launchSlowTimerId = null;
+    }
     state.launchProgress.visible = false;
     state.launchProgress.phase = 'idle';
     state.launchProgress.percent = null;
     const overlay = $('gbaLaunchOverlay');
     const barEl = $('gbaLaunchProgressBar');
-    if (overlay) overlay.style.display = 'none';
+    const actionsEl = $('gbaLaunchActions');
+    if (overlay) {
+      overlay.style.display = 'none';
+      overlay.classList.remove('is-error');
+    }
+    if (actionsEl) actionsEl.style.display = 'none';
     if (barEl) {
       barEl.classList.add('indeterminate');
       barEl.style.width = '';

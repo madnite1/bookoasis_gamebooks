@@ -3075,6 +3075,58 @@ def _derive_health_status_from_analysis(rom_info, file_path, db_core="", db_plat
     return "pass", ""
 
 
+def _build_analysis_snapshot(analysis):
+    """rom-analyzer 결과 중 UI에 노출할 수 있는 안정적인 필드만 JSON 직렬화용으로 정리합니다."""
+    analysis = analysis if isinstance(analysis, dict) else {}
+
+    def _text(value):
+        return str(value or "").strip()
+
+    def _text_list(value, basename=False):
+        items = value if isinstance(value, (list, tuple, set)) else ([] if value in (None, "") else [value])
+        result = []
+        for item in items:
+            text = _text(item)
+            if not text:
+                continue
+            if basename:
+                text = os.path.basename(text)
+            if text not in result:
+                result.append(text)
+        return result
+
+    return {
+        "core": _text(analysis.get("core")),
+        "platform": _text(analysis.get("platform")),
+        "title": _text(analysis.get("title")),
+        "game_code": _text(analysis.get("game_code")),
+        "needed_bios": _text(analysis.get("needed_bios")),
+        "bios_mandatory": bool(analysis.get("bios_mandatory")),
+        "bios_needed": bool(analysis.get("bios_needed")),
+        "parent_hint": _text(analysis.get("parent_hint")),
+        "required_chd": _text(analysis.get("required_chd")),
+        "matched_count": int(analysis.get("matched_count") or 0),
+        "total_roms": int(analysis.get("total_roms") or 0),
+        "match_rate": float(analysis.get("match_rate") or 0.0),
+        "serial_code": _text(analysis.get("serial_code")),
+        "source_system": _text(analysis.get("source_system")),
+        "metadata_source": _text(analysis.get("metadata_source")),
+        "metadata_confidence": int(analysis.get("metadata_confidence") or 0),
+        "disk_missing_files": _text_list(analysis.get("disk_missing_files"), basename=True),
+        "resolved_disk_files": _text_list(analysis.get("resolved_disk_files"), basename=True),
+        "disc_count": int(analysis.get("disc_count") or 0),
+        "identity_status": _text(analysis.get("identity_status")),
+        "analysis_methods": _text_list(analysis.get("analysis_methods")),
+        "analysis_warnings": _text_list(analysis.get("analysis_warnings")),
+        "analysis_conflicts": _text_list(analysis.get("analysis_conflicts")),
+        "is_playable": bool(analysis.get("is_playable")),
+        "emulatorjs_supported": bool(analysis.get("emulatorjs_supported")),
+        "emulatorjs_core": _text(analysis.get("emulatorjs_core")),
+        "emulatorjs_system": _text(analysis.get("emulatorjs_system")),
+        "emulatorjs_reason": _text(analysis.get("emulatorjs_reason")),
+    }
+
+
 class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
     id = "bookoasis_gamebooks"
     name = "Game Books"
@@ -3770,6 +3822,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     ("deletion_requested_at", "TEXT DEFAULT ''"),
                     ("deletion_requested_by", "INTEGER DEFAULT 0"),
                     ("deletion_error", "TEXT DEFAULT ''"),
+                    ("analysis_json", "TEXT DEFAULT ''"),
+                    ("analysis_cache_key", "TEXT DEFAULT ''"),
+                    ("play_status", "TEXT DEFAULT 'untested'"),
+                    ("play_status_updated_at", "TEXT DEFAULT ''"),
+                    ("play_status_user_id", "INTEGER DEFAULT 0"),
+                    ("play_status_health_key", "TEXT DEFAULT ''"),
+                    ("last_booted_at", "TEXT DEFAULT ''"),
                 ):
                     try:
                         conn.execute(f"ALTER TABLE games ADD COLUMN {col} {ctype}")
@@ -4376,7 +4435,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
         try:
             rows = self._db_query(
                 "SELECT id, filename, file_path, core, platform, game_code, needed_bios, health_status, missing_roms, "
-                "metadata_source, metadata_confidence, source_system, COALESCE(health_cache_key, '') AS health_cache_key "
+                "metadata_source, metadata_confidence, source_system, COALESCE(health_cache_key, '') AS health_cache_key, "
+                "COALESCE(analysis_json, '') AS analysis_json, COALESCE(analysis_cache_key, '') AS analysis_cache_key "
                 "FROM games WHERE COALESCE(deletion_status, 'active') = 'active' ORDER BY id"
             )
             total = len(rows)
@@ -4458,6 +4518,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     target = {
                         "status": "missing_file",
                         "reason": "DB에 등록된 ROM 파일을 현재 경로 또는 관리 저장소에서 찾을 수 없습니다.",
+                        "analysis_json": str(game.get("analysis_json") or ""),
+                        "analysis_cache_key": str(game.get("analysis_cache_key") or ""),
                         "metadata_source": str(game.get("metadata_source") or ""),
                         "metadata_confidence": int(game.get("metadata_confidence") or 0),
                         "source_system": str(game.get("source_system") or ""),
@@ -4471,6 +4533,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     target = {
                         "status": "path_mismatch",
                         "reason": "DB의 ROM 경로와 실제 발견 위치가 다릅니다. 라이브러리 동기화로 경로를 갱신하세요.",
+                        "analysis_json": str(game.get("analysis_json") or ""),
+                        "analysis_cache_key": str(game.get("analysis_cache_key") or ""),
                         "metadata_source": str(game.get("metadata_source") or ""),
                         "metadata_confidence": int(game.get("metadata_confidence") or 0),
                         "source_system": str(game.get("source_system") or ""),
@@ -4498,9 +4562,16 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         cache_game, engine_signature, state, path, stat_result,
                         bios_state=detected_bios_state, bundle_state=bundle_state,
                     )
+                    analysis_snapshot = _build_analysis_snapshot(analysis)
+                    analysis_json = json.dumps(analysis_snapshot, ensure_ascii=False, sort_keys=True)
+                    analysis_cache_key = self._analysis_detail_cache_key(
+                        cache_game, path, health_cache_key=final_cache_key
+                    )
                     target = {
                         "status": status,
                         "reason": reason,
+                        "analysis_json": analysis_json,
+                        "analysis_cache_key": analysis_cache_key,
                         "metadata_source": analysis.get("metadata_source") or "rom-analyzer",
                         "metadata_confidence": int(analysis.get("metadata_confidence") or 0),
                         "source_system": analysis.get("source_system") or "rom_analyzer",
@@ -4548,6 +4619,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     str(old.get("source_system") or ""),
                     str(old.get("needed_bios") or ""),
                     str(old.get("health_cache_key") or ""),
+                    str(old.get("analysis_json") or ""),
+                    str(old.get("analysis_cache_key") or ""),
                 )
                 new_values = (
                     target["status"],
@@ -4557,6 +4630,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     target["source_system"],
                     target["needed_bios"],
                     target["cache_key"],
+                    target["analysis_json"],
+                    target["analysis_cache_key"],
                 )
                 if old_values != new_values:
                     updates.append(new_values + (gid,))
@@ -4567,7 +4642,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                     try:
                         conn.executemany(
                             "UPDATE games SET health_status=?, missing_roms=?, metadata_source=?, "
-                            "metadata_confidence=?, source_system=?, needed_bios=?, health_cache_key=? WHERE id=?",
+                            "metadata_confidence=?, source_system=?, needed_bios=?, health_cache_key=?, "
+                            "analysis_json=?, analysis_cache_key=? WHERE id=?",
                             updates,
                         )
                         conn.commit()
@@ -4951,7 +5027,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "metadata_source = COALESCE(NULLIF(metadata_source, ''), ?), "
             "metadata_confidence = CASE WHEN metadata_confidence IS NULL OR metadata_confidence = 0 THEN ? ELSE metadata_confidence END, "
             "region_tag = ?, revision_tag = ?, disc_number = ?, content_flags = ?, health_cache_key = ?, "
-            "cover_path = COALESCE(cover_path, ?) WHERE id = ?"
+            "analysis_json = ?, analysis_cache_key = ?, cover_path = COALESCE(cover_path, ?) WHERE id = ?"
         )
         pending_existing_updates = []
         pending_cover_updates = []
@@ -5124,6 +5200,18 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 health_cache_key = _build_scan_health_cache_key(
                     gid, curr_file_path, rom_info, health_status, missing_roms_str
                 )
+                analysis_snapshot = _build_analysis_snapshot(rom_info)
+                analysis_json = json.dumps(analysis_snapshot, ensure_ascii=False, sort_keys=True)
+                analysis_cache_game = {
+                    "id": gid,
+                    "core": rom_info.get("core") or "",
+                    "platform": rom_info.get("platform") or "",
+                    "game_code": rom_info.get("game_code") or "",
+                    "health_cache_key": health_cache_key,
+                }
+                analysis_cache_key = self._analysis_detail_cache_key(
+                    analysis_cache_game, curr_file_path, health_cache_key=health_cache_key
+                )
 
                 existing_cover_file = self._resolve_existing_cover(
                     gid,
@@ -5157,8 +5245,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 try:
                     if gid not in existing_games:
                         self._db_execute(
-                            """INSERT OR REPLACE INTO games (id, future_id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence, region_tag, revision_tag, disc_number, content_flags, health_cache_key)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            """INSERT OR REPLACE INTO games (id, future_id, filename, file_path, title, game_code, maker_code, core, platform, size_bytes, mtime, added_at, cover_path, needed_bios, health_status, missing_roms, rom_crc32, rom_md5, rom_sha1, serial_code, normalized_title, source_system, metadata_source, metadata_confidence, region_tag, revision_tag, disc_number, content_flags, health_cache_key, analysis_json, analysis_cache_key)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 gid,
                                 future_id,
@@ -5189,6 +5277,8 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                 identity_info.get("disc_number") or 0,
                                 identity_info.get("content_flags") or "",
                                 health_cache_key,
+                                analysis_json,
+                                analysis_cache_key,
                             ),
                         )
 
@@ -5208,9 +5298,13 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                     health_cache_key = _build_scan_health_cache_key(
                                         gid, curr_file_path, rom_info, health_status, missing_roms_str
                                     )
+                                    analysis_cache_key = self._analysis_detail_cache_key(
+                                        analysis_cache_game, curr_file_path, health_cache_key=health_cache_key
+                                    )
                                     self._db_execute(
                                         """UPDATE games
-                                           SET layout_version = 2, filename = ?, file_path = ?, size_bytes = ?, mtime = ?, health_cache_key = ?
+                                           SET layout_version = 2, filename = ?, file_path = ?, size_bytes = ?, mtime = ?,
+                                               health_cache_key = ?, analysis_cache_key = ?
                                            WHERE id = ?""",
                                         (
                                             info["filename"],
@@ -5218,6 +5312,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                                             info["size_bytes"],
                                             info["mtime"],
                                             health_cache_key,
+                                            analysis_cache_key,
                                             gid,
                                         ),
                                     )
@@ -5254,7 +5349,7 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                             identity_info.get("metadata_source") or "", identity_info.get("metadata_confidence") or 0,
                             identity_info.get("region_tag") or "", identity_info.get("revision_tag") or "",
                             identity_info.get("disc_number") or 0, identity_info.get("content_flags") or "",
-                            health_cache_key, existing_cover_file, gid,
+                            health_cache_key, analysis_json, analysis_cache_key, existing_cover_file, gid,
                         ))
                         existing_entry = existing_games.get(gid)
                         current_cover = existing_entry.get("cover_path") if existing_entry else None
@@ -5680,6 +5775,375 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
             "deleted_save_count": len(deleted_save_files),
             "deleted_cover_count": len(deleted_cover_files),
             "cleanup_warnings": cleanup_warnings,
+        }
+
+    def _select_launch_bios(self, game, game_file_path):
+        """실행 시 사용할 BIOS를 DB 판정 우선으로 선택하고 실제 경로까지 확인합니다."""
+        game_id = str(game.get("id") or "")
+        needed_bios = str(game.get("needed_bios") or "").strip()
+        if needed_bios:
+            found = self._find_runtime_bios_path(needed_bios, game_file_path=game_file_path, game_id=game_id)
+            return needed_bios, found
+
+        filename = str(game.get("filename") or "").lower()
+        raw_stem = os.path.splitext(os.path.basename(filename))[0].lower()
+        core = str(game.get("core") or "").lower()
+        platform = str(game.get("platform") or "").lower()
+        is_arcade = core in ("arcade", "fbneo", "mame", "mame2003", "mame2003_plus") or platform in ("arcade", "neo-geo", "neogeo")
+
+        candidates = []
+        if platform in ("neo-geo", "neogeo") or (is_arcade and raw_stem.startswith(("mslug", "kof", "samsho", "fatfur", "garou"))):
+            candidates = ["neogeo.zip"]
+        elif is_arcade and raw_stem.startswith(("olds", "kov", "orlegend", "dmnfrnt")):
+            candidates = ["pgm.zip"]
+        elif is_arcade and raw_stem.startswith(("bldyror", "brvblade", "sfex", "rvschool", "starglad", "strider2", "techromn", "jgts", "raiden2", "raidendx")):
+            candidates = ["acpsx.zip", "atluspsx.zip", "boardrom.zip"]
+        elif core == "psx" or platform == "ps1":
+            candidates = ["scph5501.bin", "scph1001.bin", "scph5500.bin", "scph5502.bin", "scph7001.bin"]
+        elif platform == "fds" or filename.endswith(".fds"):
+            candidates = ["disksys.rom"]
+        elif core == "segacd" or platform == "segacd":
+            candidates = ["bios_cd_u.bin", "bios_cd_j.bin", "bios_cd_e.bin"]
+        elif core == "pce" or platform == "pce":
+            candidates = ["syscard3.pce"]
+        elif core in ("saturn", "segasaturn") or platform == "saturn":
+            candidates = ["saturn_bios.bin", "mpr-17933.bin", "sega_101.bin"]
+        elif core == "3do" or platform == "3do":
+            candidates = ["3dobios.rom", "panafz10.bin", "panafz1.bin"]
+
+        for candidate in candidates:
+            found = self._find_runtime_bios_path(candidate, game_file_path=game_file_path, game_id=game_id)
+            if found:
+                return os.path.basename(found), found
+        return None, None
+
+    def _analysis_detail_cache_key(self, game, file_path, health_cache_key=None):
+        """상세 분석 캐시를 ROM 파일 상태와 현재 진단 캐시에 묶습니다."""
+        if not file_path or not os.path.isfile(file_path):
+            return ""
+        try:
+            st = os.stat(file_path)
+        except OSError:
+            return ""
+        payload = {
+            "id": str(game.get("id") or ""),
+            "core": str(game.get("core") or ""),
+            "platform": str(game.get("platform") or ""),
+            "game_code": str(game.get("game_code") or ""),
+            "health_cache_key": str(health_cache_key if health_cache_key is not None else (game.get("health_cache_key") or "")),
+            "path": os.path.realpath(file_path),
+            "size": int(st.st_size),
+            "mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))),
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _effective_play_status(game):
+        raw_status = str(game.get("play_status") or "untested").strip().lower()
+        if raw_status not in ("untested", "booted", "verified", "issue"):
+            raw_status = "untested"
+        current_key = str(game.get("health_cache_key") or "")
+        recorded_key = str(game.get("play_status_health_key") or "")
+        stale = raw_status != "untested" and current_key != recorded_key
+        return {
+            "status": "untested" if stale else raw_status,
+            "raw_status": raw_status,
+            "stale": bool(stale),
+            "updated_at": str(game.get("play_status_updated_at") or ""),
+            "user_id": int(game.get("play_status_user_id") or 0),
+            "last_booted_at": str(game.get("last_booted_at") or ""),
+        }
+
+    def _record_game_boot(self, game_id, user_id):
+        rows = self._db_query(
+            "SELECT id, COALESCE(health_cache_key, '') AS health_cache_key, "
+            "COALESCE(play_status, 'untested') AS play_status, "
+            "COALESCE(play_status_health_key, '') AS play_status_health_key, "
+            "COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
+            "COALESCE(play_status_user_id, 0) AS play_status_user_id, "
+            "COALESCE(last_booted_at, '') AS last_booted_at "
+            "FROM games WHERE id = ? AND COALESCE(deletion_status, 'active') = 'active'",
+            (game_id,),
+        )
+        if not rows:
+            return {"success": False, "error": "게임을 찾을 수 없습니다."}
+        game = rows[0]
+        current = self._effective_play_status(game)
+        now_str = _get_kst_now_str()
+        if current["status"] in ("verified", "issue"):
+            self._db_execute("UPDATE games SET last_booted_at = ? WHERE id = ?", (now_str, game_id))
+        else:
+            self._db_execute(
+                "UPDATE games SET play_status = 'booted', play_status_updated_at = ?, "
+                "play_status_user_id = ?, play_status_health_key = COALESCE(health_cache_key, ''), last_booted_at = ? WHERE id = ?",
+                (now_str, int(user_id or 0), now_str, game_id),
+            )
+        refreshed = self._db_query(
+            "SELECT COALESCE(health_cache_key, '') AS health_cache_key, COALESCE(play_status, 'untested') AS play_status, "
+            "COALESCE(play_status_health_key, '') AS play_status_health_key, COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
+            "COALESCE(play_status_user_id, 0) AS play_status_user_id, COALESCE(last_booted_at, '') AS last_booted_at FROM games WHERE id = ?",
+            (game_id,),
+        )
+        return {"success": True, "play": self._effective_play_status(refreshed[0] if refreshed else game)}
+
+    def _set_game_play_status(self, game_id, user_id, status):
+        status = str(status or "").strip().lower()
+        if status not in ("untested", "verified", "issue"):
+            return {"success": False, "error": "지원하지 않는 플레이 상태입니다."}
+        rows = self._db_query(
+            "SELECT id, COALESCE(health_cache_key, '') AS health_cache_key FROM games "
+            "WHERE id = ? AND COALESCE(deletion_status, 'active') = 'active'",
+            (game_id,),
+        )
+        if not rows:
+            return {"success": False, "error": "게임을 찾을 수 없습니다."}
+        now_str = _get_kst_now_str()
+        health_key = str(rows[0].get("health_cache_key") or "")
+        self._db_execute(
+            "UPDATE games SET play_status = ?, play_status_updated_at = ?, play_status_user_id = ?, play_status_health_key = ? WHERE id = ?",
+            (status, now_str, int(user_id or 0), health_key if status != "untested" else "", game_id),
+        )
+        refreshed = self._db_query(
+            "SELECT COALESCE(health_cache_key, '') AS health_cache_key, COALESCE(play_status, 'untested') AS play_status, "
+            "COALESCE(play_status_health_key, '') AS play_status_health_key, COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
+            "COALESCE(play_status_user_id, 0) AS play_status_user_id, COALESCE(last_booted_at, '') AS last_booted_at FROM games WHERE id = ?",
+            (game_id,),
+        )
+        return {"success": True, "play": self._effective_play_status(refreshed[0] if refreshed else rows[0])}
+
+    def _build_analysis_detail(self, game_id, user_id, is_admin=False):
+        rows = self._db_query(
+            "SELECT id, filename, file_path, title, game_code, core, platform, size_bytes, mtime, needed_bios, "
+            "COALESCE(health_status, 'unverified') AS health_status, COALESCE(missing_roms, '') AS missing_roms, "
+            "COALESCE(rom_crc32, '') AS rom_crc32, COALESCE(rom_md5, '') AS rom_md5, COALESCE(rom_sha1, '') AS rom_sha1, "
+            "COALESCE(serial_code, '') AS serial_code, COALESCE(normalized_title, '') AS normalized_title, "
+            "COALESCE(source_system, '') AS source_system, COALESCE(metadata_source, '') AS metadata_source, "
+            "COALESCE(metadata_confidence, 0) AS metadata_confidence, COALESCE(region_tag, '') AS region_tag, "
+            "COALESCE(revision_tag, '') AS revision_tag, COALESCE(disc_number, 0) AS disc_number, "
+            "COALESCE(content_flags, '') AS content_flags, COALESCE(health_cache_key, '') AS health_cache_key, "
+            "COALESCE(analysis_json, '') AS analysis_json, COALESCE(analysis_cache_key, '') AS analysis_cache_key, "
+            "COALESCE(play_status, 'untested') AS play_status, COALESCE(play_status_updated_at, '') AS play_status_updated_at, "
+            "COALESCE(play_status_user_id, 0) AS play_status_user_id, COALESCE(play_status_health_key, '') AS play_status_health_key, "
+            "COALESCE(last_booted_at, '') AS last_booted_at, COALESCE(deletion_status, 'active') AS deletion_status "
+            "FROM games WHERE id = ?",
+            (game_id,),
+        )
+        if not rows:
+            return {"success": False, "error": "게임을 찾을 수 없습니다."}
+        game = rows[0]
+        if str(game.get("deletion_status") or "active") != "active":
+            return {"success": False, "error": "삭제 대기 중인 게임입니다."}
+
+        db_path = str(game.get("file_path") or "")
+        file_path = db_path if db_path and os.path.isfile(db_path) else ""
+        if not file_path:
+            recovered = self._resolve_existing_rom_path(
+                game_id, filename=game.get("filename"), current_path=db_path,
+                core=game.get("core"), platform=game.get("platform"), update_db=False,
+            )
+            if recovered and os.path.isfile(recovered):
+                file_path = recovered
+
+        cache_key = self._analysis_detail_cache_key(game, file_path) if file_path else ""
+        cached_snapshot = None
+        if game.get("analysis_json"):
+            try:
+                parsed = json.loads(game.get("analysis_json") or "{}")
+                if isinstance(parsed, dict):
+                    cached_snapshot = parsed
+            except Exception:
+                cached_snapshot = None
+
+        analysis = cached_snapshot or {}
+        cache_reused = bool(cached_snapshot and cache_key and str(game.get("analysis_cache_key") or "") == cache_key)
+        analysis_error = ""
+        analysis_stale = bool(cached_snapshot and not cache_reused)
+
+        if file_path and not cache_reused:
+            try:
+                from rom_analysis_adapter import analyze_rom
+                fresh = analyze_rom(file_path)
+                analysis = _build_analysis_snapshot(fresh)
+                cache_key = self._analysis_detail_cache_key(game, file_path)
+                self._db_execute(
+                    "UPDATE games SET analysis_json = ?, analysis_cache_key = ? WHERE id = ?",
+                    (json.dumps(analysis, ensure_ascii=False, sort_keys=True), cache_key, game_id),
+                )
+                analysis_stale = False
+            except Exception as exc:
+                analysis_error = str(exc)
+                logger.debug(f"[{SELF_ID}] analysis detail refresh failed ({game_id}): {exc}")
+
+        bios_name = str((analysis or {}).get("needed_bios") or game.get("needed_bios") or "").strip()
+        bios_path = self._find_runtime_bios_path(bios_name, game_file_path=file_path, game_id=game_id) if bios_name else None
+        play = self._effective_play_status(game)
+        return {
+            "success": True,
+            "game_id": str(game_id),
+            "title": game.get("title") or game.get("filename") or str(game_id),
+            "file": {
+                "name": game.get("filename") or "",
+                "size_bytes": int(game.get("size_bytes") or 0),
+                "mtime": float(game.get("mtime") or 0),
+                "exists": bool(file_path),
+                "relative_path": game.get("filename") or "",
+                "server_path": file_path if is_admin else "",
+            },
+            "identity": {
+                "core": game.get("core") or "",
+                "platform": game.get("platform") or "",
+                "game_code": game.get("game_code") or "",
+                "serial_code": game.get("serial_code") or "",
+                "normalized_title": game.get("normalized_title") or "",
+                "region_tag": game.get("region_tag") or "",
+                "revision_tag": game.get("revision_tag") or "",
+                "disc_number": int(game.get("disc_number") or 0),
+                "content_flags": game.get("content_flags") or "",
+                "source_system": game.get("source_system") or "",
+                "metadata_source": game.get("metadata_source") or "",
+                "metadata_confidence": int(game.get("metadata_confidence") or 0),
+            },
+            "hashes": {
+                "crc32": game.get("rom_crc32") or "",
+                "md5": game.get("rom_md5") or "",
+                "sha1": game.get("rom_sha1") or "",
+            },
+            "health": {
+                "status": game.get("health_status") or "unverified",
+                "reason": game.get("missing_roms") or "",
+            },
+            "bios": {
+                "name": bios_name,
+                "available": bool(bios_path and os.path.isfile(bios_path)),
+            },
+            "play": play,
+            "analysis": analysis or {},
+            "analysis_cache_reused": cache_reused,
+            "analysis_stale": analysis_stale,
+            "analysis_error": analysis_error,
+        }
+
+    def _build_launch_plan(self, game_id, user_id):
+        """게임 실행 직전 ROM/BIOS/세이브/전달방식을 한 번에 계산합니다."""
+        rows = self._db_query(
+            """SELECT id, filename, file_path, title, game_code, core, platform, needed_bios,
+                      COALESCE(health_status, 'pass') AS health_status,
+                      COALESCE(missing_roms, '') AS missing_roms,
+                      COALESCE(deletion_status, 'active') AS deletion_status
+               FROM games WHERE id = ?""",
+            (game_id,),
+        )
+        if not rows:
+            return {"success": False, "launchable": False, "error": "게임을 찾을 수 없습니다."}
+
+        game = rows[0]
+        if str(game.get("deletion_status") or "active") != "active":
+            return {"success": True, "launchable": False, "blocked_reason": "삭제 대기 중인 게임입니다."}
+
+        root_file_path = str(game.get("file_path") or "")
+        if not os.path.isfile(root_file_path):
+            recovered = self._resolve_existing_rom_path(
+                game_id,
+                filename=game.get("filename"),
+                current_path=root_file_path,
+                core=game.get("core"),
+                platform=game.get("platform"),
+                update_db=False,
+            )
+            if recovered and os.path.isfile(recovered):
+                root_file_path = recovered
+            else:
+                return {
+                    "success": True,
+                    "launchable": False,
+                    "blocked_reason": "등록된 ROM 파일을 찾을 수 없습니다.",
+                    "health_status": "missing_file",
+                }
+
+        ext = os.path.splitext(root_file_path)[1].lower()
+        source_size = 0
+        try:
+            source_size = int(os.path.getsize(root_file_path))
+        except OSError:
+            source_size = 0
+
+        delivery_mode = "direct"
+        browser_unpack = False
+        output_filename = os.path.basename(game.get("filename") or root_file_path)
+        bundle_files = []
+
+        if ext == ".7z":
+            delivery_mode = "convert_7z"
+            browser_unpack = True
+            output_filename = os.path.splitext(output_filename)[0] + ".zip"
+        elif ext == ".zip":
+            delivery_mode = "zip"
+            browser_unpack = True
+        elif ext in (".cue", ".gdi", ".bin", ".iso", ".img"):
+            bundle_files = [candidate for candidate in _collect_disk_bundle_paths(root_file_path) if os.path.isfile(candidate)]
+            if len(bundle_files) > 1:
+                delivery_mode = "bundle_zip"
+                browser_unpack = True
+                output_filename = os.path.splitext(output_filename)[0] + ".zip"
+                try:
+                    source_size = sum(int(os.path.getsize(candidate)) for candidate in bundle_files)
+                except OSError:
+                    pass
+
+        rom_url = f"{ROUTE_BASE}/rom/{game_id}/{urllib.parse.quote(output_filename)}"
+
+        bios_name, bios_path = self._select_launch_bios(game, root_file_path)
+        bios_available = bool(bios_path and os.path.isfile(bios_path))
+        bios_size = 0
+        if bios_available:
+            try:
+                bios_size = int(os.path.getsize(bios_path))
+            except OSError:
+                bios_size = 0
+        bios_url = (
+            f"{ROUTE_BASE}/bios/{urllib.parse.quote(bios_name)}?game_id={urllib.parse.quote(str(game_id))}"
+            if bios_name and bios_available
+            else None
+        )
+
+        has_save = False
+        has_state = False
+        try:
+            user_saves_dir = self._get_user_saves_dir(user_id)
+            if os.path.isdir(user_saves_dir):
+                save_candidates = [
+                    os.path.join(user_saves_dir, f"{game_id}.sav"),
+                    os.path.join(user_saves_dir, f"{game_id}.state"),
+                    os.path.join(user_saves_dir, f"{game_id}_slot1.state"),
+                ]
+                has_save = any(os.path.isfile(path) and os.path.getsize(path) > 0 for path in save_candidates)
+                has_state = any(os.path.isfile(path) and os.path.getsize(path) > 0 for path in save_candidates[1:])
+        except OSError:
+            has_save = False
+            has_state = False
+
+        return {
+            "success": True,
+            "launchable": True,
+            "game_id": str(game_id),
+            "core": game.get("core") or "",
+            "platform": game.get("platform") or "",
+            "health_status": game.get("health_status") or "pass",
+            "missing_roms": game.get("missing_roms") or "",
+            "delivery_mode": delivery_mode,
+            "browser_unpack": bool(browser_unpack),
+            "rom_url": rom_url,
+            "rom_source_size": source_size,
+            "bundle_file_count": len(bundle_files),
+            "bios_name": bios_name or "",
+            "bios_required": bool(str(game.get("needed_bios") or "").strip() or game.get("health_status") == "bios_required"),
+            "bios_available": bios_available,
+            "bios_url": bios_url,
+            "bios_size": bios_size,
+            "has_save": 1 if has_save else 0,
+            "has_state": 1 if has_state else 0,
+            "state_url": f"{ROUTE_BASE}/state/{game_id}" if has_state else None,
         }
 
     # ------------------------------------------------------------------
@@ -6617,6 +7081,12 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                               COALESCE(g.revision_tag, '') AS revision_tag,
                               COALESCE(g.disc_number, 0) AS disc_number,
                               COALESCE(g.content_flags, '') AS content_flags,
+                              COALESCE(g.health_cache_key, '') AS health_cache_key,
+                              COALESCE(g.play_status, 'untested') AS play_status,
+                              COALESCE(g.play_status_health_key, '') AS play_status_health_key,
+                              COALESCE(g.play_status_updated_at, '') AS play_status_updated_at,
+                              COALESCE(g.play_status_user_id, 0) AS play_status_user_id,
+                              COALESCE(g.last_booted_at, '') AS last_booted_at,
                               COALESCE(u.is_favorite, 0) AS is_favorite,
                               u.last_played_at
                        FROM games g"""
@@ -6634,6 +7104,14 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                         if not g.get("missing_roms"):
                             g["missing_roms"] = "최신 rom-analyzer 재진단이 필요한 기존 상태입니다."
                     gid = g["id"]
+                    play = self._effective_play_status(g)
+                    g["play_status"] = play["status"]
+                    g["play_status_stale"] = 1 if play["stale"] else 0
+                    g["play_status_updated_at"] = play["updated_at"]
+                    g["last_booted_at"] = play["last_booted_at"]
+                    g.pop("health_cache_key", None)
+                    g.pop("play_status_health_key", None)
+                    g.pop("play_status_user_id", None)
                     # 목록 응답은 DB에 저장된 값만 사용한다. 실제 파일 상태는 목록 렌더 후
                     # runtime_state 액션이 비동기로 보정한다.
                     g["relative_path"] = g.get("filename") or ""
@@ -6671,6 +7149,18 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 }
 
                 return response
+
+            elif action == "launch_plan":
+                game_id = str(request.args.get("game_id", "") or "").strip()
+                if not game_id:
+                    return {"success": False, "launchable": False, "error": "game_id 파라미터가 필요합니다."}
+                return self._build_launch_plan(game_id, user_id)
+
+            elif action == "analysis_detail":
+                game_id = str(request.args.get("game_id", "") or "").strip()
+                if not game_id:
+                    return {"success": False, "error": "game_id 파라미터가 필요합니다."}
+                return self._build_analysis_detail(game_id, user_id, is_admin=is_admin)
 
             elif action == "runtime_state":
                 # 최초 목록 렌더와 분리된 실제 파일 상태 조회. rclone/GDrive 메타데이터
@@ -7133,6 +7623,19 @@ class BookoasisGamebooksMetadataProvider(BaseMetadataProvider):
                 except Exception as e:
                     logger.error(f"[{SELF_ID}] Homebrew search error: {e}")
                     return {"success": False, "error": "Homebrew Hub 검색에 실패했습니다."}
+
+            elif action == "record_boot":
+                game_id = str(request.args.get("game_id", "") or "").strip()
+                if not game_id:
+                    return {"success": False, "error": "game_id 파라미터가 누락되었습니다."}
+                return self._record_game_boot(game_id, user_id)
+
+            elif action == "set_play_status":
+                game_id = str(request.args.get("game_id", "") or "").strip()
+                status = str(request.args.get("status", "") or "").strip().lower()
+                if not game_id:
+                    return {"success": False, "error": "game_id 파라미터가 누락되었습니다."}
+                return self._set_game_play_status(game_id, user_id, status)
 
             elif action == "record_play":
                 game_id = request.args.get("game_id", "")

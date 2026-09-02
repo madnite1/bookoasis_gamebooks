@@ -608,10 +608,13 @@ class LibrarySyncEngineTests(unittest.TestCase):
                 analyze.assert_called_once_with(str(rom))
 
             first = provider._db_query(
-                "SELECT health_cache_key, health_status FROM games WHERE id = ?", ("game",)
+                "SELECT health_cache_key, health_status, analysis_json, analysis_cache_key FROM games WHERE id = ?", ("game",)
             )[0]
             self.assertTrue(first["health_cache_key"])
             self.assertEqual(first["health_status"], "pass")
+            self.assertTrue(first["analysis_json"])
+            self.assertTrue(first["analysis_cache_key"])
+            self.assertIn('"metadata_source": "rom-analyzer"', first["analysis_json"])
 
             with mock.patch("rom_analysis_adapter.analyze_rom") as analyze_again:
                 provider._refresh_health_statuses()

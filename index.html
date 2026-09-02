@@ -448,7 +448,11 @@
           <div class="gba-launch-progress">
             <div id="gbaLaunchProgressBar" class="gba-launch-progress-bar indeterminate"></div>
           </div>
-          <div class="gba-launch-meta" id="gbaLaunchMeta">대용량 ROM은 다운로드와 압축 해제에 시간이 걸릴 수 있습니다.</div>
+          <div class="gba-launch-meta" id="gbaLaunchMeta">실제 실행 단계를 확인하고 있습니다.</div>
+          <div class="gba-launch-actions" id="gbaLaunchActions" style="display: none;">
+            <button type="button" class="gba-btn gba-btn-primary" id="gbaLaunchRetryBtn"><i class="fa-solid fa-rotate-right"></i> 다시 시도</button>
+            <button type="button" class="gba-btn gba-btn-secondary" id="gbaLaunchCloseBtn">닫기</button>
+          </div>
         </div>
       </div>
     </div>
@@ -554,6 +558,29 @@
             <i class="fa-solid fa-upload"></i> 내 PC에서 직접 이미지 업로드
           </button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 개별 ROM 분석 상세 모달 -->
+  <div id="gbaAnalysisModal" class="gba-modal" style="display: none;">
+    <div class="gba-modal-box gba-analysis-modal-box">
+      <div class="gba-modal-header">
+        <h3><i class="fa-solid fa-microscope"></i> <span>ROM 분석 상세</span></h3>
+        <button class="gba-modal-close" id="gbaAnalysisCloseBtn" aria-label="닫기">&times;</button>
+      </div>
+      <div class="gba-modal-body gba-analysis-modal-body">
+        <div id="gbaAnalysisLoading" class="gba-analysis-loading">
+          <div class="gba-spinner"></div>
+          <strong>ROM 분석 정보를 확인하고 있습니다.</strong>
+          <span>저장된 상세 분석이 없는 기존 ROM은 처음 한 번만 다시 분석할 수 있습니다.</span>
+        </div>
+        <div id="gbaAnalysisError" class="gba-analysis-error" style="display: none;"></div>
+        <div id="gbaAnalysisContent" style="display: none;"></div>
+      </div>
+      <div class="gba-modal-footer gba-analysis-footer">
+        <span>정적 진단 통과는 실제 플레이 성공을 보증하지 않습니다.</span>
+        <button class="gba-btn gba-btn-secondary" id="gbaAnalysisOkBtn">닫기</button>
       </div>
     </div>
   </div>

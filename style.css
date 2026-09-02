@@ -3,18 +3,24 @@
    ========================================================================== */
 
 :root {
-  --gba-primary: #6366f1;
-  --gba-primary-hover: #4f46e5;
-  --gba-accent: #a855f7;
-  --gba-bg-main: #0f172a;
-  --gba-bg-card: #1e293b;
-  --gba-bg-card-hover: #334155;
-  --gba-border: #334155;
-  --gba-text-main: #f8fafc;
-  --gba-text-muted: #94a3b8;
-  --gba-danger: #ef4444;
-  --gba-success: #10b981;
-  --gba-gold: #fbbf24;
+  /* BookOasis 코어 테마를 우선 사용하고 독립 로드 시에만 기존 팔레트를 fallback으로 사용 */
+  --gba-primary: var(--app-accent, #6366f1);
+  --gba-primary-hover: var(--app-accent-hover, #4f46e5);
+  --gba-accent: var(--app-accent, #a855f7);
+  --gba-accent-soft: var(--app-accent-soft, rgba(99, 102, 241, 0.14));
+  --gba-bg-main: var(--app-bg-main, #0f172a);
+  --gba-bg-card: var(--app-bg-card, #1e293b);
+  --gba-bg-card-hover: var(--app-bg-card-hover, #334155);
+  --gba-surface: var(--app-input-bg, var(--app-bg-card, #1e293b));
+  --gba-border: var(--app-border, #334155);
+  --gba-border-light: var(--app-border-light, var(--app-border, #334155));
+  --gba-text-main: var(--app-text-primary, #f8fafc);
+  --gba-text-secondary: var(--app-text-secondary, var(--app-text-primary, #cbd5e1));
+  --gba-text-muted: var(--app-text-muted, #94a3b8);
+  --gba-danger: var(--app-danger, #ef4444);
+  --gba-success: var(--app-success, #10b981);
+  --gba-gold: var(--app-warning, #fbbf24);
+  --gba-shadow: var(--app-shadow, 0 20px 25px -5px rgba(0, 0, 0, 0.35));
 }
 
 .gba-app {
@@ -43,7 +49,7 @@
   justify-content: space-between;
   gap: 16px;
   padding: 16px 24px;
-  background: rgba(30, 41, 59, 0.85);
+  background: var(--gba-bg-card);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--gba-border);
   position: sticky;
@@ -61,7 +67,7 @@
   width: 42px;
   height: 42px;
   border-radius: 10px;
-  background: linear-gradient(135deg, #6366f1, #a855f7);
+  background: linear-gradient(135deg, var(--gba-primary), var(--gba-primary-hover));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -87,9 +93,7 @@
   font-size: 1.25rem;
   font-weight: 700;
   letter-spacing: -0.02em;
-  background: linear-gradient(to right, #ffffff, #cbd5e1);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: var(--gba-text-main);
 }
 
 .gba-subtitle {
@@ -98,9 +102,9 @@
 }
 
 .gba-user-badge {
-  background: rgba(99, 102, 241, 0.15);
-  border: 1px solid rgba(99, 102, 241, 0.3);
-  color: #a5b4fc;
+  background: var(--gba-accent-soft);
+  border: 1px solid var(--gba-border);
+  color: var(--gba-primary);
   font-size: 0.72rem;
   font-weight: 600;
   padding: 1px 7px;
@@ -174,7 +178,7 @@
 }
 
 .gba-input {
-  background: #0f172a;
+  background: var(--gba-surface);
   border: 1px solid var(--gba-border);
   border-radius: 8px;
   padding: 8px 12px 8px 36px;
@@ -226,7 +230,7 @@
 .gba-select {
   appearance: none;
   -webkit-appearance: none;
-  background: #0f172a;
+  background: var(--gba-surface);
   border: 1px solid var(--gba-border);
   color: #fff;
   padding: 8px 34px 8px 34px;
@@ -252,7 +256,7 @@
 }
 
 .gba-select option {
-  background: #0f172a;
+  background: var(--gba-surface);
   color: #fff;
   padding: 8px;
 }
@@ -309,7 +313,7 @@
 }
 
 .gba-btn-secondary {
-  background: #1e293b;
+  background: var(--gba-bg-card);
   color: #cbd5e1;
   border: 1px solid var(--gba-border);
 }
@@ -384,7 +388,7 @@
 .gba-card-cover-wrap {
   width: 100%;
   aspect-ratio: 1 / 1;
-  background: #0f172a;
+  background: var(--gba-surface);
   position: relative;
   overflow: hidden;
   cursor: pointer;
@@ -666,7 +670,7 @@
 }
 
 .gba-empty-state code {
-  background: #1e293b;
+  background: var(--gba-bg-card);
   padding: 2px 6px;
   border-radius: 4px;
   color: var(--gba-accent);
@@ -745,12 +749,13 @@
 }
 
 .gba-modal-box {
-  background: #1e293b;
+  background: var(--gba-bg-card);
+  color: var(--gba-text-main);
   border: 1px solid var(--gba-border);
   border-radius: 16px;
   width: 100%;
   max-width: 580px;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--gba-shadow);
   overflow: hidden;
 }
 
@@ -798,7 +803,7 @@
   overflow-y: auto;
   border: 1px solid var(--gba-border);
   border-radius: 8px;
-  background: #0f172a;
+  background: var(--gba-surface);
 }
 
 .gba-homebrew-item {
@@ -818,7 +823,7 @@
   height: 48px;
   object-fit: cover;
   border-radius: 6px;
-  background: #1e293b;
+  background: var(--gba-bg-card);
   flex: 0 0 48px;
 }
 
@@ -859,7 +864,7 @@
   margin: 0;
   font-size: 1.1rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--gba-text-main);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -890,7 +895,7 @@
   justify-content: flex-end;
   gap: 10px;
   padding: 14px 20px;
-  background: #0f172a;
+  background: var(--gba-surface);
   border-top: 1px solid var(--gba-border);
 }
 
@@ -912,7 +917,7 @@
 .gba-controls-sys-tabs {
   display: flex;
   gap: 6px;
-  background: #0f172a;
+  background: var(--gba-surface);
   padding: 4px;
   border-radius: 8px;
   border: 1px solid var(--gba-border);
@@ -966,7 +971,7 @@
   position: sticky;
   top: 0;
   z-index: 2;
-  background: #0f172a;
+  background: var(--gba-surface);
   padding: 10px 14px;
   color: #cbd5e1;
   font-weight: 600;
@@ -989,7 +994,7 @@
 
 .gba-controls-special-wrap {
   margin-top: 14px;
-  background: #0f172a;
+  background: var(--gba-surface);
   border: 1px solid var(--gba-border);
   border-radius: 8px;
   padding: 12px 14px;
@@ -1141,7 +1146,7 @@ kbd {
 }
 
 .gba-artwork-item {
-  background: #1e293b;
+  background: var(--gba-bg-card);
   border: 2px solid var(--gba-border);
   border-radius: 8px;
   overflow: hidden;
@@ -1162,12 +1167,12 @@ kbd {
   width: 100%;
   aspect-ratio: 3/4;
   object-fit: contain;
-  background: #0f172a;
+  background: var(--gba-surface);
 }
 
 .gba-artwork-meta {
   padding: 6px 8px;
-  background: #0f172a;
+  background: var(--gba-surface);
 }
 
 .gba-artwork-title {
@@ -1186,7 +1191,7 @@ kbd {
 }
 
 .gba-storage-info {
-  background: #0f172a;
+  background: var(--gba-surface);
   border: 1px solid var(--gba-border);
   border-radius: 8px;
   padding: 12px 16px;
@@ -1212,7 +1217,7 @@ kbd {
 
 /* Progress bar */
 .gba-progress-bar-wrap {
-  background: #0f172a;
+  background: var(--gba-surface);
   border-radius: 6px;
   height: 10px;
   overflow: hidden;
@@ -1329,7 +1334,7 @@ kbd {
 }
 
 .gba-player-btn {
-  background: #1e293b;
+  background: var(--gba-bg-card);
   border: 1px solid #334155;
   color: #cbd5e1;
   padding: 6px 10px;
@@ -1446,6 +1451,23 @@ kbd {
   color: #94a3b8;
   font-size: 0.8rem;
   line-height: 1.45;
+}
+
+.gba-launch-actions {
+  margin-top: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.gba-launch-overlay.is-error .gba-launch-spinner {
+  display: none;
+}
+
+.gba-launch-overlay.is-error .gba-launch-progress-bar {
+  animation: none;
+  transform: none;
 }
 
 @keyframes gba-launch-indeterminate {
@@ -1707,7 +1729,7 @@ kbd {
 }
 
 .gba-bios-table-container {
-  background: #0f172a;
+  background: var(--gba-surface);
   border: 1px solid var(--gba-border);
   border-radius: 10px;
   overflow-x: auto;
@@ -1861,4 +1883,352 @@ kbd {
 .gba-bios-page-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+
+/* --------------------------------------------------------------------------
+   ROM 분석 상세 / 실제 플레이 확인 - BookOasis core theme aware
+   -------------------------------------------------------------------------- */
+.gba-analysis-modal-box {
+  width: min(940px, 96vw);
+  max-width: 940px;
+}
+
+.gba-analysis-modal-body {
+  background: var(--gba-bg-main);
+}
+
+.gba-analysis-loading {
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  color: var(--gba-text-main);
+}
+
+.gba-analysis-loading .gba-spinner {
+  margin-bottom: 6px;
+}
+
+.gba-analysis-loading span,
+.gba-analysis-footer > span {
+  color: var(--gba-text-muted);
+  font-size: 0.82rem;
+}
+
+.gba-analysis-footer {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.gba-analysis-error,
+.gba-analysis-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--gba-border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  color: var(--gba-text-main);
+  background: var(--gba-bg-card);
+  line-height: 1.45;
+}
+
+.gba-analysis-error,
+.gba-analysis-notice.warn {
+  border-color: var(--gba-gold);
+}
+
+.gba-analysis-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 14px;
+}
+
+.gba-analysis-heading h4 {
+  margin: 0 0 4px;
+  font-size: 1.15rem;
+  color: var(--gba-text-main);
+}
+
+.gba-analysis-heading p {
+  margin: 0;
+  color: var(--gba-text-muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.gba-analysis-cache-note {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid var(--gba-border);
+  background: var(--gba-surface);
+  color: var(--gba-text-muted);
+  border-radius: 999px;
+  font-size: 0.72rem;
+}
+
+.gba-analysis-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.gba-analysis-summary {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--gba-border);
+  border-radius: 10px;
+  background: var(--gba-bg-card);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.gba-analysis-summary > span {
+  color: var(--gba-text-muted);
+  font-size: 0.72rem;
+}
+
+.gba-analysis-summary > strong {
+  color: var(--gba-text-main);
+  font-size: 0.92rem;
+}
+
+.gba-analysis-summary.good,
+.gba-analysis-summary.play-verified { border-color: var(--gba-success); }
+.gba-analysis-summary.good > strong,
+.gba-analysis-summary.play-verified > strong { color: var(--gba-success); }
+.gba-analysis-summary.warn,
+.gba-analysis-summary.play-booted { border-color: var(--gba-primary); }
+.gba-analysis-summary.warn > strong,
+.gba-analysis-summary.play-booted > strong { color: var(--gba-primary); }
+.gba-analysis-summary.bad,
+.gba-analysis-summary.play-issue { border-color: var(--gba-danger); }
+.gba-analysis-summary.bad > strong,
+.gba-analysis-summary.play-issue > strong { color: var(--gba-danger); }
+
+.gba-analysis-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.gba-analysis-section {
+  border: 1px solid var(--gba-border);
+  border-radius: 12px;
+  background: var(--gba-bg-card);
+  padding: 14px;
+  margin-bottom: 12px;
+  min-width: 0;
+}
+
+.gba-analysis-columns .gba-analysis-section {
+  margin-bottom: 0;
+}
+
+.gba-analysis-section-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  color: var(--gba-primary);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.gba-analysis-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.38fr) minmax(0, 0.62fr);
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--gba-border-light);
+  font-size: 0.8rem;
+}
+
+.gba-analysis-row:last-child {
+  border-bottom: 0;
+}
+
+.gba-analysis-row > span {
+  color: var(--gba-text-muted);
+}
+
+.gba-analysis-row > strong {
+  color: var(--gba-text-main);
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.gba-analysis-row > strong.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+.gba-analysis-chip-list {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.gba-analysis-chip {
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--gba-border);
+  background: var(--gba-surface);
+  color: var(--gba-text-secondary);
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.gba-analysis-empty {
+  color: var(--gba-text-muted);
+  font-weight: 500;
+}
+
+.gba-analysis-reason {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--gba-surface);
+  border: 1px solid var(--gba-border-light);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.gba-analysis-reason strong { color: var(--gba-text-main); }
+.gba-analysis-reason span { color: var(--gba-text-muted); }
+
+.gba-analysis-inline-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.gba-analysis-inline-grid .gba-analysis-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gba-analysis-inline-grid .gba-analysis-row > strong {
+  text-align: left;
+}
+
+.gba-analysis-warning-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.gba-analysis-warning-grid > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gba-analysis-warning-grid > div > strong {
+  font-size: 0.78rem;
+  color: var(--gba-text-muted);
+}
+
+.gba-play-verify-panel > p {
+  margin: 0 0 10px;
+  color: var(--gba-text-muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.gba-analysis-play-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.gba-analysis-play-actions .gba-btn.active {
+  border-color: var(--gba-primary);
+  color: var(--gba-primary);
+  background: var(--gba-accent-soft);
+}
+
+.gba-card-analysis-row {
+  margin-top: 6px;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 24px;
+}
+
+.gba-analysis-icon-btn {
+  width: 25px;
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 7px;
+  border: 1px solid var(--gba-border);
+  background: var(--gba-surface);
+  color: var(--gba-primary);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.gba-analysis-icon-btn:hover {
+  background: var(--gba-bg-card-hover);
+  border-color: var(--gba-primary);
+}
+
+.gba-play-badge.gba-play-booted {
+  background: var(--gba-accent-soft);
+  border: 1px solid var(--gba-primary);
+  color: var(--gba-primary);
+}
+
+.gba-play-badge.gba-play-verified {
+  border: 1px solid var(--gba-success);
+  color: var(--gba-success);
+  background: var(--gba-bg-card);
+}
+
+.gba-play-badge.gba-play-issue {
+  border: 1px solid var(--gba-danger);
+  color: var(--gba-danger);
+  background: var(--gba-bg-card);
+}
+
+@media (max-width: 760px) {
+  .gba-analysis-summary-grid,
+  .gba-analysis-columns,
+  .gba-analysis-warning-grid,
+  .gba-analysis-inline-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .gba-analysis-heading {
+    flex-direction: column;
+  }
+
+  .gba-analysis-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .gba-analysis-row > strong,
+  .gba-analysis-chip-list {
+    text-align: left;
+    justify-content: flex-start;
+  }
 }
